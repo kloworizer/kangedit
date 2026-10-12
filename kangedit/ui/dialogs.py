@@ -8,9 +8,9 @@ import threading
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
-                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-                               QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout)
+                               QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
 from ..autoedit import (FORMAT_PRESETS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
@@ -21,6 +21,7 @@ from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cach
 from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
 from ..fonts import ensure_qt_font, font_files, system_fonts
 from ..models import Project
+from .. import multicam
 
 FIT_MODES = {"fill": "Fill (crop to frame)", "fit": "Fit (black bars)", "blur": "Fit with blurred background"}
 
@@ -40,7 +41,17 @@ class AutoEditDialog(QDialog):
         self.setWindowTitle("Auto Edit — find the best moments")
         self.setMinimumWidth(520)
         self.project = project
-        lay = QVBoxLayout(self)
+        # The options scroll when the dialog is taller than the screen (the buttons stay in view).
+        outer = QVBoxLayout(self)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(body)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self._scroll, 1)
 
         # --- Format
         g = QGroupBox("Video format")
@@ -151,6 +162,8 @@ class AutoEditDialog(QDialog):
         self.list.setMaximumHeight(130)
         use_ids = set(selected_ids) if len(selected_ids) > 1 else set(project.footage)
         for f_ in project.footage.values():
+            if f_.is_image:      # pictures have no best moments: add them to the timeline by hand
+                continue
             it = QListWidgetItem(f"{f_.name}  ({f_.duration:.0f}s)")
             it.setData(Qt.UserRole, f_.id)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
@@ -158,14 +171,17 @@ class AutoEditDialog(QDialog):
             self.list.addItem(it)
         self.list.itemChanged.connect(lambda _: self._suggest_target())
         v.addWidget(self.list)
+        self.grp_footage = g
         lay.addWidget(g)
+        lay.addWidget(self._multicam_box(project))
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Create edit")
         bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
-        lay.addWidget(bb)
+        outer.addWidget(bb)
+        self._fit_screen()
 
         self.fmt_buttons.get(last.video_format, self.fmt_buttons["short"]).setChecked(True)
         # Restore the user's last values (they may have fine-tuned the preset).
@@ -182,6 +198,130 @@ class AutoEditDialog(QDialog):
         self.chk_bookends.setChecked(last.bookends)
         self._target_auto = last.video_format == "long"   # long-form length follows the footage
         self._suggest_target()
+
+    # ------------------------------------------------------------------ multicam
+    ANGLE_LABELS = ["Main angle", "Angle 2", "Angle 3", "Angle 4", "Not used"]
+
+    def _multicam_box(self, project: Project) -> QGroupBox:
+        g = QGroupBox("Multicam — several angles of the same moments")
+        v = QVBoxLayout(g)
+        self.chk_multi = QCheckBox("Sync the angles by their sound and show them together")
+        self.chk_multi.setToolTip("For two or more cameras (or a phone and a camera) recording the same scene: "
+                                  "their sound lines them up to the millisecond, the main angle is edited as "
+                                  "usual, and the other angles follow it on the video layers, cut at the same "
+                                  "moments, in the layout you choose.")
+        v.addWidget(self.chk_multi)
+        self.multi_body = QGroupBox()
+        self.multi_body.setFlat(True)
+        f = QFormLayout(self.multi_body)
+        f.setContentsMargins(0, 0, 0, 0)
+        self.angle_rows: dict[str, QComboBox] = {}
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        prev = (project.settings.multicam or {}).get("angles") or {}
+        videos = [x for x in project.footage.values() if not x.is_image and x.has_audio]
+        cams = list(dict.fromkeys(x.camera for x in videos if x.camera))
+        for r, x in enumerate(videos):
+            lbl = QLabel(x.name)
+            lbl.setToolTip(f"{x.path}\n{x.camera or 'unknown camera'}")
+            cb = QComboBox()
+            cb.addItems(self.ANGLE_LABELS)
+            if x.id in prev:
+                k = prev[x.id]
+            elif len(cams) > 1 and x.camera in cams:     # a guess: one angle per camera
+                k = min(4, cams.index(x.camera) + 1)
+            else:
+                k = 1
+            cb.setCurrentIndex(k - 1 if 1 <= k <= 4 else 4)
+            cb.currentIndexChanged.connect(self._angles_changed)
+            grid.addWidget(lbl, r, 0)
+            grid.addWidget(cb, r, 1)
+            self.angle_rows[x.id] = cb
+        f.addRow(grid)
+        last = project.settings.multicam or {}
+        self.cb_layout = _combo(multicam.TEMPLATES, last.get("template", "pip"))
+        self.cb_layout.currentIndexChanged.connect(
+            lambda: self.lbl_layout.setText(multicam.TEMPLATE_HINTS[self.cb_layout.currentData()]))
+        self.lbl_layout = QLabel(multicam.TEMPLATE_HINTS[self.cb_layout.currentData()])
+        self.lbl_layout.setWordWrap(True)
+        self.lbl_layout.setStyleSheet("color: #8b909a;")
+        self.cb_audio = QComboBox()
+        self._last_audio = last.get("audio", "main")
+        self.chk_covered = QCheckBox("Only use moments every angle recorded")
+        self.chk_covered.setChecked(last.get("covered", True))
+        f.addRow("Layout", self.cb_layout)
+        f.addRow(self.lbl_layout)
+        f.addRow("Sound", self.cb_audio)
+        f.addRow(self.chk_covered)
+        self.lbl_angles = QLabel("")
+        self.lbl_angles.setWordWrap(True)
+        self.lbl_angles.setStyleSheet("color: #e0b050;")
+        f.addRow(self.lbl_angles)
+        v.addWidget(self.multi_body)
+        self.chk_multi.toggled.connect(self._multi_toggled)
+        self.chk_multi.setChecked(bool(last.get("angles")) and len(videos) > 1)
+        self.chk_multi.setEnabled(len(videos) > 1)
+        if len(videos) < 2:
+            self.chk_multi.setToolTip("Import the recordings of two or more angles (with sound) first.")
+        self._multi_toggled(self.chk_multi.isChecked())
+        self._angles_changed()
+        return g
+
+    def _multi_toggled(self, on: bool):
+        self.multi_body.setVisible(on)
+        self.grp_footage.setVisible(not on)     # with multicam, the main angle's files are the ones edited
+        self._fit_screen()
+
+    def _fit_screen(self):
+        """As tall as the options need, up to the screen's height (then they scroll)."""
+        if not hasattr(self, "_scroll"):
+            return
+        body = self._scroll.widget()
+        body.adjustSize()
+        screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        want = body.sizeHint().height() + 70
+        self._scroll.setMinimumHeight(min(want - 60, max(200, screen.height() - 160)))
+        self.resize(max(self.width(), body.sizeHint().width() + 30), min(want, screen.height() - 60))
+
+    def _angles(self) -> dict[str, int]:
+        return {fid: cb.currentIndex() + 1 for fid, cb in self.angle_rows.items() if cb.currentIndex() < 4}
+
+    def _angles_changed(self):
+        angles = self._angles()
+        used = sorted(set(angles.values()))
+        n = max(used, default=1)
+        cur = self.cb_audio.currentData() or self._last_audio
+        self.cb_audio.blockSignals(True)
+        self.cb_audio.clear()
+        for k, label in multicam.audio_choices(n).items():
+            self.cb_audio.addItem(label, k)
+        self.cb_audio.setCurrentIndex(max(0, self.cb_audio.findData(cur)))
+        self.cb_audio.blockSignals(False)
+        problems = []
+        if 1 not in used:
+            problems.append("Choose at least one file as the main angle.")
+        if len(used) < 2:
+            problems.append("Give at least one file another angle (Angle 2…).")
+        elif used != list(range(1, n + 1)):
+            problems.append("Number the angles without gaps (Angle 2 before Angle 3).")
+        self.lbl_angles.setText(" ".join(problems))
+        self._suggest_target()
+
+    def multicam(self):
+        """The multicam setup, or None when it is off: {"angles", "template", "audio", "covered"}."""
+        if not self.chk_multi.isChecked():
+            return None
+        angles = self._angles()
+        if 1 not in angles.values() or len(set(angles.values())) < 2:
+            return None
+        return {"angles": angles, "template": self.cb_layout.currentData(),
+                "audio": self.cb_audio.currentData() or "main", "covered": self.chk_covered.isChecked()}
+
+    def accept(self):
+        if self.chk_multi.isChecked() and self.lbl_angles.text():
+            QMessageBox.information(self, "Multicam", self.lbl_angles.text())
+            return
+        super().accept()
 
     def _apply_format(self, key: str):
         preset = FORMAT_PRESETS[key]
@@ -223,6 +363,9 @@ class AutoEditDialog(QDialog):
         return "custom"
 
     def footage_ids(self) -> list[str]:
+        """The footage to edit: the checked files, or with multicam the main angle's files."""
+        if getattr(self, "chk_multi", None) is not None and self.chk_multi.isChecked():
+            return [fid for fid, k in self._angles().items() if k == 1]
         return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
                 if self.list.item(i).checkState() == Qt.Checked]
 

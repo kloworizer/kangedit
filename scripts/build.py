@@ -72,6 +72,13 @@ def self_test(exe: Path) -> None:
             sys.exit(f"Self-test of the built app failed (exit code {r.returncode}).")
 
 
+def copy_license() -> None:
+    """The license and third-party notices go with every build (the license requires its notice to)."""
+    target = DIST / "KangEdit.app" / "Contents" / "Resources" if sys.platform == "darwin" else DIST / "KangEdit"
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+        shutil.copy2(ROOT / name, target / name)
+
+
 def archive() -> Path:
     name = f"KangEdit-{version()}-{platform_tag()}"
     if sys.platform == "darwin":   # ditto keeps the framework symlinks and code signatures inside the .app
@@ -92,6 +99,7 @@ def main() -> None:
                     str(ROOT / "packaging" / "kangedit.spec")], cwd=ROOT, check=True)
     if "--no-test" not in sys.argv:
         self_test(app_executable())
+    copy_license()
     out = archive()
     print(f"Archive: {out} ({out.stat().st_size / 1e6:.0f} MB)")
     print(out)

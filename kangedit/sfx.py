@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import html
 import json
-import math
 import os
 import re
 import shutil
@@ -22,7 +21,7 @@ from typing import Optional
 import numpy as np
 
 from .config import sfx_dir
-from .models import SoundClip
+from .models import LOOP_CROSSFADE, SoundClip
 from .ffmpeg import ffmpeg_bin, ffprobe_bin, run
 
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac", ".opus", ".wma", ".aif", ".aiff")
@@ -102,37 +101,26 @@ def download(sound: OnlineSound, timeout: float = 30.0) -> str:
     return dst
 
 
-FIT_CROSSFADE = 2.0   # seconds of crossfade between the copies of a sound fit to the timeline
+FIT_CROSSFADE = LOOP_CROSSFADE   # seconds of crossfade between the repeats of a sound fit to the timeline
 
 
 def fit_to_timeline(x: SoundClip, file_len: float, total: float) -> list[SoundClip]:
-    """The sound laid over the whole timeline (0..total), from its in point to the end of its file: repeated
-    with crossfades when it is shorter than the timeline, cut with a fade out when it is longer.
-    The first copy keeps the sound's id."""
+    """The sound laid over the whole timeline (0..total), from its in point to the end of its file, as one
+    clip on one row: looping with crossfades between repeats when it is shorter than the timeline, cut with a
+    fade out when it is longer. Keeps the sound's id. (A list, for callers that replace sounds.)"""
     src_in = min(max(0.0, x.src_in), max(0.0, file_len - 0.05))
     unit = file_len - src_in
     if unit <= 0.05 or total <= 0.05:
         return [x]
-
-    def copy(start: float, dur: float, fi: float, fo: float) -> SoundClip:
-        return SoundClip(x.path, round(start, 3), round(src_in, 3), round(src_in + dur, 3), x.volume, x.name,
-                         round(fi, 3), round(fo, 3))
-
-    if unit >= total - 0.01:
-        out = [copy(0.0, total, x.fade_in, max(x.fade_out, min(FIT_CROSSFADE, total / 4)))]
-    else:
-        c = min(FIT_CROSSFADE, unit / 4)
-        step = unit - c
-        n = math.ceil((total - unit) / step - 1e-9) + 1
-        out = []
-        for i in range(n):
-            start = i * step
-            dur = min(unit, total - start)
-            last = i == n - 1
-            out.append(copy(start, dur, x.fade_in if i == 0 else c,
-                            max(x.fade_out, min(FIT_CROSSFADE, dur / 4)) if last else c))
-    out[0].id = x.id
-    return out
+    fade_out = round(max(x.fade_out, min(FIT_CROSSFADE, total / 4)), 3)
+    y = SoundClip(x.path, 0.0, round(src_in, 3), round(src_in + min(unit, total), 3), x.volume, x.name,
+                  x.fade_in, fade_out, x.duck, id=x.id)
+    if unit < total - 0.01:
+        if unit <= 2 * FIT_CROSSFADE + 0.05:   # too short to crossfade: one clip that ends with its file
+            return [y]
+        y.loop = round(unit, 3)
+        y.src_out = round(src_in + total, 3)
+    return [y]
 
 
 def duration(path: str) -> float:

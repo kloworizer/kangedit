@@ -91,28 +91,133 @@ def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox
     return f"[{inp}]{fg},pad={tw}:{th}:{p.pad_x}:{p.pad_y}:black,setsar=1[{out}]"
 
 
+# ----------------------------------------------------------------------------- rotation
+def split_rotation(deg: float) -> tuple[int, float]:
+    """A clockwise rotation as (quarter turns 0..3, remaining angle within ±45°).
+
+    Quarter turns rotate the source before it is fitted into the frame (a sideways phone clip fills the
+    frame upright); the remaining angle tilts the framed picture about the frame's centre."""
+    q = int(round(deg / 90.0))
+    return q % 4, float(deg - q * 90.0)
+
+
+def rotate_quarters(img: np.ndarray, q: int) -> np.ndarray:
+    return np.ascontiguousarray(np.rot90(img, -q)) if q % 4 else img
+
+
+def quarter_dims(sw: int, sh: int, q: int) -> tuple[int, int]:
+    return (sh, sw) if q % 2 else (sw, sh)
+
+
+def tilt(img: np.ndarray, deg: float) -> np.ndarray:
+    """Rotate a framed picture clockwise about its centre, keeping its size (black corners)."""
+    if abs(deg) < 0.01:
+        return img
+    h, w = img.shape[:2]
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -deg, 1.0)
+    return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def ffmpeg_quarters(q: int) -> str:
+    """Filter turning the source q quarter turns clockwise ("" for none)."""
+    return {1: "transpose=1", 2: "hflip,vflip", 3: "transpose=2"}.get(q % 4, "")
+
+
+def ffmpeg_tilt(deg: float, fill: str = "black") -> str:
+    if abs(deg) < 0.01:
+        return ""
+    return f"rotate={np.radians(deg):.6f}:ow=iw:oh=ih:c={fill}"
+
+
+# ----------------------------------------------------------------------------- overlay layers
+def overlay_place(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float = 0.0, box_h: float = 0.0,
+                  pan_x: float = 0.0, pan_y: float = 0.0) -> Placement:
+    """How an overlay picture is scaled and cropped for a tw x th frame: fitted inside the frame and scaled,
+    or (with a box) scaled to fill a box_w x box_h part of the frame (times scale) and cropped to it."""
+    if box_w > 0 and box_h > 0:
+        bw, bh = _even(box_w * scale * tw), _even(box_h * scale * th)
+        return place(sw, sh, bw, bh, "fill", 1.0, pan_x, pan_y)
+    s = min(tw / max(1, sw), th / max(1, sh)) * max(0.01, scale)
+    w, h = _even(sw * s), _even(sh * s)
+    return Placement(w, h, 0, 0, w, h, 0, 0)
+
+
+def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float = 0.0,
+                 box_h: float = 0.0) -> tuple[int, int]:
+    """Visible size of an overlay in a tw x th frame (see overlay_place)."""
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h)
+    return p.crop_w, p.crop_h
+
+
+def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float, box_w: float = 0.0,
+                  box_h: float = 0.0, pan_x: float = 0.0, pan_y: float = 0.0) -> np.ndarray:
+    """The overlay picture (RGBA) scaled (and cropped to its box) for a tw x th frame and rotated clockwise on
+    a transparent canvas just big enough for it."""
+    sh, sw = rgba.shape[:2]
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h, pan_x, pan_y)
+    img = cv2.resize(rgba, (p.scaled_w, p.scaled_h), interpolation=cv2.INTER_AREA if p.scaled_w < sw
+                     else cv2.INTER_LINEAR)
+    img = np.ascontiguousarray(img[p.crop_y:p.crop_y + p.crop_h, p.crop_x:p.crop_x + p.crop_w])
+    w, h = p.crop_w, p.crop_h
+    if abs(rotation) < 0.01:
+        return img
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), -rotation, 1.0)
+    cos, sin = abs(m[0, 0]), abs(m[0, 1])
+    rw, rh = int(np.ceil(h * sin + w * cos)), int(np.ceil(h * cos + w * sin))
+    m[0, 2] += rw / 2.0 - w / 2.0
+    m[1, 2] += rh / 2.0 - h / 2.0
+    return cv2.warpAffine(img, m, (rw, rh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                          borderValue=(0, 0, 0, 0))
+
+
+def composite(canvas: np.ndarray, layer: np.ndarray, cx: float, cy: float, alpha: float) -> None:
+    """Blend an RGBA (or BGRA) layer onto a 3- or 4-channel canvas of the same channel order, centred at
+    (cx, cy) in pixels, in place. alpha: extra opacity 0..1."""
+    th, tw = canvas.shape[:2]
+    lh, lw = layer.shape[:2]
+    x0, y0 = int(round(cx - lw / 2.0)), int(round(cy - lh / 2.0))
+    ax0, ay0, ax1, ay1 = max(0, x0), max(0, y0), min(tw, x0 + lw), min(th, y0 + lh)
+    if ax1 <= ax0 or ay1 <= ay0 or alpha <= 0:
+        return
+    src = layer[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0]
+    a = src[..., 3:4].astype(np.float32) * (alpha / 255.0)
+    dst = canvas[ay0:ay1, ax0:ax1, :3]
+    dst[:] = (src[..., :3].astype(np.float32) * a + dst.astype(np.float32) * (1.0 - a) + 0.5).astype(np.uint8)
+
+
+def box_rect(tw: int, th: int, box: tuple) -> tuple[int, int, int, int]:
+    """(x, y, width, height) in pixels of a (centre x, centre y, width, height) box given in parts of a tw x th
+    frame; even sizes, kept inside the frame."""
+    cx, cy, bw, bh = box
+    w, h = min(tw, _even(bw * tw)), min(th, _even(bh * th))
+    x = int(round(min(max(0.0, cx * tw - w / 2), tw - w)))
+    y = int(round(min(max(0.0, cy * th - h / 2), th - h)))
+    return x, y, w, h
+
+
+def pan_for_point(cx: float, cy: float, sw: int, sh: int, tw: int, th: int, box_w: float, box_h: float,
+                  scale: float = 1.0, at_y: float = 0.42) -> tuple[float, float]:
+    """pan_x / pan_y that put the point (cx, cy, parts of the picture) at the middle of a box crop (a face a
+    bit above the middle)."""
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h)
+
+    def offset(centre: float, full: int, win: int, at: float) -> float:
+        if full <= win:
+            return 0.0
+        return float(np.clip(2.0 * (centre * full - at * win) / (full - win) - 1.0, -1.0, 1.0))
+
+    return offset(cx, p.scaled_w, p.crop_w, 0.5), offset(cy, p.scaled_h, p.crop_h, at_y)
+
+
 # ----------------------------------------------------------------------------- zoom to a face
 FACE_SIZES = {"medium": 0.22, "close": 0.34, "extreme": 0.5}   # face height as a part of the frame height
 
 
 def find_face(frames: list[np.ndarray]) -> Optional[tuple[float, float, float]]:
-    """The main face over a few RGB frames of a clip: (centre x, centre y, height), as parts of the frame.
-    Uses the biggest face of each frame and the median over frames (steadier than one frame)."""
-    from .analysis import _faces
-    cascade = _faces()
-    if cascade is False:
-        return None
-    found = []
-    for img in frames:
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        h, w = gray.shape
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(max(16, h // 30),) * 2)
-        if len(faces):
-            x, y, fw, fh = max(faces, key=lambda r: r[2] * r[3])
-            found.append(((x + fw / 2) / w, (y + fh / 2) / h, fh / h))
-    if not found:
-        return None
-    return tuple(float(v) for v in np.median(np.asarray(found), axis=0))
+    """The main face over a few RGB frames of a clip: (centre x, centre y, height), as parts of the frame
+    (see faces.main_face)."""
+    from .faces import main_face
+    return main_face(frames)
 
 
 def face_framing(face: tuple[float, float, float], sw: int, sh: int, tw: int, th: int, mode: str,

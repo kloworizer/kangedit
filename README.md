@@ -12,12 +12,14 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 - [Install and run](#install-and-run)
 - [Quick start](#quick-start)
 - [Keyboard and mouse](#keyboard-and-mouse)
+- [Video layers and multicam](#video-layers-and-multicam)
 - [Sound effects](#sound-effects)
 - [Official camera LUTs](#official-camera-luts)
 - [Where files are stored](#where-files-are-stored)
 - [Troubleshooting](#troubleshooting)
 - [Development and releases](#development-and-releases)
 - [Project layout](#project-layout)
+- [License](#license)
 - [Third-party software](#third-party-software)
 
 ---
@@ -47,6 +49,14 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Media list views** | The **☰** / **▦** buttons above the Media list switch between the detail view (duration, format, camera, log profile, status) and a thumbnail grid. In the grid, move the mouse across a thumbnail to scrub through the clip; Ctrl+wheel resizes the thumbnails. |
 | **Recent projects** | *File → Open recent* lists the last 10 projects you opened or saved. |
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
+| **Multicam** | Two or more cameras (or a phone and a camera) on the same scene: turn on *Multicam* in ✨ Auto Edit and give each file its angle. The angles are synced by their sound (onset matching over the whole recording, then sample-accurate matching in windows across it, with clock drift corrected), the main angle is edited as usual and the others follow on the video layers, cut at the same moments. Layouts: picture in picture, main video + talking cam, stacked, side by side, 2 × 2 grid; boxes are cropped around each angle's face. The angles keep in sync as you trim, slip, split or swap moments; *Tools → Multicam layout* changes the layout later. |
+| **Images** | Import JPG, PNG, GIF, BMP, WebP and TIFF pictures along with your footage. On the main track an image is a 5-second clip (trim it to any length); an animated GIF loops; PNG transparency is kept on video layers. |
+| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. |
+| **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
+| **Lane heights and zoom** | Drag the bottom edge of the video track, the video layers or the sound lane to make them taller (double-click the edge to reset), or use **↕ Lanes** (sliders and *Fit to panel*). **⇔ Fit** (Shift+Z) zooms so the whole edit, every lane included, fits the width; **− / +** (Ctrl+− / Ctrl+=) zoom out / in. |
+| **Used in the edit** | The Media list's **In edit** column and a green **✓** on the thumbnails show which footage the timeline uses, and how many times. |
+| **Auto ducking** | Music turns down by itself while the clips have speech or sound and comes back up in between (sidechain compression in the preview mix and the export). Music added from the NCS list is ducked; switch it on for any sound in the **Sounds** tab or the sound's right-click menu, and set how far it drops (*Duck by*, 12 dB by default). |
+| **Updates** | *Help → Check for updates…* looks for a newer release on GitHub; KangEdit also checks once a day at startup (*Help → Check for updates at startup*). A packaged build downloads its new version, checks it against the release's checksums and restarts with it; a source copy replaces its files and reinstalls its packages; a git checkout runs `git pull`. |
 
 ### Color
 
@@ -57,6 +67,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Official camera LUTs** | Use the makers' own conversion LUTs (DJI D-Log M, Sony, Panasonic, Fujifilm, Nikon, ARRI…) instead of the built-in curves. See [Official camera LUTs](#official-camera-luts). |
 | **LUTs (.cube)** | Import 1D/3D `.cube` LUTs (or the `.zip` they come in) as a log conversion or as a creative look with a strength slider. |
 | **Exposure & color** | Exposure, contrast, highlights, shadows, temperature, tint, saturation, vibrance. **Auto** sets exposure, white balance and contrast. *Auto color all clips* runs in the background with progress and Cancel. Preview and export share the same color math. |
+| **Processing order** | The industry order: ① log curve and gamut to scene-linear Rec.709 (or the conversion LUT, with exposure and white balance applied before it on the log signal) → ② exposure and white balance in linear light → ③ contrast, shadows and highlights in stops around middle grey → ④ saturation and vibrance in linear light → ⑤ output tone map (filmic or clip) → ⑥ creative look LUT (expects Rec.709) at its strength → ⑦ halation and sharpening. |
 
 ### Captions
 
@@ -171,6 +182,8 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Shift+Z | Fit the timeline |
+| Ctrl+Shift+R | Reset the layout (*View → Reset layout*) |
+| Ctrl+− / Ctrl+= | Zoom the timeline out / in |
 | Ctrl+Shift+A | Auto Edit… |
 | Ctrl+Shift+B | Color adjustments in the viewer on / off |
 | F1 | Shortcut list |
@@ -185,8 +198,87 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | Drag / drag edges of a sound | Move / trim the sound |
 | Right-click a sound | Volume, fade in / out, fit to timeline, move to the playhead, delete |
 | Ctrl+wheel | Zoom |
+| Shift+wheel | Scroll the lanes up / down (when they are taller than the panel) |
+| Drag a lane's bottom edge | Make the video track, the video layers or the sound lane taller |
+| Drag footage from Media | Onto a video layer: an overlay there · onto the main track: a clip at that cut |
+| Drag a layer clip | Move it in time, or up / down to another layer; drag its edges to trim |
+
+| Mouse on the viewer | Action |
+|---|---|
+| Drag a title or a layer clip | Place it |
+| Wheel over the selected layer clip | Resize it |
 
 On macOS, use ⌘ where this table says Ctrl.
+
+---
+
+## Video layers and multicam
+
+The lanes **V2, V3…** above the main track lay pictures on top of the edit: picture in picture, a logo, B-roll,
+an image, a second camera angle. Higher layers are in front of lower ones.
+
+**Add something to a layer**
+
+- Drag footage or an image from the **Media** panel onto a layer. (Dropped on the main track, it becomes a clip
+  there instead, at the nearest cut.)
+- Or right-click footage in Media → *Add on a video layer at the playhead*, or right-click an empty layer →
+  *Add the selected media here*.
+- New videos start as picture in picture in the bottom-right corner, images in the middle at half size. A layer
+  that is busy at that time sends the new clip to the next free layer.
+- More layers: right-click an empty part of a layer → *Add a video layer* (up to 8), or *View → Add a video
+  layer*.
+
+**Place it**
+
+- Drag the clip in the **viewer** to move it (it snaps to the centre lines); the mouse wheel over the selected
+  clip resizes it.
+- The **🧩 Layer** tab (double-click the clip, or select it) has one-click positions (full frame, centre and the
+  four picture-in-picture corners), X / Y, size, rotation (⟲ / ⟳ 90°), opacity, fade in / out, start, length,
+  layer and the clip's own volume.
+- Clips cropped to fill a box (the multicam layouts) also get **Crop X / Y**, to choose which part of the picture
+  fills it.
+
+**Time it**
+
+- On the timeline, drag a layer clip to move it in time, or up / down to another layer; drag its edges to trim.
+  It snaps to the playhead, the cuts and other layer clips.
+- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, fades, layer
+  up / down and *Delete*.
+- A layer clip's sound is mixed in at its own volume (0 % mutes it). PNG transparency is kept.
+
+**Multicam: several cameras of the same moments**
+
+1. Import every camera's files (each needs its own sound).
+2. In **✨ Auto Edit**, tick *Multicam*, and give each file its angle: *Main angle*, *Angle 2*, *Angle 3*,
+   *Angle 4* (KangEdit guesses one angle per camera model).
+3. Pick a **layout**, whose **sound** to use, and whether to keep to moments every angle recorded, then
+   *Create edit*.
+
+The angles are synced by their sound: first by matching where the loudness rises over the whole recordings
+(which works with different microphones and levels), then sample by sample in pieces spread across them, which
+also corrects the slow clock drift between cameras. The main angle is edited as usual and every other angle is
+cut at exactly the same moments on the layers above. The status bar shows each angle's offset; an angle whose
+sound doesn't match is left out with a warning.
+
+| Layout | |
+|---|---|
+| Picture in picture | The main angle fills the frame; the others are small, whole pictures in the corners. |
+| Main video + talking cam | Landscape: a square box in the corner, cropped around the speaker's face. Vertical / square: the main angle on top, the speaker below. |
+| Stacked, top / bottom | A full-width band per angle, each cropped around its subject (for 9:16). |
+| Side by side | A full-height column per angle (for 16:9). |
+| Grid (2 × 2) | Up to four angles. |
+
+Two angles take the main track and one layer, three angles two layers, and so on: in the boxed layouts the main
+angle's clips are shown in their box on the main track itself.
+
+The angles are **linked** to the main clip they were cut with (🔗 on the layer clip). Trims, slips, splits,
+*Other moment*, a new hook and reordering on the main track re-time them, and the angle clips are handles on the
+same group: drag one to slip every angle together, drag its edges to trim them all, press **R** with it
+selected for another moment. Positions you changed by hand are kept. **🔗 Link** in the timeline toolbar
+(Ctrl+L, also in the right-click menus and the Layer tab) unlinks the selected clip's angles, or a selected
+angle, so they can be moved and trimmed on their own; linking them again puts them back in sync. *Tools → Multicam
+layout* (or a layer clip's right-click menu) switches to another layout later; the **− / +** auto edit buttons
+regenerate the edit with its angles.
 
 ---
 
@@ -199,13 +291,13 @@ The **Sounds** tab searches [MyInstants](https://www.myinstants.com), a large co
 - The **Library** list holds every sound you added or imported. Drag one onto the timeline, or add it at the playhead.
 - **Import…** adds your own audio files (MP3, WAV, OGG, M4A, FLAC…). You can also drop audio files straight onto the timeline.
 
-Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*), each with its own fade in and fade out (right-click → *Fade in* / *Fade out*, or the sliders in the **Sounds** tab). *Fit to timeline* lays a sound over the whole edit: a shorter sound is repeated with 2-second crossfades, a longer one is cut to the edit's length with a fade out.
+Sound effects are mixed into the preview and the export at their own volume (right-click → *Volume*), each with its own fade in and fade out (right-click → *Fade in* / *Fade out*, or the sliders in the **Sounds** tab). *Fit to timeline* lays a sound over the whole edit as one clip: a shorter sound loops with 2-second crossfades between repeats (dashed lines on the clip), a longer one is cut to the edit's length with a fade out.
 
 > MyInstants sounds are uploaded by its users and may be copyrighted. Make sure you're allowed to use a sound before you publish a video with it.
 
 ### Background music (NCS)
 
-At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume. **▶ Preview** (or double-click a track) streams it so you can listen first without downloading it, and **■ Stop** stops it; previews also stop when the timeline starts playing. **YouTube** opens the track in your browser.
+At the top of the **Sounds** tab, pick the kind of video (Vlog, Cinematic, Aftermovie / party, Travel, Chill, Gaming / action) for suggested [NoCopyrightSounds](https://www.youtube.com/@NoCopyrightSounds) tracks, or paste any YouTube link. **♪ Add to timeline** downloads the track with [yt-dlp](https://github.com/yt-dlp/yt-dlp), extracts its sound to an .mp3 in your sound library, and lays it under the whole edit at 50% volume, auto-ducked under the clips' sound. **▶ Preview** (or double-click a track) streams it so you can listen first without downloading it, and **■ Stop** stops it; previews also stop when the timeline starts playing. **YouTube** opens the track in your browser.
 
 NCS music is free to use in videos as long as the description credits it: the credit is copied to the clipboard when you add a track. Music from other YouTube channels needs its owner's permission.
 
@@ -331,6 +423,11 @@ kangedit/
   camera.py             camera identification and log-profile choice
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
+  images.py             still images and animated GIFs as footage
+  sync.py               syncing recordings by their sound (onset envelope + GCC-PHAT, drift fit)
+  multicam.py           multicam layouts and keeping the angles in step with the edit
+  faces.py              face detection (YuNet model in assets/) for Zoom to face and best-moment scoring
+  updater.py            update check and install from the GitHub releases
   export.py             FFmpeg filtergraph rendering (+ preview audio mix)
   preview.py            background preview engine: decode thread + render pool, read-ahead, pre-roll, transitions
   decoder.py            PyAV frame-accurate decoding
@@ -338,14 +435,32 @@ kangedit/
   proxy.py              proxy generation (GPU decode/encode with CPU fallback)
   models.py             project model, undo, save/load (.kgproj)
   tasks.py              background task queue
-  ui/                   PySide6 interface: viewer, timeline, media bin, inspector, captions,
-                        sounds, dialogs
+  ui/                   PySide6 interface: viewer, timeline, media bin, inspector, video layers,
+                        captions, sounds, dialogs
 ```
+
+---
+
+## License
+
+KangEdit is free to use, change and share under the [MIT License with the Commons Clause](LICENSE).
+
+| | |
+|---|---|
+| **Allowed** | Using it for anything: personal videos, professional and client work, monetized YouTube / TikTok / Instagram channels, schools, companies. Changing it, and sharing it or your changed version for free (with the license). The videos you make with it are yours. |
+| **Not allowed** | Selling KangEdit: selling copies or a changed version of it, charging for it as part of a product, or offering a paid service (hosting, support, consulting) whose value comes mainly from KangEdit. |
+
+To sell KangEdit or build a paid product or service on it, ask for a separate license: esha@angkasa.dev.
+
+The Commons Clause makes this "source available" rather than open source in the OSI sense. Third-party software
+used by KangEdit keeps its own license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
 ## Third-party software
 
 KangEdit is written in Python and uses [PySide6 / Qt](https://www.qt.io/qt-for-python), [NumPy](https://numpy.org), [OpenCV](https://opencv.org), [PyAV](https://pyav.org) and [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (OpenAI Whisper models via CTranslate2).
+
+Face detection uses the [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) model by Shiqi Yu et al. (MIT licence), included as `kangedit/assets/face_detection_yunet_2023mar.onnx`.
 
 FFmpeg isn't included in this repository. When needed, setup downloads static GPL builds from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (Windows, Linux) or [Martin Riedl's build server](https://ffmpeg.martin-riedl.de/) (macOS). Those builds are covered by FFmpeg's own license.

@@ -330,37 +330,125 @@ def _to_display(lin: np.ndarray, log_profile: str, tonemap: str) -> np.ndarray:
     return np.power(disp_lin, 1.0 / 2.4)
 
 
-def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonemap: str = "filmic") -> np.ndarray:
-    """rgb: (..., 3) float in 0..1 (gamma-encoded signal). Returns graded display RGB 0..1."""
-    rgb = np.asarray(rgb, dtype=np.float32)
-    shape = rgb.shape
-    x = rgb.reshape(-1, 3)
-    log_profile = effective_profile(log_profile)
+# The grade follows the order colorists use (scene-referred, then display-referred):
+#   1. input transform: the camera's log curve and gamut -> scene-linear Rec.709. With a conversion LUT,
+#      exposure and white balance are applied before it, on the log signal (as an Offset correction is
+#      placed before the LUT node), so the LUT receives a correctly exposed, neutral image;
+#   2. primary balance in linear light: exposure (stops) and white balance (channel gains);
+#   3. tone: contrast, shadows and highlights in stops around middle grey (18 %), before the output
+#      transform, so pushes roll off in the tone map instead of clipping;
+#   4. saturation and vibrance in linear light, around Rec.709 luminance;
+#   5. output transform: filmic tone map (or a plain clip) to the Rec.709 display signal;
+#   6. creative look LUT, which expects a Rec.709 display image, blended by its strength;
+#   7. (apply_spatial) halation and sharpening on the finished picture.
+# Footage that is already a display image (standard Rec.709, or converted by a LUT) has no scene-linear
+# range above 1: its tone controls work on the display signal with a curve that keeps black and white.
 
-    lin = _to_linear(x, log_profile)
-    lin = lin * np.float32(2.0 ** grade.exposure)
-    if grade.temperature or grade.tint:
-        lin = lin * wb_gains(grade.temperature, grade.tint)
-    d = _to_display(lin, log_profile, tonemap).astype(np.float32)
+MID_GREY = 0.18
+LOG_STOP = 0.075     # log signal per stop for an unknown camera curve (S-Log3 0.074, V-Log 0.073, D-Log 0.08)
+_GRID = np.linspace(0.0, 1.0, 4096, dtype=np.float64)
+_curve_tables: dict[str, np.ndarray] = {}
 
+
+def _decode_table(profile: str) -> Optional[np.ndarray]:
+    """Linear value of each _GRID signal level for a built-in log curve (camera gamut), or None when it
+    doesn't rise steadily (then it can't be inverted)."""
+    if profile not in _curve_tables:
+        p = LOG_PROFILES[profile]
+        sig = (_GRID * 876.0 + 64.0) / 1023.0 if p.domain == "cv" else _GRID
+        lin = np.maximum.accumulate(np.asarray(p.decode(sig), dtype=np.float64))
+        _curve_tables[profile] = lin if lin[-1] > lin[0] else None
+    return _curve_tables[profile]
+
+
+def _balance_log(x: np.ndarray, grade: Grade, base: str) -> np.ndarray:
+    """Exposure and white balance on a log signal, before a conversion LUT. With the camera's curve known,
+    the signal is decoded, multiplied and encoded again (exact); otherwise each stop is LOG_STOP of signal."""
+    if not grade.exposure and not grade.temperature and not grade.tint:
+        return x
+    gains = (2.0 ** grade.exposure) * wb_gains(grade.temperature, grade.tint).astype(np.float64)
+    table = _decode_table(base) if base in LOG_PROFILES else None
+    if table is None:
+        return (x + np.float32(LOG_STOP) * np.log2(gains).astype(np.float32)).astype(np.float32)
+    out = np.empty_like(x)
+    for c in range(3):
+        lin = np.interp(x[:, c], _GRID, table) * gains[c]
+        out[:, c] = np.interp(lin, table, _GRID)
+    return out
+
+
+def _tone_scene(lin: np.ndarray, grade: Grade) -> np.ndarray:
+    """Contrast (pivot: middle grey), shadows and highlights, in stops, on scene-linear RGB."""
+    if not (grade.contrast or grade.shadows or grade.highlights):
+        return lin
+    lin = np.maximum(lin, 0.0)
+    stops = np.log2(np.maximum(lin, 1e-7) / MID_GREY)
+    if grade.contrast:
+        stops = stops * np.float32(2.0 ** (grade.contrast / 100.0))
+    if grade.shadows:      # up to ±2 stops, fading out above middle grey
+        stops = stops + np.float32(grade.shadows / 50.0) / (1.0 + np.exp((stops + 1.5) * 1.6))
+    if grade.highlights:   # up to ±2 stops, fading in from 1.5 stops over middle grey
+        stops = stops + np.float32(grade.highlights / 50.0) / (1.0 + np.exp(-(stops - 1.5) * 1.6))
+    return np.where(lin > 0, MID_GREY * np.exp2(stops), 0.0).astype(np.float32)
+
+
+def _tone_display(d: np.ndarray, grade: Grade) -> np.ndarray:
+    """Shadows, highlights and contrast on a display signal (0..1), keeping black and white in place."""
     if grade.shadows:
-        a = grade.shadows / 100.0 * 1.5
-        d = d + a * d * (1.0 - d) ** 2
+        d = d + (grade.shadows / 100.0 * 1.5) * d * (1.0 - d) ** 2
     if grade.highlights:
-        a = grade.highlights / 100.0 * 1.5
-        d = d + a * d * d * (1.0 - d)
+        d = d + (grade.highlights / 100.0 * 1.5) * d * d * (1.0 - d)
     if grade.contrast:
         d = np.clip(d, 0.0, 1.0)
         k = 2.0 ** (grade.contrast / 100.0)
-        p = 0.45
+        p = MID_GREY ** (1.0 / 2.4)            # middle grey on the display
         d = np.where(d < p, p * (d / p) ** k, 1.0 - (1.0 - p) * ((1.0 - d) / (1.0 - p)) ** k)
-    if grade.saturation != 100.0 or grade.vibrance:
-        luma = (d @ _LUMA)[:, None]
-        sat = grade.saturation / 100.0
-        if grade.vibrance:
-            cur = np.max(d, axis=1, keepdims=True) - np.min(d, axis=1, keepdims=True)
-            sat = sat * (1.0 + grade.vibrance / 100.0 * (1.0 - np.clip(cur * 1.5, 0.0, 1.0)))
-        d = luma + (d - luma) * sat
+    return d
+
+
+def _saturate(lin: np.ndarray, grade: Grade) -> np.ndarray:
+    """Saturation and vibrance in linear light around Rec.709 luminance (hue and brightness kept)."""
+    if grade.saturation == 100.0 and not grade.vibrance:
+        return lin
+    luma = (lin @ _LUMA)[:, None]
+    sat = np.float32(grade.saturation / 100.0)
+    if grade.vibrance:   # stronger on muted colours than on already saturated ones
+        hi = np.max(lin, axis=1, keepdims=True)
+        cur = (hi - np.min(lin, axis=1, keepdims=True)) / np.maximum(hi, 1e-6)
+        sat = sat * (1.0 + np.float32(grade.vibrance / 100.0) * (1.0 - np.clip(cur * 1.5, 0.0, 1.0)))
+    return luma + (lin - luma) * sat
+
+
+def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonemap: str = "filmic") -> np.ndarray:
+    """rgb: (..., 3) float in 0..1 (gamma-encoded signal). Returns graded display RGB 0..1 (see the order
+    above)."""
+    rgb = np.asarray(rgb, dtype=np.float32)
+    shape = rgb.shape
+    x = rgb.reshape(-1, 3)
+    entry = lutlib.LUT_ONLY.get(log_profile)
+    base = entry.base if entry is not None else ""
+    profile = effective_profile(log_profile)
+
+    if profile in LOG_PROFILES:                                  # scene-referred
+        lin = _to_linear(x, profile)
+        lin = lin * np.float32(2.0 ** grade.exposure)
+        if grade.temperature or grade.tint:
+            lin = lin * wb_gains(grade.temperature, grade.tint)
+        lin = _saturate(_tone_scene(lin, grade), grade)
+        d = _to_display(lin, profile, tonemap).astype(np.float32)
+    else:                                                        # display-referred
+        if is_lut_profile(profile):
+            lin = _to_linear(_balance_log(x, grade, base), profile)
+        else:
+            lin = _to_linear(x, profile) * np.float32(2.0 ** grade.exposure)
+            if grade.temperature or grade.tint:
+                lin = lin * wb_gains(grade.temperature, grade.tint)
+        d = np.power(np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(np.float32)
+        d = _tone_display(d, grade)
+        if grade.saturation != 100.0 or grade.vibrance:
+            lin = _saturate(np.power(np.clip(d, 0.0, 1.0), 2.4), grade)
+            d = np.power(np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(np.float32)
+
     if grade.look and grade.look_mix > 0:
         look = lutlib.try_load(grade.look)
         if look is not None:

@@ -25,7 +25,7 @@ from . import reframe
 from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, needs_color, profile_short
 from .decoder import DecoderPool
 from .edits import blend
-from .models import Footage
+from .models import Footage, OverlayClip
 
 READ_AHEAD = 45          # frames buffered (ready or being rendered) during playback
 START_FRAMES = 6         # playback's clock starts once this many frames are ready (or the buffer stalls)
@@ -65,6 +65,21 @@ class Shot:
     trans_in: str = ""           # ffmpeg xfade name of the transition into this clip
     half_in: float = 0.0         # its half-length (seconds), centered on the clip's start
     half_out: float = 0.0        # half-length of the transition out of it (the next shot's trans_in)
+    rot: float = 0.0             # rotation, degrees clockwise (see reframe.split_rotation)
+    box: tuple = ()              # (centre x, centre y, width, height) in parts of the frame: shown in that box
+
+
+@dataclass(frozen=True)
+class OverlayShot:
+    """An overlay layer's clip (a private copy) and its footage's color settings."""
+    clip: OverlayClip
+    log_profile: str
+    tonemap: str
+    footage: Footage = field(compare=False, hash=False)
+
+    @property
+    def grade(self) -> Grade:
+        return self.clip.grade
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,7 @@ class Look:
     fade_in: float = 0.0         # picture fade from black at the timeline start (seconds)
     fade_out: float = 0.0        # and to black at its end
     end: float = 0.0             # timeline length
+    overlays: tuple = ()         # OverlayShots, bottom layer first
 
     def fade_gain(self, t: float) -> float:
         g = 1.0
@@ -251,13 +267,15 @@ class PreviewEngine:
             return self._still is not None and time.perf_counter() - started > STILL_PATIENCE
 
         try:
+            ovl = []
             if shots:
                 layers, mix = self._gather(shots, shot.index, t, look, newer_waiting)
+                ovl = self._overlays(t, look, newer_waiting)
             else:
                 layers, mix = self._layer(shot, src_t, look, newer_waiting), None
             if not layers:
                 return
-            out = self._render(layers, mix, look, False, t if shots else None)
+            out = self._render(layers, mix, look, False, t if shots else None, ovl)
         except Exception as e:  # noqa: BLE001
             self._on_still(Rendered(None, t, f"Cannot decode {shot.footage.name}: {e}", serial))
             return
@@ -286,7 +304,8 @@ class PreviewEngine:
         shot = play["shots"][i]
         look = play["look"]
         layers, mix = self._gather(play["shots"], i, t, look, None)
-        fut = self._pool.submit(self._render, layers, mix, look, True, t) if layers else None
+        ovl = self._overlays(t, look, None)
+        fut = self._pool.submit(self._render, layers, mix, look, True, t, ovl) if layers else None
         with self._cv:
             if self._play is not play:
                 if fut is not None:
@@ -363,23 +382,65 @@ class PreviewEngine:
                 return layers, (kind, (t - (cut - half)) / (2 * half))
         return self._layer(shot, shot.src_in + min(max(0.0, t - shot.start), shot.dur), look, interrupt), None
 
+    def _overlays(self, t: float, look: Look, interrupt) -> list:
+        """Decode the overlay layers showing at timeline time t: [(decoder, frame, OverlayShot)]."""
+        out = []
+        for ov in look.overlays:
+            c = ov.clip
+            if not (c.start <= t < c.end) or c.alpha_at(t) <= 0:
+                continue
+            try:
+                dec = self.decoders.get(ov.footage, look.use_proxies, look.decode_h, 10 + c.track)
+                frame, _ = dec.raw_at(c.src_in + (t - c.start), interrupt)
+            except Exception:  # noqa: BLE001 - a missing overlay file doesn't stop the picture below
+                continue
+            if frame is not None:
+                out.append((dec, frame, ov))
+        return out
+
     def _render(self, layers: list, mix: Optional[tuple], look: Look, playing: bool,
-                t: Optional[float] = None) -> np.ndarray:
-        """Convert, grade and reframe decoded layers (on the render pool during playback). t: the timeline
-        time, for the fade in / out (None when showing a source frame)."""
+                t: Optional[float] = None, ovl: list = ()) -> np.ndarray:
+        """Convert, grade and reframe decoded layers (on the render pool during playback), then lay the overlay
+        layers on top. t: the timeline time, for the fade in / out (None when showing a source frame)."""
         imgs = [self._finish(dec.rgb_of(frame), shot, look, playing) for dec, frame, shot in layers]
         out = blend(mix[0], imgs[0], imgs[1], mix[1]) if mix is not None else imgs[0]
+        if ovl and t is not None:
+            out = np.array(out, copy=True) if not out.flags.writeable or out.base is not None else out
+            for dec, frame, ov in ovl:
+                self._composite(out, dec.rgba_of(frame), ov, look, playing, t)
         gain = look.fade_gain(t) if t is not None else 1.0
         return cv2.convertScaleAbs(out, alpha=gain) if gain < 1.0 else out
 
+    def _composite(self, out: np.ndarray, rgba: np.ndarray, ov: OverlayShot, look: Look, playing: bool,
+                   t: float) -> None:
+        c = ov.clip
+        fn = self._grader(ov, playing) if look.color else None
+        if fn is not None:
+            rgba = np.dstack([fn(np.ascontiguousarray(rgba[..., :3])), rgba[..., 3]])
+        layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
+                                      c.pan_x, c.pan_y)
+        layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
+        reframe.composite(out, layer, c.x * look.width, c.y * look.height, c.alpha_at(t))
+
     def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
         fn = self._grader(shot, playing) if look.color else None
-        out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
+        quarters, tilt = reframe.split_rotation(shot.rot)
+        img = reframe.rotate_quarters(img, quarters)
+        if shot.box:   # a box of the frame, cropped to fill it, black around it
+            bx, by, bw, bh = reframe.box_rect(look.width, look.height, shot.box)
+            out = reframe.render(img, bw, bh, "fill", shot.zoom, shot.ox, shot.oy, fn)
+        else:
+            out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
         if look.color and has_spatial(shot.grade):
             out = apply_spatial(out, shot.grade)
+        out = reframe.tilt(out, tilt)
+        if shot.box:
+            canvas = np.zeros((look.height, look.width, 3), np.uint8)
+            canvas[by:by + bh, bx:bx + bw] = out
+            out = canvas
         return cv2.cvtColor(out, cv2.COLOR_RGB2BGRA)   # Qt's native 32-bit layout: cheapest to paint
 
-    def _grader(self, shot: Shot, playing: bool):
+    def _grader(self, shot, playing: bool):
         g, lp, tm = shot.grade, shot.log_profile, shot.tonemap
         if not needs_color(g, lp):
             return None

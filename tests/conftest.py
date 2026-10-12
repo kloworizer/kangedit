@@ -47,3 +47,20 @@ def write_cube(path, size=2, fn=lambda r, g, b: (r, g, b)):
                 lines.append("%.6f %.6f %.6f" % fn(r / (size - 1), g / (size - 1), b / (size - 1)))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(path)
+
+
+@pytest.fixture(autouse=True)
+def no_blocking_message_boxes(monkeypatch):
+    """Tests run unattended: a warning / error / information box (e.g. "Analysis failed" from a background
+    task finishing late, with no FFmpeg on the CI runners) must not wait for a click. They are recorded instead;
+    yes / no questions keep their usual behaviour."""
+    shown = []
+    try:
+        from PySide6.QtWidgets import QMessageBox
+    except ImportError:          # Qt libraries missing: the non-UI tests still run
+        yield shown
+        return
+    for name in ("warning", "critical", "information"):
+        monkeypatch.setattr(QMessageBox, name,
+                            staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[1:3])) or QMessageBox.Ok))
+    yield shown

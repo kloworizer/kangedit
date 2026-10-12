@@ -1,4 +1,5 @@
-"""Magnetic single-track timeline: reorder, trim and slip clips."""
+"""Timeline: the magnetic main track (reorder, trim and slip clips), video layers above it, titles,
+sound effects and captions. Lane heights can be changed by dragging their bottom edges."""
 
 from __future__ import annotations
 
@@ -8,14 +9,15 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QWidgetAction, QHBoxLayout, QLabel, QMenu, QPushButton, QScrollBar, QSizePolicy, QSlider, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QFrame, QWidgetAction, QHBoxLayout, QLabel, QMenu,
+                               QPushButton, QScrollArea, QScrollBar, QSizePolicy, QSlider, QToolButton, QVBoxLayout,
+                               QWidget)
 
-from .. import sfx
+from .. import images, sfx
 from ..analysis import WAVE_RATE, Analysis
 from ..captions import Caption
 from ..edits import TRANSITIONS, edits
-from ..models import Project, SoundClip
+from ..models import OverlayClip, Project, SoundClip
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
 from .flow import FlowBar
 from .theme import CLIP_COLORS, fmt_time
@@ -24,16 +26,18 @@ RULER = 24
 TEXT_Y = RULER + 4                 # text / title track: two rows so overlapping titles stay visible
 TEXT_ROW = 16
 TEXT_H = TEXT_ROW * 2
-TRACK_Y = TEXT_Y + TEXT_H + 4
-TRACK_H = 84
-WAVE_H = 18
-SFX_Y = TRACK_Y + TRACK_H + 6     # sound-effect layer: two rows so overlapping sounds stay visible
-SFX_ROW = 17
-SFX_H = SFX_ROW * 2
-CAP_Y = SFX_Y + SFX_H + 6
+OV_Y = TEXT_Y + TEXT_H + 4         # video layers (overlays), the top layer first, above the main track
 CAP_H = 24
 EDGE = 7
 MIN_DUR = 0.25
+MAX_LAYERS = 8
+MIN_PPS, MAX_PPS = 0.05, 400.0    # zoom limits, pixels per second (0.05: an hour fits 180 px)
+FIT_MARGIN = 40                    # pixels left free after the end of the edit (and when fitted)
+# Lane heights in pixels: the main video track, each video layer row and each sound-effect row
+# (the sound lane has two rows so overlapping sounds stay visible). Drag a lane's bottom edge to change it.
+DEFAULT_HEIGHTS = {"video": 84, "layer": 40, "sound": 17}
+HEIGHT_RANGES = {"video": (48, 300), "layer": (24, 220), "sound": (14, 100)}
+FOOTAGE_MIME = "application/x-kangedit-footage"   # footage ids dragged from the media bin, one per line
 
 
 class TimelineView(QWidget):
@@ -52,6 +56,10 @@ class TimelineView(QWidget):
     sound_dropped = Signal(list, float)  # audio file paths dropped on the timeline, at timeline time
     text_selected = Signal(str)
     texts_changed = Signal()             # a title was moved / trimmed (after edit_started)
+    overlay_selected = Signal(str)
+    overlays_changed = Signal()          # an overlay was moved / trimmed (after edit_started)
+    footage_dropped = Signal(list, float, int)   # footage ids from the media bin, time, layer (-1: main track)
+    heights_changed = Signal(dict)       # a lane was resized by dragging its edge
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -71,10 +79,13 @@ class TimelineView(QWidget):
         self._static: Optional[QPixmap] = None   # everything but the playhead
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setMinimumHeight(CAP_Y + CAP_H + 10)
+        self.heights = dict(DEFAULT_HEIGHTS)
+        self._layout()
         self.setAcceptDrops(True)
         self.selected_sound = ""
         self.selected_text = ""
+        self.selected_overlay = ""
+        self._image_thumbs: dict[str, Optional[QImage]] = {}
         self._sound_max: dict[str, float] = {}   # file length per sound file (trim limit)
         self._scrub_x = 0.0                      # last mouse x while scrubbing (for edge auto-scroll)
         self._edge_timer = QTimer(self)
@@ -128,15 +139,63 @@ class TimelineView(QWidget):
             return
         super().keyPressEvent(e)
 
+    # ------------------------------------------------------------------ lane layout
+    @property
+    def layers(self) -> int:
+        """Video layers shown above the main track (at least one, and enough for every overlay)."""
+        top = max((c.track for c in self.project.overlays), default=-1)
+        return max(1, min(MAX_LAYERS, max(self.project.settings.overlay_tracks, top + 1)))
+
+    def _layout(self):
+        """Lane positions from the lane heights and the number of video layers."""
+        h = self.heights
+        self.ov_row = int(h["layer"])
+        self.ov_h = self.ov_row * self.layers
+        self.track_y = OV_Y + self.ov_h + 4
+        self.track_h = int(h["video"])
+        self.wave_h = max(18, int(round(self.track_h * 0.28)))
+        self.sfx_y = self.track_y + self.track_h + 6
+        self.sfx_row = int(h["sound"])
+        self.sfx_h = self.sfx_row * 2
+        self.cap_y = self.sfx_y + self.sfx_h + 6
+        self.setMinimumHeight(self.cap_y + CAP_H + 10)
+
+    def set_heights(self, heights: dict, emit: bool = False):
+        for k, (lo, hi) in HEIGHT_RANGES.items():
+            if k in heights:
+                self.heights[k] = int(max(lo, min(hi, float(heights[k]))))
+        self._layout()
+        self.update()
+        if emit:
+            self.heights_changed.emit(dict(self.heights))
+
+    def fit_heights(self, available: int):
+        """Share `available` pixels of height among the lanes (the main track gets the most)."""
+        fixed = OV_Y + 4 + 6 + 6 + CAP_H + 10
+        room = max(0, available - fixed)
+        unit = room / (2.6 + self.layers + 2 * 0.45)
+        self.set_heights({"video": unit * 2.6, "layer": unit, "sound": unit * 0.45}, emit=True)
+
+    def _edge_at(self, y: float) -> str:
+        """The lane whose bottom edge is under y ("" for none)."""
+        for key, bottom in (("layer", OV_Y + self.ov_h), ("video", self.track_y + self.track_h),
+                            ("sound", self.sfx_y + self.sfx_h)):
+            if -2 <= y - bottom <= 4:
+                return key
+        return ""
+
     # ------------------------------------------------------------------ helpers
     def set_project(self, project: Project):
         self.project = project
         self.selected = ""
+        self.selected_overlay = ""
         self._thumb_cache.clear()
+        self._image_thumbs.clear()
         self.refresh()
 
     def refresh(self):
         self._conflicts = self.project.conflicts(self.min_gap)
+        self._layout()
         self.update()
         self.view_changed.emit()
 
@@ -146,21 +205,31 @@ class TimelineView(QWidget):
     def x_to_t(self, x: float) -> float:
         return max(0.0, (x + self.scroll_x) / self.pps)
 
+    def content_end(self) -> float:
+        """Where the last thing on any lane ends."""
+        p = self.project
+        return max([p.duration] + [x.end for x in p.sounds] + [x.end for x in p.texts] + [x.end for x in p.overlays])
+
     def content_width(self) -> float:
-        end = max([self.project.duration] + [x.end for x in self.project.sounds] + [x.end for x in self.project.texts])
-        return end * self.pps + 200
+        return self.content_end() * self.pps + FIT_MARGIN
 
     def fit(self):
-        dur = self.project.duration
+        """Zoom so the whole edit (every lane) fills the width."""
+        dur = self.content_end()
         if dur > 0:
-            self.pps = max(2.0, min(400.0, (self.width() - 40) / dur))
+            self.pps = max(MIN_PPS, min(MAX_PPS, (self.width() - FIT_MARGIN) / dur))
         self.scroll_x = 0
         self.refresh()
+
+    def zoom_by(self, factor: float):
+        """Zoom in (> 1) or out around the playhead when it is visible, else the middle."""
+        x = self.t_to_x(self.playhead)
+        self.set_zoom(self.pps * factor, x if 0 <= x <= self.width() else None)
 
     def set_zoom(self, pps: float, anchor_x: Optional[float] = None):
         anchor_x = self.width() / 2 if anchor_x is None else anchor_x
         t = self.x_to_t(anchor_x)
-        self.pps = max(2.0, min(400.0, pps))
+        self.pps = max(MIN_PPS, min(MAX_PPS, pps))
         self.scroll_x = max(0.0, t * self.pps - anchor_x)
         self.refresh()
 
@@ -214,12 +283,12 @@ class TimelineView(QWidget):
         out, t = [], 0.0
         for c in self.project.clips:
             x0, x1 = self.t_to_x(t), self.t_to_x(t + c.duration)
-            out.append((c, QRectF(x0, TRACK_Y, max(1.0, x1 - x0), TRACK_H), t))
+            out.append((c, QRectF(x0, self.track_y, max(1.0, x1 - x0), self.track_h), t))
             t += c.duration
         return out
 
     def _hit(self, pos: QPointF):
-        if not (TRACK_Y <= pos.y() <= TRACK_Y + TRACK_H):
+        if not (self.track_y <= pos.y() <= self.track_y + self.track_h):
             return None, None
         for c, r, t in self._clip_rects():
             if r.left() - 2 <= pos.x() <= r.right() + 2:
@@ -262,16 +331,18 @@ class TimelineView(QWidget):
         self._paint_playhead(p)
 
     def _paint_static(self, p: QPainter):
+        self._layout()
         p.fillRect(self.rect(), QColor("#16171a"))
         self._paint_ruler(p)
-        p.fillRect(QRectF(0, TRACK_Y, self.width(), TRACK_H), QColor("#1d1f23"))
-        p.fillRect(QRectF(0, CAP_Y, self.width(), CAP_H), QColor("#1a1b1f"))
+        self._paint_overlays(p)
+        p.fillRect(QRectF(0, self.track_y, self.width(), self.track_h), QColor("#1d1f23"))
+        p.fillRect(QRectF(0, self.cap_y, self.width(), CAP_H), QColor("#1a1b1f"))
         self._paint_sounds(p)
         self._paint_texts(p)
 
         if not self.project.clips:
             p.setPen(QColor("#5d6068"))
-            p.drawText(QRectF(0, TRACK_Y, self.width(), TRACK_H), Qt.AlignCenter,
+            p.drawText(QRectF(0, self.track_y, self.width(), self.track_h), Qt.AlignCenter,
                        "Timeline is empty — use Auto Edit, or right-click footage → Append")
         for c, r, t in self._clip_rects():
             if r.right() < 0 or r.left() > self.width():
@@ -284,7 +355,7 @@ class TimelineView(QWidget):
             x0, x1 = self.t_to_x(cap.start), self.t_to_x(cap.end)
             if x1 < 0 or x0 > self.width():
                 continue
-            r = QRectF(x0 + 1, CAP_Y + 2, max(2.0, x1 - x0 - 2), CAP_H - 4)
+            r = QRectF(x0 + 1, self.cap_y + 2, max(2.0, x1 - x0 - 2), CAP_H - 4)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor("#5b4a8a"))
             p.drawRoundedRect(r, 3, 3)
@@ -301,7 +372,7 @@ class TimelineView(QWidget):
             starts = self.project.clip_starts() + [self.project.duration]
             x = self.t_to_x(starts[d["drop"]])
             p.setPen(QPen(QColor("#ffd34d"), 3))
-            p.drawLine(QPointF(x, TRACK_Y - 4), QPointF(x, TRACK_Y + TRACK_H + 4))
+            p.drawLine(QPointF(x, self.track_y - 4), QPointF(x, self.track_y + self.track_h + 4))
 
     def _paint_fades(self, p: QPainter):
         """Fade in / out at the ends of the timeline: a shaded ramp over the picture and / or the sound."""
@@ -309,12 +380,12 @@ class TimelineView(QWidget):
         dur = self.project.duration
         if not self.project.clips:
             return
-        wy = TRACK_Y + TRACK_H - WAVE_H
+        wy = self.track_y + self.track_h - self.wave_h
         bands = []
         if st.fades(dur) != (0.0, 0.0):
-            bands.append((TRACK_Y, wy, st.fades(dur)))
+            bands.append((self.track_y, wy, st.fades(dur)))
         if st.fades(dur, sound=True) != (0.0, 0.0):
-            bands.append((wy, TRACK_Y + TRACK_H, st.fades(dur, sound=True)))
+            bands.append((wy, self.track_y + self.track_h, st.fades(dur, sound=True)))
         p.setPen(QPen(QColor(255, 255, 255, 200), 1))
         p.setBrush(QColor(0, 0, 0, 140))
         for top, bot, (fi, fo) in bands:
@@ -342,17 +413,17 @@ class TimelineView(QWidget):
                 continue
             if e.half:
                 w = max(8.0, e.half * self.pps)
-                top, bot = TRACK_Y + 17, TRACK_Y + TRACK_H - WAVE_H - 1
+                top, bot = self.track_y + 17, self.track_y + self.track_h - self.wave_h - 1
                 poly = QPolygonF([QPointF(x - w, top), QPointF(x + w, bot), QPointF(x + w, top), QPointF(x - w, bot)])
                 p.setPen(QPen(QColor(255, 255, 255, 220), 1))
                 p.setBrush(QColor(20, 20, 24, 150))
                 p.drawPolygon(poly)
             elif e.split:
                 xa = self.t_to_x(starts[k] + e.split)
-                wy = TRACK_Y + TRACK_H - WAVE_H
+                wy = self.track_y + self.track_h - self.wave_h
                 p.setPen(QPen(QColor("#ffd34d"), 2))
                 p.drawLine(QPointF(x, wy - 4), QPointF(xa, wy - 4))
-                p.drawLine(QPointF(xa, wy - 4), QPointF(xa, TRACK_Y + TRACK_H))
+                p.drawLine(QPointF(xa, wy - 4), QPointF(xa, self.track_y + self.track_h))
                 r = QRectF(xa - 7, wy - 13, 14, 12)
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor("#ffd34d"))
@@ -370,8 +441,8 @@ class TimelineView(QWidget):
 
     def _paint_ruler(self, p: QPainter):
         p.fillRect(QRectF(0, 0, self.width(), RULER), QColor("#202227"))
-        steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
-        major = next((s for s in steps if s * self.pps >= 70), 600)
+        steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+        major = next((s for s in steps if s * self.pps >= 70), 3600)
         minor = major / 5
         t0 = self.x_to_t(0)
         t1 = self.x_to_t(self.width())
@@ -402,8 +473,10 @@ class TimelineView(QWidget):
 
         # Filmstrip
         a = self.analyses.get(c.footage_id)
-        strip = QRectF(r.left(), r.top() + 16, r.width(), TRACK_H - 16 - WAVE_H)
-        if a is not None and len(a.thumbs):
+        strip = QRectF(r.left(), r.top() + 16, r.width(), self.track_h - 16 - self.wave_h)
+        if f is not None and f.is_image:
+            self._paint_image_strip(p, f, strip, r)
+        elif a is not None and len(a.thumbs):
             th_h = strip.height()
             th_w = th_h * a.thumbs.shape[2] / a.thumbs.shape[1]
             x = r.left()
@@ -418,7 +491,7 @@ class TimelineView(QWidget):
                 x += th_w
 
         # Waveform
-        wr = QRectF(r.left(), r.bottom() - WAVE_H, r.width(), WAVE_H)
+        wr = QRectF(r.left(), r.bottom() - self.wave_h, r.width(), self.wave_h)
         p.fillRect(wr, QColor(0, 0, 0, 110))
         if a is not None and a.wave.size > 1 and f is not None and f.has_audio:
             x0 = int(max(r.left(), 0))
@@ -428,7 +501,7 @@ class TimelineView(QWidget):
                 ts = c.src_in + (xs - r.left()) / self.pps
                 vals = a.wave[np.clip((ts * WAVE_RATE).astype(int), 0, a.wave.size - 1)] * c.volume
                 mid = wr.center().y()
-                amp = (WAVE_H / 2 - 1) * np.clip(vals, 0, 1)
+                amp = (self.wave_h / 2 - 1) * np.clip(vals, 0, 1)
                 poly = QPolygonF([QPointF(x, mid - h) for x, h in zip(xs, amp)] +
                                  [QPointF(x, mid + h) for x, h in zip(xs[::-1], amp[::-1])])
                 p.setPen(Qt.NoPen)
@@ -443,6 +516,8 @@ class TimelineView(QWidget):
             p.setFont(fnt)
             p.setPen(QColor("white"))
             label = f"{f.name}  {c.duration:.1f}s"
+            if abs(c.rotation) > 0.05:
+                label += f"  ⟳{c.rotation:g}°"
             if c.score is not None:
                 label += f"  ★{max(0.0, c.score) * 100:.0f}"
             p.drawText(QRectF(r.left() + 4, r.top(), r.width() - 8, 16), Qt.AlignVCenter | Qt.AlignLeft,
@@ -463,13 +538,283 @@ class TimelineView(QWidget):
             p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 4, 4)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 211, 77, 220))
-            p.drawRect(QRectF(r.left(), r.top() + 16, 4, TRACK_H - 16))
-            p.drawRect(QRectF(r.right() - 4, r.top() + 16, 4, TRACK_H - 16))
+            p.drawRect(QRectF(r.left(), r.top() + 16, 4, self.track_h - 16))
+            p.drawRect(QRectF(r.right() - 4, r.top() + 16, 4, self.track_h - 16))
 
     # ------------------------------------------------------------------ interaction
     def _snap(self, t: float) -> float:
         fps = max(1.0, self.project.settings.fps)
         return round(t * fps) / fps
+
+    # ------------------------------------------------------------------ video layers (overlays)
+    def _image_thumb(self, f) -> Optional[QImage]:
+        if f.id not in self._image_thumbs:
+            arr = images.thumbnail(f.path) if os.path.exists(f.path) else None
+            self._image_thumbs[f.id] = None if arr is None else QImage(
+                arr.data, arr.shape[1], arr.shape[0], arr.strides[0], QImage.Format_RGB888).copy()
+        return self._image_thumbs[f.id]
+
+    def _paint_image_strip(self, p: QPainter, f, strip: QRectF, r: QRectF):
+        """An image clip's picture repeated along it."""
+        img = self._image_thumb(f)
+        if img is None or strip.height() < 4:
+            return
+        th_h = strip.height()
+        th_w = th_h * img.width() / max(1, img.height())
+        x = r.left()
+        if x < 0:
+            x += int(-x // th_w) * th_w
+        while x < min(r.right(), self.width()):
+            p.drawImage(QRectF(x, strip.top(), th_w, th_h), img)
+            x += th_w
+
+    def _paint_footage_strip(self, p: QPainter, fid: str, src_in: float, strip: QRectF, r: QRectF):
+        f = self.project.footage.get(fid)
+        if f is None:
+            return
+        if f.is_image:
+            self._paint_image_strip(p, f, strip, r)
+            return
+        a = self.analyses.get(fid)
+        if a is None or not len(a.thumbs) or strip.height() < 4:
+            return
+        th_h = strip.height()
+        th_w = th_h * a.thumbs.shape[2] / a.thumbs.shape[1]
+        x = r.left()
+        if x < 0:
+            x += int(-x // th_w) * th_w
+        while x < min(r.right(), self.width()):
+            idx = int(np.searchsorted(a.thumb_times, src_in + (x - r.left()) / self.pps, side="right") - 1)
+            img = self._thumb(fid, max(0, idx))
+            if img is not None:
+                p.drawImage(QRectF(x, strip.top(), th_w, th_h), img)
+            x += th_w
+
+    def _layer_top(self, track: int) -> float:
+        return OV_Y + (self.layers - 1 - track) * self.ov_row
+
+    def _track_at(self, y: float) -> int:
+        k = int((y - OV_Y) // max(1, self.ov_row))
+        return max(0, min(self.layers - 1, self.layers - 1 - k))
+
+    def _overlay_rects(self) -> list[tuple[OverlayClip, QRectF]]:
+        out = []
+        for c in self.project.overlays:
+            x0, x1 = self.t_to_x(c.start), self.t_to_x(c.end)
+            out.append((c, QRectF(x0, self._layer_top(c.track) + 1, max(3.0, x1 - x0), self.ov_row - 2)))
+        return out
+
+    def _overlay_hit(self, pos: QPointF):
+        if not (OV_Y <= pos.y() < OV_Y + self.ov_h):
+            return None, None
+        for c, r in reversed(self._overlay_rects()):
+            if r.left() - 2 <= pos.x() <= r.right() + 2 and r.top() <= pos.y() <= r.bottom():
+                if pos.x() - r.left() <= 6 and r.width() > 18:
+                    return c, "o_trim_l"
+                if r.right() - pos.x() <= 6 and r.width() > 18:
+                    return c, "o_trim_r"
+                return c, "o_move"
+        return None, "lane"
+
+    def _paint_overlays(self, p: QPainter):
+        f = QFont()
+        f.setPixelSize(10)
+        p.setFont(f)
+        for k in range(self.layers):
+            top = self._layer_top(k)
+            p.fillRect(QRectF(0, top, self.width(), self.ov_row - 1), QColor("#1b1d21" if k % 2 == 0 else "#191b1f"))
+        if not self.project.overlays:
+            p.setPen(QColor("#4d5058"))
+            p.drawText(QRectF(30, self._layer_top(0), self.width() - 38, self.ov_row), Qt.AlignVCenter | Qt.AlignLeft,
+                       "Video layers — drag footage or images here for picture-in-picture, logos and B-roll on top "
+                       "(several cameras: ✨ Auto Edit → Multicam)")
+        for c, r in self._overlay_rects():
+            if r.right() < 0 or r.left() > self.width():
+                continue
+            ft = self.project.footage.get(c.footage_id)
+            col = self._footage_color(c.footage_id)
+            path = QPainterPath()
+            path.addRoundedRect(r, 3, 3)
+            p.save()
+            p.setClipPath(path)
+            p.fillRect(r, col.darker(170))
+            head = min(14.0, r.height())
+            if r.height() > 26:
+                self._paint_footage_strip(p, c.footage_id, c.src_in,
+                                          QRectF(r.left(), r.top() + head, r.width(), r.height() - head), r)
+            p.fillRect(QRectF(r.left(), r.top(), r.width(), head), col.darker(115))
+            fi, fo = c.fades()
+            p.setPen(QPen(QColor(255, 255, 255, 190), 1))
+            p.setBrush(QColor(0, 0, 0, 100))
+            for w, left in ((fi * self.pps, True), (fo * self.pps, False)):
+                if w >= 2:
+                    pts = ([r.topLeft(), QPointF(r.left() + w, r.top()), r.bottomLeft()] if left else
+                           [QPointF(r.right() - w, r.top()), r.topRight(), r.bottomRight()])
+                    p.drawPolygon(QPolygonF(pts))
+            if r.width() > 24 and ft is not None:
+                p.setPen(QColor("white"))
+                link = ("🔗 " if c.linked else "⛓ unlinked · ") if c.link else ""
+                label = f"{link}{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
+                if c.opacity < 0.999:
+                    label += f"  {c.opacity * 100:.0f}%"
+                p.drawText(QRectF(r.left() + 4, r.top(), r.width() - 8, head), Qt.AlignVCenter | Qt.AlignLeft,
+                           p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 8)))
+            p.restore()
+            if c.id == self.selected_overlay:
+                p.setPen(QPen(QColor("#ffffff"), 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 3, 3)
+        for k in range(self.layers):   # layer names on the left edge
+            rr = QRectF(2, self._layer_top(k) + 1, 24, min(14, self.ov_row - 2))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 0, 0, 140))
+            p.drawRoundedRect(rr, 2, 2)
+            p.setPen(QColor("#9aa0ab"))
+            p.drawText(rr, Qt.AlignCenter, f"V{k + 2}")
+
+    def select_overlay(self, oid: str):
+        self.selected_overlay = oid
+        if oid:
+            if self._selected:
+                self.selected = ""
+                self.selection_changed.emit("")
+            if self.selected_sound:
+                self.selected_sound = ""
+                self.sound_selected.emit("")
+            if self.selected_text:
+                self.selected_text = ""
+                self.text_selected.emit("")
+        self.overlay_selected.emit(oid)
+        self.update()
+
+    def _overlay_press(self, e, pos) -> bool:
+        c, part = self._overlay_hit(pos)
+        if part is None:
+            return False
+        t = self.x_to_t(pos.x())
+        if c is None:
+            if e.button() == Qt.RightButton:
+                self._layer_menu(e.globalPosition().toPoint(), t, self._track_at(pos.y()))
+                return True
+            self.select_overlay("")
+            self.seek.emit(t)
+            self._drag = {"kind": "scrub"}
+            return True
+        self.select_overlay(c.id)
+        if e.button() == Qt.RightButton:
+            self._overlay_menu(e.globalPosition().toPoint(), c)
+            return True
+        main = self._linked_main(c)
+        if main is not None:
+            # A synced camera angle is a handle on its multicam group: its edges trim, its body slips the main
+            # clip it follows, and every angle follows that (so they all stay in sync).
+            kind = {"o_trim_l": "trim_l", "o_trim_r": "trim_r"}.get(part, "slip")
+            self._drag = {"kind": kind, "clip": main.id, "x0": pos.x(), "in0": main.src_in, "out0": main.src_out,
+                          "active": False, "drop": None, "mods": Qt.NoModifier, "angle": c.id}
+            return True
+        self._drag = {"kind": part, "overlay": c.id, "x0": pos.x(), "start0": c.start, "in0": c.src_in,
+                      "out0": c.src_out, "track0": c.track, "active": False}
+        return True
+
+    def _linked_main(self, c: OverlayClip):
+        """The main-track clip a synced camera angle follows (None for other layer clips and unlinked angles)."""
+        if not c.link or not c.linked:
+            return None
+        return next((x for x in self.project.clips if x.id == c.link), None)
+
+    def _has_angles(self, clip_id: str) -> bool:
+        return any(o.link == clip_id and o.linked for o in self.project.overlays)
+
+    def _overlay_move(self, pos, d: dict):
+        c = next((x for x in self.project.overlays if x.id == d["overlay"]), None)
+        if c is None:
+            return
+        dx = pos.x() - d["x0"]
+        track = self._track_at(pos.y()) if d["kind"] == "o_move" else c.track
+        if not d["active"]:
+            if abs(dx) < 3 and track == d["track0"]:
+                return
+            d["active"] = True
+            self.edit_started.emit()
+        dt = dx / self.pps
+        snaps = [self.playhead] + self.project.clip_starts() + [self.project.duration] + \
+            [t for x in self.project.overlays if x.id != c.id for t in (x.start, x.end)]
+        f = self.project.footage.get(c.footage_id)
+        if d["kind"] == "o_move":
+            start = max(0.0, d["start0"] + dt)
+            dur = c.duration
+            for t in snaps:
+                if abs((start - t) * self.pps) < 6:
+                    start = t
+                    break
+                if abs((start + dur - t) * self.pps) < 6:
+                    start = t - dur
+                    break
+            c.start = max(0.0, self._snap(start))
+            c.track = track
+        elif d["kind"] == "o_trim_l":
+            new_in = min(max(0.0, d["in0"] + dt), d["out0"] - MIN_DUR)
+            new_in = max(new_in, d["in0"] - d["start0"])      # can't start before the timeline
+            c.src_in = new_in
+            c.start = d["start0"] + (new_in - d["in0"])
+        else:
+            limit = f.duration if f is not None else d["out0"]
+            c.src_out = max(min(limit, d["out0"] + dt), d["in0"] + MIN_DUR)
+        self.update()
+        self.overlays_changed.emit()
+
+    def _overlay_menu(self, gpos, c: OverlayClip):
+        m = QMenu(self)
+        oid = c.id
+        self._menu_action(m, "Move to playhead", "ov_to_playhead", oid)
+        self._menu_action(m, "Split at playhead", "ov_split", oid)
+        self._menu_action(m, "Duplicate", "ov_duplicate", oid)
+        if c.link:
+            self._menu_action(m, "Unlink from the main clip\tCtrl+L" if c.linked else
+                              "Link to the main clip again (back in sync)\tCtrl+L", "link_toggle", oid)
+        sub = m.addMenu("Position && size")
+        for key, label in (("full", "Full frame"), ("center", "Centre (half size)"),
+                           ("tl", "Picture in picture: top left"), ("tr", "Picture in picture: top right"),
+                           ("bl", "Picture in picture: bottom left"), ("br", "Picture in picture: bottom right")):
+            self._menu_action(sub, label, f"ov_place:{key}", oid)
+        sub = m.addMenu("Rotate")
+        for key, label in (("-90", "⟲ 90° left"), ("90", "⟳ 90° right"), ("0", "Straight (0°)")):
+            self._menu_action(sub, label, f"ov_rotate:{key}", oid)
+        for key, label, cur in (("ov_fade_in", "Fade in", c.fade_in), ("ov_fade_out", "Fade out", c.fade_out)):
+            sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
+            for v in (0.0, 0.25, 0.5, 1.0, 2.0):
+                a = sub.addAction("Off" if v == 0 else f"{v:g} s")
+                a.setCheckable(True)
+                a.setChecked(abs(cur - v) < 1e-3)
+                a.triggered.connect(lambda _=False, k=key, v=v: self.context_action.emit(f"{k}:{v}", oid))
+        sub = m.addMenu("Layer")
+        if c.track + 1 < MAX_LAYERS:
+            self._menu_action(sub, "Up (in front)", "ov_layer:up", oid)
+        if c.track > 0:
+            self._menu_action(sub, "Down (behind)", "ov_layer:down", oid)
+        if c.angle:
+            from ..multicam import TEMPLATES
+            sub = m.addMenu("Multicam layout (all angles)")
+            for key, label in TEMPLATES.items():
+                self._menu_action(sub, label, f"multicam_layout:{key}", oid)
+        self._menu_action(m, "Settings…\tDouble-click", "ov_edit", oid)
+        m.addSeparator()
+        self._menu_action(m, "Delete\tDel", "ov_delete", oid)
+        m.exec(gpos)
+
+    def _layer_menu(self, gpos, t: float, track: int):
+        m = QMenu(self)
+        self._menu_action(m, f"Add the selected media here (V{track + 2})", "ov_add_media", f"{t:.4f}:{track}")
+        m.addSeparator()
+        if self.layers < MAX_LAYERS:
+            self._menu_action(m, "Add a video layer", "layer_add", "")
+        top = self.layers - 1
+        if top > 0 and not any(c.track == top for c in self.project.overlays):
+            self._menu_action(m, f"Remove the empty top layer (V{top + 2})", "layer_remove", "")
+        m.addSeparator()
+        self._menu_action(m, "Move playhead here", "seek", f"{t:.4f}")
+        self._menu_action(m, "Fit timeline\tShift+Z", "fit", "")
+        m.exec(gpos)
 
     # ------------------------------------------------------------------ sound-effect layer
     def _sound_rows(self) -> list[tuple[SoundClip, int]]:
@@ -480,11 +825,11 @@ class TimelineView(QWidget):
         out = []
         for x, row in self._sound_rows():
             x0, x1 = self.t_to_x(x.start), self.t_to_x(x.end)
-            out.append((x, QRectF(x0, SFX_Y + row * SFX_ROW + 1, max(3.0, x1 - x0), SFX_ROW - 2)))
+            out.append((x, QRectF(x0, self.sfx_y + row * self.sfx_row + 1, max(3.0, x1 - x0), self.sfx_row - 2)))
         return out
 
     def _sound_hit(self, pos: QPointF):
-        if not (SFX_Y <= pos.y() <= SFX_Y + SFX_H):
+        if not (self.sfx_y <= pos.y() <= self.sfx_y + self.sfx_h):
             return None, None
         for x, r in reversed(self._sound_rects()):
             if r.left() - 2 <= pos.x() <= r.right() + 2 and r.top() <= pos.y() <= r.bottom():
@@ -496,13 +841,13 @@ class TimelineView(QWidget):
         return None, "lane"
 
     def _paint_sounds(self, p: QPainter):
-        p.fillRect(QRectF(0, SFX_Y, self.width(), SFX_H), QColor("#1b1d21"))
+        p.fillRect(QRectF(0, self.sfx_y, self.width(), self.sfx_h), QColor("#1b1d21"))
         f = QFont()
         f.setPixelSize(10)
         p.setFont(f)
         if not self.project.sounds:
             p.setPen(QColor("#4d5058"))
-            p.drawText(QRectF(8, SFX_Y, self.width() - 16, SFX_H), Qt.AlignVCenter | Qt.AlignLeft,
+            p.drawText(QRectF(8, self.sfx_y, self.width() - 16, self.sfx_h), Qt.AlignVCenter | Qt.AlignLeft,
                        "Sound effects — drop audio files here, or add them from the Sounds tab")
             return
         for x, r in self._sound_rects():
@@ -516,7 +861,7 @@ class TimelineView(QWidget):
             if env is not None and r.width() > 6:
                 xs = np.arange(max(r.left(), 0), min(r.right(), self.width()), 2.0)
                 if xs.size > 1:
-                    ts = x.src_in + (xs - r.left()) / self.pps
+                    ts = x.source_time((xs - r.left()) / self.pps)
                     amp = env[np.clip((ts * sfx.ENVELOPE_RATE).astype(int), 0, env.size - 1)] * min(1.0, x.volume)
                     mid, hh = r.center().y(), (r.height() / 2 - 1) * amp
                     poly = QPolygonF([QPointF(a, mid - h) for a, h in zip(xs, hh)] +
@@ -525,9 +870,18 @@ class TimelineView(QWidget):
                     p.setBrush(QColor(255, 220, 180, 110))
                     p.drawPolygon(poly)
             self._paint_sound_fades(p, x, r)
+            if x.looping:   # where each repeat crossfades into the next
+                p.setPen(QPen(QColor(255, 244, 234, 150), 1, Qt.DashLine))
+                for n in range(1, x.repeats()):
+                    sx = r.left() + n * x.loop_step() * self.pps
+                    if 0 <= sx <= self.width():
+                        p.drawLine(QPointF(sx, r.top() + 2), QPointF(sx, r.bottom() - 2))
             if r.width() > 24:
                 p.setPen(QColor("#fff4ea"))
-                label = x.name or os.path.splitext(os.path.basename(x.path))[0]
+                label = ("⇩ " if x.duck else "") + ("🔁 " if x.looping else "") + \
+                    (x.name or os.path.splitext(os.path.basename(x.path))[0])
+                if x.looping:
+                    label += f"  ×{x.repeats()}"
                 if abs(x.volume - 1.0) > 0.01:
                     label += f"  {x.volume * 100:.0f}%"
                 p.drawText(r.adjusted(4, 0, -3, 0), Qt.AlignVCenter | Qt.AlignLeft,
@@ -607,6 +961,7 @@ class TimelineView(QWidget):
                 self.selected = ""
                 self.selection_changed.emit("")
             self.selected_sound = ""
+            self._clear_overlay()
         self.text_selected.emit(text_id)
         self.update()
 
@@ -697,6 +1052,8 @@ class TimelineView(QWidget):
         m = QMenu(self)
         self._add_text_menu(m, t)
         self._menu_action(m, "Add sound effect…", "open_sounds", "")
+        if self.layers < MAX_LAYERS:
+            self._menu_action(m, "Add a video layer", "layer_add", "")
         m.addSeparator()
         self._menu_action(m, "Move playhead here", "seek", f"{t:.4f}")
         if self.project.clips:
@@ -721,6 +1078,11 @@ class TimelineView(QWidget):
         self._add_text_menu(m, t)
         m.exec(gpos)
 
+    def _clear_overlay(self):
+        if self.selected_overlay:
+            self.selected_overlay = ""
+            self.overlay_selected.emit("")
+
     def _select_sound(self, sound_id: str):
         self.selected_sound = sound_id
         if sound_id and self._selected:
@@ -728,6 +1090,8 @@ class TimelineView(QWidget):
             self.selection_changed.emit("")
         if sound_id and self.selected_text:
             self.select_text("")
+        if sound_id:
+            self._clear_overlay()
         self.sound_selected.emit(sound_id)
         self.update()
 
@@ -747,7 +1111,7 @@ class TimelineView(QWidget):
         if x.path not in self._sound_max:
             self._sound_max[x.path] = sfx.duration(x.path) or x.src_out
         self._drag = {"kind": part, "sound": x.id, "x0": pos.x(), "start0": x.start, "in0": x.src_in,
-                      "out0": x.src_out, "active": False}
+                      "out0": x.src_out, "loop0": x.loop, "active": False}
         return True
 
     def _sound_move(self, pos, d: dict):
@@ -774,6 +1138,10 @@ class TimelineView(QWidget):
             new_in = max(new_in, d["in0"] - d["start0"])          # the sound can't start before 0
             x.src_in = new_in
             x.start = d["start0"] + (new_in - d["in0"])
+            if x.loop > 0:   # the repeated part can't run past the end of the file
+                x.loop = max(0.0, min(d.get("loop0", x.loop), self._sound_max.get(x.path, 1e9) - new_in))
+        elif x.looping:   # a looping sound can be made as long as wanted (it keeps repeating)
+            x.src_out = max(d["out0"] + dt, d["in0"] + x.loop + 0.05)
         else:
             x.src_out = max(min(self._sound_max.get(x.path, d["out0"]), d["out0"] + dt), d["in0"] + 0.05)
         self.update()
@@ -782,8 +1150,8 @@ class TimelineView(QWidget):
         m = QMenu(self)
         for key, label, tip in (("sound_to_playhead", "Move to playhead", ""), ("sound_preview", "Preview", ""),
                                 ("sound_fit", "Fit to timeline",
-                                 "Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
-                                 "cut it with a fade out if it is longer")):
+                                 "Cover the whole timeline with this one sound: it loops with crossfades if it is "
+                                 "shorter, and is cut with a fade out if it is longer")):
             a = QAction(label, m)
             a.setToolTip(tip)
             a.triggered.connect(lambda _=False, k=key: self.context_action.emit(k, sound_id))
@@ -791,6 +1159,12 @@ class TimelineView(QWidget):
         m.setToolTipsVisible(True)
         x = next((s for s in self.project.sounds if s.id == sound_id), None)
         if x is not None:
+            a = QAction("Auto ducking (lower it under the clips' sound)", m)
+            a.setCheckable(True)
+            a.setChecked(x.duck)
+            a.setToolTip("Turn this sound (music) down automatically while the clips have speech or sound")
+            a.triggered.connect(lambda on: self.context_action.emit(f"sound_duck:{int(on)}", sound_id))
+            m.addAction(a)
             for key, label, cur in (("sound_fade_in", "Fade in", x.fade_in), ("sound_fade_out", "Fade out", x.fade_out)):
                 sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
                 for v in (0.0, 0.5, 1.0, 2.0, 3.0, 5.0):
@@ -828,25 +1202,47 @@ class TimelineView(QWidget):
         return [u.toLocalFile() for u in md.urls() if u.isLocalFile()
                 and u.toLocalFile().lower().endswith(sfx.AUDIO_EXTENSIONS)]
 
+    @staticmethod
+    def _drop_footage(e) -> list[str]:
+        md = e.mimeData()
+        if not md.hasFormat(FOOTAGE_MIME):
+            return []
+        return [x for x in bytes(md.data(FOOTAGE_MIME)).decode("utf-8").splitlines() if x]
+
     def dragEnterEvent(self, e):
-        if self._drop_paths(e):
+        if self._drop_paths(e) or self._drop_footage(e):
             e.acceptProposedAction()
 
     def dragMoveEvent(self, e):
-        if self._drop_paths(e):
+        if self._drop_paths(e) or self._drop_footage(e):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
         paths = self._drop_paths(e)
+        pos = e.position()
+        t = self._snap(self.x_to_t(pos.x()))
         if paths:
             e.acceptProposedAction()
-            self.sound_dropped.emit(paths, self._snap(self.x_to_t(e.position().x())))
+            self.sound_dropped.emit(paths, t)
+            return
+        ids = self._drop_footage(e)
+        if ids:
+            e.acceptProposedAction()
+            # Onto a video layer: an overlay there. Anywhere else: into the main track at the nearest cut.
+            track = self._track_at(pos.y()) if pos.y() < OV_Y + self.ov_h else -1
+            self.footage_dropped.emit(ids, t, track)
 
     def mousePressEvent(self, e):
         pos = e.position()
+        edge = self._edge_at(pos.y()) if e.button() == Qt.LeftButton else ""
+        if edge:
+            self._drag = {"kind": "resize", "lane": edge}
+            return
         if e.button() in (Qt.LeftButton, Qt.RightButton) and self._text_press(e, pos):
             return
-        if e.button() == Qt.RightButton and SFX_Y <= pos.y() <= SFX_Y + SFX_H and self._sound_hit(pos)[0] is None:
+        if e.button() in (Qt.LeftButton, Qt.RightButton) and self._overlay_press(e, pos):
+            return
+        if e.button() == Qt.RightButton and self.sfx_y <= pos.y() <= self.sfx_y + self.sfx_h and self._sound_hit(pos)[0] is None:
             self._lane_menu(e.globalPosition().toPoint(), self.x_to_t(pos.x()))
             return
         if e.button() in (Qt.LeftButton, Qt.RightButton) and self._sound_press(e, pos):
@@ -855,9 +1251,11 @@ class TimelineView(QWidget):
             self._select_sound("")
         if self.selected_text and e.button() == Qt.LeftButton:
             self.select_text("")
+        if self.selected_overlay and e.button() == Qt.LeftButton:
+            self.select_overlay("")
         if e.button() == Qt.RightButton:
             t = self.x_to_t(pos.x())
-            if CAP_Y <= pos.y() <= CAP_Y + CAP_H:
+            if self.cap_y <= pos.y() <= self.cap_y + CAP_H:
                 idx = next((i for i, cap in enumerate(self.captions) if cap.start <= t < cap.end), -1)
                 self._caption_menu(e.globalPosition().toPoint(), idx, t)
                 return
@@ -879,7 +1277,7 @@ class TimelineView(QWidget):
             self._drag = {"kind": "scrub"}
             self.seek.emit(self.x_to_t(pos.x()))
             return
-        if CAP_Y <= pos.y() <= CAP_Y + CAP_H:
+        if self.cap_y <= pos.y() <= self.cap_y + CAP_H:
             t = self.x_to_t(pos.x())
             for i, cap in enumerate(self.captions):
                 if cap.start <= t < cap.end:
@@ -916,6 +1314,23 @@ class TimelineView(QWidget):
         pos = e.position()
         d = self._drag
         if d is None:
+            if self._edge_at(pos.y()):
+                self.setCursor(Qt.SplitVCursor)
+                self.setToolTip("Drag to change the height of this lane (double-click: usual height)")
+                return
+            oc, opart = self._overlay_hit(pos)
+            if oc is not None:
+                self.setCursor(Qt.SizeHorCursor if opart in ("o_trim_l", "o_trim_r") else Qt.OpenHandCursor)
+                f = self.project.footage.get(oc.footage_id)
+                linked = self._linked_main(oc) is not None
+                what = f" · camera angle {oc.angle}, linked to the main clip" if linked else ""
+                self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}{what}\n"
+                                f"{oc.start:.2f}s, {oc.duration:.2f}s long\n"
+                                + ("Drag: slip every angle together · Edges: trim every angle · R: other moment\n"
+                                   if linked else "Drag: move (also up / down to another layer) · Edges: trim\n")
+                                + "In the viewer: drag to place it, wheel to resize\n"
+                                "Double-click: size, crop, rotation, opacity · Right-click: more")
+                return
             tx, tpart = self._text_hit(pos)
             if tx is not None:
                 self.setCursor(Qt.SizeHorCursor if tpart in ("t_trim_l", "t_trim_r") else Qt.OpenHandCursor)
@@ -939,6 +1354,18 @@ class TimelineView(QWidget):
                                 "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
             else:
                 self.setCursor(Qt.ArrowCursor)
+            return
+        if d["kind"] == "resize":
+            lane = d["lane"]
+            if lane == "layer":
+                self.set_heights({"layer": (pos.y() - OV_Y) / self.layers})
+            elif lane == "video":
+                self.set_heights({"video": pos.y() - self.track_y})
+            else:
+                self.set_heights({"sound": (pos.y() - self.sfx_y) / 2})
+            return
+        if "overlay" in d:
+            self._overlay_move(pos, d)
             return
         if d["kind"] == "scrub":
             self._scrub_x = pos.x()
@@ -965,17 +1392,21 @@ class TimelineView(QWidget):
             if d["kind"] != "move":
                 self.edit_started.emit()
         dt = dx / self.pps
+        group = self._has_angles(c.id)     # multicam: the viewer keeps showing every angle, in sync
         if d["kind"] == "trim_l":
             c.src_in = self._snap(min(max(0.0, d["in0"] + dt), d["out0"] - MIN_DUR))
-            self.slip_preview.emit(c.id, c.src_in)
+            if not group:
+                self.slip_preview.emit(c.id, c.src_in)
         elif d["kind"] == "trim_r":
             c.src_out = self._snap(max(min(f.duration, d["out0"] + dt), d["in0"] + MIN_DUR))
-            self.slip_preview.emit(c.id, max(c.src_in, c.src_out - 1.0 / max(1.0, f.fps)))
+            if not group:
+                self.slip_preview.emit(c.id, max(c.src_in, c.src_out - 1.0 / max(1.0, f.fps)))
         elif d["kind"] == "slip":
             dur = d["out0"] - d["in0"]
             new_in = self._snap(min(max(0.0, d["in0"] - dt), max(0.0, f.duration - dur)))
             c.src_in, c.src_out = new_in, new_in + dur
-            self.slip_preview.emit(c.id, c.src_in)
+            if not group:
+                self.slip_preview.emit(c.id, c.src_in)
             self.setCursor(Qt.ClosedHandCursor)
         elif d["kind"] == "move":
             t = self.x_to_t(pos.x())
@@ -998,6 +1429,19 @@ class TimelineView(QWidget):
         self._edge_timer.stop()
         if d is None:
             return
+        if d["kind"] == "resize":
+            self.heights_changed.emit(dict(self.heights))
+            self.refresh()
+            return
+        if "overlay" in d:
+            if d["active"]:
+                self.overlays_changed.emit()
+                self.edit_finished.emit()
+            else:
+                self.seek.emit(self.x_to_t(e.position().x()))
+            self.setCursor(Qt.ArrowCursor)
+            self.refresh()
+            return
         if "sound" in d:
             if d["active"]:
                 self.sounds_changed.emit()
@@ -1011,6 +1455,11 @@ class TimelineView(QWidget):
                 self.edit_finished.emit()
             else:
                 self.seek.emit(self.x_to_t(e.position().x()))
+            self.setCursor(Qt.ArrowCursor)
+            self.refresh()
+            return
+        if d.get("angle") and not d.get("active"):   # a click on a camera angle: it stays selected
+            self.seek.emit(self.x_to_t(e.position().x()))
             self.setCursor(Qt.ArrowCursor)
             self.refresh()
             return
@@ -1039,6 +1488,14 @@ class TimelineView(QWidget):
         self.refresh()
 
     def mouseDoubleClickEvent(self, e):
+        edge = self._edge_at(e.position().y())
+        if edge:   # double-click a lane edge: back to its usual height
+            self.set_heights({edge: DEFAULT_HEIGHTS[edge]}, emit=True)
+            return
+        oc, _ = self._overlay_hit(e.position())
+        if oc is not None:
+            self.context_action.emit("ov_edit", oc.id)
+            return
         tx, _ = self._text_hit(e.position())
         if tx is not None:
             self.context_action.emit("text_edit", tx.id)
@@ -1050,6 +1507,9 @@ class TimelineView(QWidget):
 
     def wheelEvent(self, e):
         delta = e.angleDelta().y() or e.angleDelta().x()
+        if e.modifiers() & Qt.ShiftModifier:
+            e.ignore()       # the panel scrolls the lanes up / down
+            return
         if e.modifiers() & Qt.ControlModifier:
             self.set_zoom(self.pps * (1.2 if delta > 0 else 1 / 1.2), e.position().x())
         else:
@@ -1070,11 +1530,21 @@ class TimelineView(QWidget):
                   ("reset_color", f"Reset color{many}"),
                   ("copy_grade", "Copy this clip's grade to the selected clips" if n > 1 else "Copy grade to all clips"),
                   ("alt_moment", f"Other moment{many}	R"),
+                  ("link_toggle", None),
                   ("face_zoom", f"Zoom{many} to face"),
+                  ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
                   (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
             if key is None:
                 m.addSeparator()
+                continue
+            if key == "link_toggle":
+                angles = [o for o in self.project.overlays if o.link == clip_id and o.angle >= 2]
+                if angles:
+                    on = all(o.linked for o in angles)
+                    self._menu_action(m, ("Unlink its camera angles\tCtrl+L" if on else
+                                          "Link its camera angles again (back in sync)\tCtrl+L"), "link_toggle",
+                                      clip_id)
                 continue
             if key == "transition":
                 sub = m.addMenu(f"Transition into {'these clips' if n > 1 else 'this clip'}")
@@ -1100,7 +1570,7 @@ class TimelineView(QWidget):
 
 
 class TimelinePanel(QWidget):
-    """Timeline view + mode buttons, zoom controls and scrollbar."""
+    """Timeline view + mode buttons, zoom and lane-height controls and scrollbars."""
 
     fades_changed = Signal()   # the fade controls edited project.settings
 
@@ -1139,13 +1609,30 @@ class TimelinePanel(QWidget):
         self.btn_alt = QToolButton(text="🔀 Other moment")
         self.btn_alt.setToolTip("Swap the selected clip for the best moment close by in its footage (R). Its length "
                                 "follows the new moment. Click again for the next one; Undo brings the previous back.")
-        self.btn_fit = QToolButton(text="Fit")
+        self.btn_link = QToolButton(text="🔗 Link", checkable=True)
+        self.btn_link.setToolTip("Multicam: the camera angles of the selected clip are linked to it — trimming, "
+                                 "slipping or Other moment on either keeps every angle in sync. Click to unlink "
+                                 "them (edit them on their own), click again to link and re-sync (Ctrl+L).")
+        self.btn_link.setEnabled(False)
+        self.btn_fit = QToolButton(text="⇔ Fit")
+        self.btn_fit.setToolTip("Zoom so the whole edit fits the timeline's width (Shift+Z)")
+        self.btn_zoom_out = QToolButton(text="−")
+        self.btn_zoom_out.setToolTip("Zoom out (Ctrl+−, or Ctrl+wheel on the timeline)")
+        self.btn_zoom_in = QToolButton(text="+")
+        self.btn_zoom_in.setToolTip("Zoom in (Ctrl+=, or Ctrl+wheel on the timeline)")
         self.zoom = QSlider(Qt.Horizontal)
-        self.zoom.setRange(2, 400)
+        self.zoom.setRange(1, int(MAX_PPS))
         self.zoom.setValue(40)
-        self.zoom.setFixedWidth(140)
+        self.zoom.setFixedWidth(110)
+        self.zoom.setToolTip("Timeline zoom")
         self.zoom.valueChanged.connect(lambda v: self.view.set_zoom(float(v)) if abs(v - self.view.pps) > 0.5 else None)
         self.btn_fit.clicked.connect(self.view.fit)
+        self.btn_zoom_out.clicked.connect(lambda: self.view.zoom_by(1 / 1.5))
+        self.btn_zoom_in.clicked.connect(lambda: self.view.zoom_by(1.5))
+        self.btn_heights = QToolButton(text="↕ Lanes")
+        self.btn_heights.setToolTip("Height of the video, layer and sound lanes (or drag a lane's bottom edge)")
+        self.btn_heights.setPopupMode(QToolButton.InstantPopup)
+        self.btn_heights.setMenu(self._heights_menu())
         self.lbl = QLabel("")
         self.lbl.setStyleSheet("color: #8b909a;")
 
@@ -1159,7 +1646,7 @@ class TimelinePanel(QWidget):
             return lbl
 
         top.add(self.btn_undo, self.btn_redo, sep(), self.btn_move, self.btn_slip, self.btn_split, self.btn_delete,
-                self.btn_fade, sep(), self.btn_hook, self.btn_alt)
+                self.btn_fade, sep(), self.btn_hook, self.btn_alt, self.btn_link)
         self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # Always room for the clip count and length; the overlap warning after it may be clipped (tooltip).
         self.lbl.setMinimumWidth(self.lbl.fontMetrics().horizontalAdvance("000 clips · 00:00:00") + 8)
@@ -1169,15 +1656,61 @@ class TimelinePanel(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         row.addWidget(QLabel("Zoom"))
+        row.addWidget(self.btn_zoom_out)
         row.addWidget(self.zoom)
+        row.addWidget(self.btn_zoom_in)
         row.addWidget(self.btn_fit)
+        row.addWidget(self.btn_heights)
         top.add(zoom)
+        # The lanes scroll up / down when they are taller than the panel (taller lanes, more video layers).
+        self.area = QScrollArea()
+        self.area.setWidget(self.view)
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.setMinimumHeight(120)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addWidget(top)
-        lay.addWidget(self.view, 1)
+        lay.addWidget(self.area, 1)
         lay.addWidget(self.scroll)
+        self.view.heights_changed.connect(lambda _h: self._sync_heights())
+
+    def _heights_menu(self) -> QMenu:
+        m = QMenu(self)
+        box = QWidget()
+        f = QFormLayout(box)
+        f.setContentsMargins(10, 8, 10, 8)
+        self.height_sliders: dict[str, QSlider] = {}
+        for key, label in (("video", "Video track"), ("layer", "Each video layer"), ("sound", "Sound rows")):
+            lo, hi = HEIGHT_RANGES[key]
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setMinimumWidth(160)
+            sl.setValue(self.view.heights[key])
+            sl.valueChanged.connect(lambda v, k=key: self.view.set_heights({k: v}, emit=True))
+            self.height_sliders[key] = sl
+            f.addRow(label, sl)
+        row = QHBoxLayout()
+        b_fit = QPushButton("Fit to panel")
+        b_fit.setToolTip("Make the lanes fill the timeline panel's height")
+        b_fit.clicked.connect(lambda: self.view.fit_heights(self.area.viewport().height()))
+        b_reset = QPushButton("Reset")
+        b_reset.clicked.connect(lambda: self.view.set_heights(DEFAULT_HEIGHTS, emit=True))
+        row.addWidget(b_fit)
+        row.addWidget(b_reset)
+        f.addRow(row)
+        act = QWidgetAction(m)
+        act.setDefaultWidget(box)
+        m.addAction(act)
+        return m
+
+    def _sync_heights(self):
+        for key, sl in self.height_sliders.items():
+            sl.blockSignals(True)
+            sl.setValue(self.view.heights[key])
+            sl.blockSignals(False)
 
     FADE_LENGTHS = (0.5, 1.0, 2.0, 3.0)
 
@@ -1263,13 +1796,15 @@ class TimelinePanel(QWidget):
     def _sync_scroll(self):
         v = self.view
         maxv = int(max(0.0, v.content_width() - v.width()))
+        # Only shown when there is something to scroll to (not after Fit).
+        self.scroll.setVisible(maxv > 0 or v.scroll_x > 0)
         self.scroll.blockSignals(True)
         self.scroll.setRange(0, maxv)
         self.scroll.setPageStep(max(1, v.width()))
         self.scroll.setValue(int(v.scroll_x))
         self.scroll.blockSignals(False)
         self.zoom.blockSignals(True)
-        self.zoom.setValue(int(v.pps))
+        self.zoom.setValue(max(self.zoom.minimum(), int(round(v.pps))))
         self.zoom.blockSignals(False)
         n = len(v.project.clips)
         bad = len(v._conflicts)

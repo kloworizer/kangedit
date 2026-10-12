@@ -18,6 +18,7 @@ from typing import Callable, Optional
 import cv2
 import numpy as np
 
+from .faces import detect as face_detect
 from .config import cache_dir, file_key
 from .ffmpeg import HW_OUTPUT_FORMAT, Cancelled, ProgressCb, ffmpeg_bin, ffmpeg_matrix, hw_decoder, popen
 from .models import Footage
@@ -75,22 +76,6 @@ class Analysis:
 
 def analysis_path_for(footage: Footage) -> str:
     return str(cache_dir("analysis") / f"{file_key(footage.path)}_v{CACHE_VERSION}.npz")
-
-
-_local = threading.local()   # CascadeClassifier is not safe to share between threads
-
-
-def _faces():
-    cascade = getattr(_local, "cascade", None)
-    if cascade is None:
-        try:
-            path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
-            c = cv2.CascadeClassifier(path)
-            cascade = c if not c.empty() else False
-        except Exception:
-            cascade = False
-        _local.cascade = cascade
-    return cascade
 
 
 def _colorfulness(img: np.ndarray) -> float:
@@ -217,7 +202,6 @@ def _scan(u: _Unit, hw: Optional[str], threads: int, cancel: threading.Event,
     prev_gray = None
     prev_shift = np.zeros(2)
     hann = None
-    cascade = _faces()
     i = start
     try:
         while True:
@@ -252,9 +236,8 @@ def _scan(u: _Unit, hw: Optional[str], threads: int, cancel: threading.Event,
             hists.append(hist / max(1.0, hist.sum()))
             embeds.append(cv2.resize(gray, (16, 9), interpolation=cv2.INTER_AREA).flatten().astype(np.float32))
             area = 0.0
-            if cascade is not False and i % 2 == 0:
-                found = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(18, 18))
-                area = float(sum(fw * fh for (_, _, fw, fh) in found)) / (w * h) if len(found) else 0.0
+            if i % 2 == 0:
+                area = float(sum(fw * fh for (_, _, fw, fh, _) in face_detect(img, retry=False)))
             elif faces:
                 area = faces[-1]
             faces.append(area)

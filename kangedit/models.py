@@ -9,7 +9,11 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+import numpy as np
+
 from .color import Grade
+
+LOOP_CROSSFADE = 2.0   # seconds of crossfade between the repeats of a looping sound
 
 
 def new_id() -> str:
@@ -32,6 +36,7 @@ class Footage:
     color_transfer: str = ""
     rotation: int = 0
     creation_time: str = ""
+    face: Optional[list] = None    # main face (centre x, y, height as parts of the picture), for framing crops
     log_profile: str = "none"      # built-in camera profile key, "lut:<path>" or "none"
     tonemap: str = "filmic"
     camera: str = ""               # identified camera make/model
@@ -43,11 +48,16 @@ class Footage:
     # Word-level transcript in source time: [{"s": start, "e": end, "w": text}, ...]
     transcript: Optional[list] = None
     transcript_lang: str = ""
+    kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
     id: str = field(default_factory=new_id)
 
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
+
+    @property
+    def is_image(self) -> bool:
+        return self.kind == "image"
 
     def has_proxy(self) -> bool:
         return bool(self.proxy_path) and os.path.exists(self.proxy_path)
@@ -79,6 +89,13 @@ class TimelineClip:
     transition_dur: float = 0.5
     audio_split: float = 0.0
     label: str = ""                # "opening" | "closing" bookend, or "hook", when auto edit placed it
+    rotation: float = 0.0          # degrees clockwise (see reframe.split_rotation)
+    # Box (multicam layouts): box_w > 0 shows the clip in a box_w x box_h part of the frame (centre box_x,
+    # box_y, all parts of the frame), cropped to fill it (zoom / offsets choose the crop), black around it.
+    box_x: float = 0.5
+    box_y: float = 0.5
+    box_w: float = 0.0
+    box_h: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -99,6 +116,74 @@ class TimelineClip:
 
 
 @dataclass
+class OverlayClip:
+    """A video or image on a layer above the main track (picture in picture, logo, B-roll): placed at a
+    timeline time like a sound, scaled, rotated and positioned anywhere in the frame."""
+    footage_id: str
+    start: float                   # timeline position, seconds
+    src_in: float = 0.0
+    src_out: float = 5.0
+    track: int = 0                 # layer: 0 sits right above the main track, higher layers on top of it
+    x: float = 0.5                 # centre, 0..1 of the frame
+    y: float = 0.5
+    scale: float = 1.0             # 1 = fits the whole frame (letterboxed), 0.5 = half of that
+    rotation: float = 0.0          # degrees clockwise
+    opacity: float = 1.0           # 0..1
+    fade_in: float = 0.0           # seconds of fade from / to transparent
+    fade_out: float = 0.0
+    volume: float = 1.0            # the overlay video's own sound
+    grade: Grade = field(default_factory=Grade)
+    # Box: > 0 crops the picture to fill a box this part of the frame's width / height (times `scale`) instead
+    # of showing it whole; pan_x / pan_y (-1..1) choose which part of the picture fills it.
+    box_w: float = 0.0
+    box_h: float = 0.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+    angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
+    link: str = ""                 # multicam: id of the main-track clip it follows
+    linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
+    id: str = field(default_factory=new_id)
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
+
+    def fades(self) -> tuple[float, float]:
+        d, fi, fo = self.duration, max(0.0, self.fade_in), max(0.0, self.fade_out)
+        if fi + fo > d:
+            k = d / (fi + fo)
+            fi, fo = fi * k, fo * k
+        return fi, fo
+
+    def alpha_at(self, t: float) -> float:
+        """Opacity at timeline time t (fades included); 0 outside the clip."""
+        if not (self.start <= t < self.end):
+            return 0.0
+        fi, fo = self.fades()
+        a = max(0.0, min(1.0, self.opacity))
+        if fi > 0:
+            a *= min(1.0, (t - self.start) / fi)
+        if fo > 0:
+            a *= min(1.0, (self.end - t) / fo)
+        return max(0.0, a)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["grade"] = self.grade.to_dict()
+        return d
+
+    @staticmethod
+    def from_dict(d: dict) -> "OverlayClip":
+        d = dict(d)
+        g = Grade.from_dict(d.pop("grade", None))
+        return OverlayClip(grade=g, **{k: v for k, v in d.items() if k in OverlayClip.__dataclass_fields__})
+
+
+@dataclass
 class SoundClip:
     """A sound effect on the SFX layer: placed at a timeline time, independent of the video clips."""
     path: str
@@ -109,6 +194,10 @@ class SoundClip:
     name: str = ""
     fade_in: float = 0.0           # seconds
     fade_out: float = 0.0
+    duck: bool = False             # music: turned down automatically while the clips have speech / sound
+    # Looping (fit to timeline): > 0 repeats the source from src_in for this many seconds, again and again with
+    # a LOOP_CROSSFADE between repeats, for as long as the clip lasts (src_out may then run past the file's end).
+    loop: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -126,6 +215,27 @@ class SoundClip:
     @property
     def end(self) -> float:
         return self.start + self.duration
+
+    @property
+    def looping(self) -> bool:
+        return self.loop > LOOP_CROSSFADE * 2 and self.duration > self.loop + 1e-3
+
+    def loop_step(self) -> float:
+        """Timeline seconds between the starts of two repeats of a looping sound."""
+        return self.loop - LOOP_CROSSFADE
+
+    def repeats(self) -> int:
+        """How many times the source plays (1 unless looping)."""
+        if not self.looping:
+            return 1
+        return int(np.ceil((self.duration - self.loop) / self.loop_step() - 1e-9)) + 1
+
+    def source_time(self, t: np.ndarray) -> np.ndarray:
+        """Source time heard at clip time t (seconds from the clip's start; for drawing its waveform)."""
+        if not self.looping:
+            return self.src_in + t
+        step = self.loop_step()
+        return self.src_in + np.mod(t, step)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -206,6 +316,11 @@ class ProjectSettings:
     fade_out: float = 0.0
     fade_picture: bool = True
     fade_sound: bool = True
+    # Auto ducking: sounds marked `duck` (music) drop by this many dB under the clips' own sound.
+    duck_db: float = 12.0
+    overlay_tracks: int = 1        # video layers shown above the main track
+    # Multicam (see multicam.py): {"angles": {footage id: angle number}, "template": key, "audio": choice}
+    multicam: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -237,6 +352,7 @@ class Project:
         self.clips: list[TimelineClip] = []
         self.sounds: list[SoundClip] = []
         self.texts: list[TextClip] = []
+        self.overlays: list[OverlayClip] = []
         self.settings = ProjectSettings()
         self.path: Optional[str] = None
         self.dirty = False
@@ -247,6 +363,13 @@ class Project:
     @property
     def duration(self) -> float:
         return sum(c.duration for c in self.clips)
+
+    def usage(self) -> dict[str, int]:
+        """{footage id: how many times the timeline uses it} (main track and overlays)."""
+        out: dict[str, int] = {}
+        for c in list(self.clips) + list(self.overlays):
+            out[c.footage_id] = out.get(c.footage_id, 0) + 1
+        return out
 
     def clip_starts(self) -> list[float]:
         starts, t = [], 0.0
@@ -292,6 +415,8 @@ class Project:
             "clips": [c.to_dict() for c in self.clips],
             "sounds": [x.to_dict() for x in self.sounds],
             "texts": [x.to_dict() for x in self.texts],
+            "overlays": [x.to_dict() for x in self.overlays],
+            "overlay_tracks": self.settings.overlay_tracks,
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
@@ -301,6 +426,8 @@ class Project:
         self.clips = [TimelineClip.from_dict(d) for d in snap["clips"]]
         self.sounds = [SoundClip.from_dict(d) for d in snap.get("sounds", [])]
         self.texts = [TextClip.from_dict(d) for d in snap.get("texts", [])]
+        self.overlays = [OverlayClip.from_dict(d) for d in snap.get("overlays", []) if d.get("footage_id") in self.footage]
+        self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
@@ -367,6 +494,7 @@ class Project:
             "clips": [c.to_dict() for c in self.clips],
             "sounds": [x.to_dict() for x in self.sounds],
             "texts": [x.to_dict() for x in self.texts],
+            "overlays": [x.to_dict() for x in self.overlays],
         }
 
     def save(self, path: str) -> None:
@@ -389,5 +517,6 @@ class Project:
         p.clips = [TimelineClip.from_dict(c) for c in data.get("clips", []) if c.get("footage_id") in p.footage]
         p.sounds = [SoundClip.from_dict(x) for x in data.get("sounds", [])]
         p.texts = [TextClip.from_dict(x) for x in data.get("texts", [])]
+        p.overlays = [OverlayClip.from_dict(x) for x in data.get("overlays", []) if x.get("footage_id") in p.footage]
         p.path = path
         return p

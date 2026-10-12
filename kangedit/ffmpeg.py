@@ -34,11 +34,19 @@ def ffprobe_bin() -> Optional[str]:
     return local_binary("ffprobe") or shutil.which("ffprobe")
 
 
+def _check_program(args: list[str]) -> None:
+    """A clear error when the program (ffmpeg / ffprobe from ffmpeg_bin()) isn't installed."""
+    if not args or not args[0]:
+        raise FFmpegError("FFmpeg was not found: install it, or start KangEdit again to download it")
+
+
 def popen(args: list[str], **kw) -> subprocess.Popen:
+    _check_program(args)
     return subprocess.Popen(args, creationflags=CREATE_NO_WINDOW, **kw)
 
 
 def run(args: list[str], cwd: Optional[str] = None) -> subprocess.CompletedProcess:
+    _check_program(args)
     return subprocess.run(args, capture_output=True, cwd=cwd, creationflags=CREATE_NO_WINDOW)
 
 

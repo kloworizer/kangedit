@@ -110,6 +110,12 @@ PARAM_TIPS = {
 IMPORT_LUT = "__import_lut__"
 
 
+def wrap_angle(deg: float) -> float:
+    """An angle in degrees within (-180, 180]."""
+    deg = (deg + 180.0) % 360.0 - 180.0
+    return 180.0 if deg == -180.0 else round(deg, 3)
+
+
 def fill_lut_combo(cb: QComboBox, base: list[tuple[str, str]], key_of=lambda path: path) -> None:
     """Fixed choices, then every library LUT, then an "Import LUT..." entry."""
     cb.blockSignals(True)
@@ -291,6 +297,19 @@ class Inspector(QScrollArea):
         f.addRow("Zoom", self.rf_zoom)
         f.addRow("Pan X", self.rf_x)
         f.addRow("Pan Y", self.rf_y)
+        self.rf_rot = ParamSlider(-180.0, 180.0, 0.0, 0.5, 1, "°")
+        self.rf_rot.setToolTip("Rotate the picture clockwise. Quarter turns (±90°, 180°) turn the footage before "
+                               "it fills the frame, e.g. a phone clip recorded sideways. Double-click to reset")
+        self.rf_rot.changed.connect(lambda val: self._set_attr("rotation", val, "reframe"))
+        rot_row = QHBoxLayout()
+        rot_row.setSpacing(4)
+        rot_row.addWidget(self.rf_rot, 1)
+        for text, step, tip in (("⟲", -90, "Rotate 90° left"), ("⟳", 90, "Rotate 90° right")):
+            b = QToolButton(text=text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=step: self._rotate_by(k))
+            rot_row.addWidget(b)
+        f.addRow("Rotation", rot_row)
         lay.addWidget(g)
 
         # --- Audio
@@ -357,6 +376,7 @@ class Inspector(QScrollArea):
         self.rf_zoom.set_value(clip.zoom)
         self.rf_x.set_value(clip.offset_x)
         self.rf_y.set_value(clip.offset_y)
+        self.rf_rot.set_value(clip.rotation)
         self.vol.set_value(clip.volume * 100.0)
 
     def _set_trim(self, which: str, v: float):
@@ -428,6 +448,16 @@ class Inspector(QScrollArea):
         for c in self.targets:
             setattr(c.grade, key, float(val))
         self.changed.emit("grade")
+
+    def _rotate_by(self, deg: float):
+        """Quarter turn of every selected clip (kept within -180..180)."""
+        if self.clip is None:
+            return
+        self.before_change.emit("reframe:rotate")
+        for c in self.targets:
+            c.rotation = wrap_angle(c.rotation + deg)
+        self.rf_rot.set_value(self.clip.rotation)
+        self.changed.emit("reframe")
 
     def _set_attr(self, key: str, val: float, kind: str):
         if self.clip is None:

@@ -12,7 +12,7 @@ with open(os.path.join(ROOT, "kangedit", "__init__.py"), encoding="utf-8") as fh
     VERSION = re.search(r'__version__ = "([^"]+)"', fh.read()).group(1)
 
 ASSETS = os.path.join(ROOT, "kangedit", "assets")
-datas = [(os.path.join(ASSETS, f), "kangedit/assets") for f in os.listdir(ASSETS) if f.endswith(".png")]   # app + tray icons
+datas = [(os.path.join(ASSETS, f), "kangedit/assets") for f in os.listdir(ASSETS) if f.endswith((".png", ".onnx"))]   # icons, face detector
 datas += collect_data_files("faster_whisper")           # Silero VAD model used by transcription
 datas += collect_data_files("yt_dlp_ejs")               # YouTube challenge solver scripts (music download)
 binaries = collect_dynamic_libs("ctranslate2")          # Whisper inference runtime

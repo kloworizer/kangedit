@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import tempfile
@@ -17,7 +18,7 @@ from .edits import ClipPlan, plan
 from .fonts import copy_family
 from .titles import write_titles_ass
 from .ffmpeg import FFmpegError, ProgressCb, ffmpeg_matrix, hw_encoder, hw_encoder_args, hw_encoder_label, run_ffmpeg
-from .models import Project
+from .models import LOOP_CROSSFADE, Footage, OverlayClip, Project
 
 CODECS = {
     "h264": ("H.264 (MP4) - most compatible", ".mp4"),
@@ -57,11 +58,26 @@ def _clip_inputs(project: Project, use_proxies: bool, i: int, cp: ClipPlan, fps:
     src = f.proxy_path if (use_proxies and f.has_proxy()) else f.path
     ss = max(0.0, min(cp.v_in, cp.a_in))
     end = max(cp.v_in + cp.v_frames / fps, cp.a_in + cp.a_dur)
-    args = ["-ss", f"{ss:.4f}", "-t", f"{end - ss + 0.25:.4f}", "-i", src]
-    if f.has_audio:
+    if f.is_image:
+        args, ss = _image_input(f, ss, end - ss + 0.25, fps)
+    else:
+        args = ["-ss", f"{ss:.4f}", "-t", f"{end - ss + 0.25:.4f}", "-i", src]
+    if f.has_audio and not f.is_image:
         return args, 1, False, ss
     args += ["-f", "lavfi", "-t", f"{cp.a_dur + 0.25:.4f}", "-i", "anullsrc=r=48000:cl=stereo"]
     return args, 2, True, ss
+
+
+def _image_input(f: Footage, ss: float, dur: float, fps: float) -> tuple[list[str], float]:
+    """Input args for an image read from source time ss for dur seconds, and the source time its first frame
+    shows: a still repeats its picture, an animated GIF loops from its start (trim the difference)."""
+    if f.codec == "gif":
+        return ["-ignore_loop", "0", "-t", f"{ss + dur:.4f}", "-i", f.path], 0.0
+    return ["-loop", "1", "-framerate", f"{fps:.4f}", "-t", f"{dur:.4f}", "-i", f.path], ss
+
+
+# Pictures with transparency show black where they are transparent on the main track.
+_IMAGE_PREP = "format=rgba,premultiply=inplace=1,"
 
 
 def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.0) -> str:
@@ -76,28 +92,136 @@ def _curve(fade: float) -> str:
     return ":curve=qsin" if fade > 0.05 else ""
 
 
-def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int) -> str:
-    """Mix the SFX layer over [acat] (inputs from index k on). Returns the label of the final audio."""
+DUCK_THRESHOLD = 0.01    # clip sound above this level (about -40 dBFS) turns the ducked music down
+
+
+def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int, extra: tuple = ()) -> str:
+    """Mix the overlay layers' sound (labels in `extra`) and the SFX layer over [acat] (inputs from index k
+    on). Sounds marked `duck` (music) are turned down while the edit's own sound plays (sidechain
+    compression, at most settings.duck_db). Returns the label of the final audio."""
     dur = project.duration
+    base = "acat"
+    if extra:
+        graph.append(f"[acat]{''.join(f'[{x}]' for x in extra)}amix=inputs={len(extra) + 1}:normalize=0:"
+                     f"duration=first:dropout_transition=0[aprog]")
+        base = "aprog"
     sounds = [x for x in project.sounds if x.duration > 0.01 and x.start < dur and os.path.exists(x.path)]
     if not sounds:
-        return "acat"
-    labels = []
+        return base
+    plain, ducked = [], []
     for j, x in enumerate(sounds):
-        inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.duration:.4f}", "-i", x.path]
         fi, fo = x.fades()
         fi, fo = max(fi, 0.005), max(fo, min(0.02, x.duration / 4))   # at least a click-free edge
         delay = int(round(max(0.0, x.start) * 1000))
-        # quarter-sine fades: crossfading copies of a sound (fit to timeline) keep an even loudness
-        graph.append(f"[{k + j}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        src = f"[{k + j}:a]"
+        if x.looping:
+            # One read of the loop, repeated: each repeat crossfades into the next (quarter-sine, even loudness).
+            n = x.repeats()
+            inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.loop:.4f}", "-i", x.path]
+            graph.append(f"{src}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                         f"asplit={n}" + "".join(f"[lp{j}_{r}]" for r in range(n)))
+            cur = f"lp{j}_0"
+            for r in range(1, n):
+                graph.append(f"[{cur}][lp{j}_{r}]acrossfade=d={LOOP_CROSSFADE:.4f}:c1=qsin:c2=qsin[lpx{j}_{r}]")
+                cur = f"lpx{j}_{r}"
+            graph.append(f"[{cur}]atrim=duration={x.duration:.4f}[lpj{j}]")
+            src = f"[lpj{j}]"
+        else:
+            inputs += ["-ss", f"{x.src_in:.4f}", "-t", f"{x.duration:.4f}", "-i", x.path]
+        # quarter-sine fades: crossfading copies of a sound keep an even loudness
+        graph.append(f"{src}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
                      f"volume={x.volume:.3f},afade=t=in:d={fi:.4f}{_curve(fi)},"
                      f"afade=t=out:st={max(0.0, x.duration - fo):.4f}:d={fo:.4f}{_curve(fo)},"
                      f"adelay=delays={delay}:all=1[sfx{j}]")
-        labels.append(f"[sfx{j}]")
+        (ducked if x.duck else plain).append(f"[sfx{j}]")
+    depth = max(0.0, project.settings.duck_db)
+    if ducked and depth > 0.05:
+        graph.append(f"[{base}]asplit=2[aprogm][aduck_sc]")
+        if len(ducked) > 1:
+            graph.append(f"{''.join(ducked)}amix=inputs={len(ducked)}:normalize=0:dropout_transition=0[amusic]")
+        else:
+            graph.append(f"{ducked[0]}anull[amusic]")
+        # mix < 1 keeps (1 - mix) of the music however loud the sidechain is: the floor of the ducking.
+        mix = 1.0 - 10 ** (-depth / 20.0)
+        graph.append(f"[amusic][aduck_sc]sidechaincompress=threshold={DUCK_THRESHOLD}:ratio=20:attack=30:"
+                     f"release=400:makeup=1:mix={mix:.4f}[aducked]")
+        base = "aprogm"
+        plain.append("[aducked]")
+    elif ducked:
+        plain += ducked
     # normalize=0: sounds add to the edit's audio at their own level instead of ducking it.
-    graph.append(f"[acat]{''.join(labels)}amix=inputs={len(labels) + 1}:normalize=0:duration=first:"
+    graph.append(f"[{base}]{''.join(plain)}amix=inputs={len(plain) + 1}:normalize=0:duration=first:"
                  f"dropout_transition=0[amix]")
     return "amix"
+
+
+def _overlay_input(project: Project, c: OverlayClip, use_proxies: bool, fps: float) -> tuple[list[str], float]:
+    """Input args for an overlay clip, and how much to trim from the start of its video."""
+    f = project.footage[c.footage_id]
+    if f.is_image:
+        args, ss = _image_input(f, c.src_in, c.duration, fps)
+        return args, max(0.0, c.src_in - ss)
+    src = f.proxy_path if (use_proxies and f.has_proxy()) else f.path
+    return ["-ss", f"{c.src_in:.4f}", "-t", f"{c.duration:.4f}", "-i", src], 0.0
+
+
+def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str], graph: list[str], k: int,
+              video: Optional[tuple] = None) -> tuple[int, str, list[str]]:
+    """Add the overlay layers (inputs from index k on). video: (frame width, height, workdir, [base label])
+    lays their pictures over the base, bottom layer first; None only takes their sound.
+    Returns (next input index, video label, overlay audio labels)."""
+    dur = project.duration
+    vout = video[3] if video else ""
+    audio = []
+    clips = sorted((c for c in project.overlays if c.footage_id in project.footage and c.duration > 0.01
+                    and c.start < dur and os.path.exists(project.footage[c.footage_id].path)),
+                   key=lambda c: c.track)
+    for j, c in enumerate(clips):
+        f = project.footage[c.footage_id]
+        sound = f.has_audio and not f.is_image and c.volume > 0.001
+        if video is None and not sound:
+            continue
+        args, skip = _overlay_input(project, c, use_proxies, fps)
+        inputs += args
+        length = min(c.duration, dur - c.start)
+        if sound:
+            fade = min(0.02, length / 4)
+            delay = int(round(max(0.0, c.start) * 1000))
+            graph.append(f"[{k}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                         f"volume={c.volume:.3f},afade=t=in:d={fade:.3f},"
+                         f"afade=t=out:st={max(0.0, length - fade):.4f}:d={fade:.3f},atrim=duration={length:.4f},"
+                         f"adelay=delays={delay}:all=1[ova{j}]")
+            audio.append(f"ova{j}")
+        if video is not None:
+            tw, th, workdir, _ = video
+            trim = f"trim=start={skip:.4f},setpts=PTS-STARTPTS," if skip > 0.0005 else ""
+            chain = f"[{k}:v:0]setpts=PTS-STARTPTS,{trim}fps={fps:.4f},trim=duration={length:.4f},"
+            if needs_color(c.grade, f.log_profile):
+                lut = f"lut_ov{j}.cube"
+                write_cube(os.path.join(workdir, lut), c.grade, f.log_profile, f.tonemap)
+                matrix = "bt709" if (use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
+                chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
+            pl = reframe.overlay_place(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
+            chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
+            if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
+                chain += f"crop={pl.crop_w}:{pl.crop_h}:{pl.crop_x}:{pl.crop_y},"
+            chain += "format=rgba,"
+            if abs(c.rotation) >= 0.01:
+                a = math.radians(c.rotation)
+                chain += f"rotate={a:.6f}:ow=rotw({a:.6f}):oh=roth({a:.6f}):c=none,"
+            if c.opacity < 0.999:
+                chain += f"colorchannelmixer=aa={max(0.0, c.opacity):.4f},"
+            fi, fo = c.fades()
+            if fi > 0:
+                chain += f"fade=t=in:st=0:d={fi:.4f}:alpha=1,"
+            if fo > 0:
+                chain += f"fade=t=out:st={max(0.0, c.duration - fo):.4f}:d={fo:.4f}:alpha=1,"
+            graph.append(chain + f"setpts=PTS+{c.start:.4f}/TB[ov{j}]")
+            graph.append(f"[{vout}][ov{j}]overlay=x='{c.x * tw:.2f}-w/2':y='{c.y * th:.2f}-h/2':eof_action=pass:"
+                         f"format=auto[vov{j}]")
+            vout = f"vov{j}"
+        k += 1
+    return k, vout, audio
 
 
 def _fade_audio(project: Project, graph: list[str], aout: str) -> str:
@@ -164,12 +288,23 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
 
         skip = max(0.0, cp.v_in - ss)
         trim = f"trim=start={skip:.4f},setpts=PTS-STARTPTS," if skip > 0.0005 else ""
-        chain = [f"[{vi}]setpts=PTS-STARTPTS,{trim}fps={s.fps:.4f}[v{i}a]"]
-        chain.append(reframe.ffmpeg_filter(f.width, f.height, tw, th, s.fit_mode, clip.zoom,
-                                           clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
+        quarters, tilt = reframe.split_rotation(clip.rotation)
+        turn = "," + reframe.ffmpeg_quarters(quarters) if quarters else ""
+        prep = _IMAGE_PREP if f.is_image else ""
+        chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}fps={s.fps:.4f}{turn}[v{i}a]"]
+        sw, sh = reframe.quarter_dims(f.width, f.height, quarters)
+        box = reframe.box_rect(tw, th, (clip.box_x, clip.box_y, clip.box_w, clip.box_h)) \
+            if clip.box_w > 0 and clip.box_h > 0 else None
+        if box:   # a box of the frame (multicam layouts), cropped to fill it; padded with black at the end
+            chain.append(reframe.ffmpeg_filter(sw, sh, box[2], box[3], "fill", clip.zoom,
+                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
+        else:
+            chain.append(reframe.ffmpeg_filter(sw, sh, tw, th, s.fit_mode, clip.zoom,
+                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
         post = f"[v{i}b]"
         color = needs_color(clip.grade, f.log_profile)
-        halation = ffmpeg_halation(clip.grade, th, f"v{i}g", f"v{i}h")
+        ph = box[3] if box else th          # picture height: halation and sharpening scale with it
+        halation = ffmpeg_halation(clip.grade, ph, f"v{i}g", f"v{i}h")
         if color or halation:
             matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
             post += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb48le,"
@@ -181,16 +316,18 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
             chain.append(post + f"null[v{i}g]")
             chain += halation
             post = f"[v{i}h]"
-        sharpen = ffmpeg_sharpen(clip.grade, th)
+        sharpen = ffmpeg_sharpen(clip.grade, ph)
+        rot = reframe.ffmpeg_tilt(tilt)
+        pad = f"pad={tw}:{th}:{box[0]}:{box[1]}:black," if box else ""
         post += (f"scale=out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
-                 f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
+                 f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
         chain.append(post)
         graph += chain
         graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss)))
 
     _join(graph, plans, s.fps, video=True)
-    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k))
-    vout = "vcat"
+    k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"))
+    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
     fonts_dir = os.path.join(workdir, "fonts")
     texts = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
     if texts:
@@ -285,7 +422,8 @@ def render_audio(project: Project, use_proxies: bool, out_wav: str,
         k += n_in
         graph.append(_audio_chain(ai, f"a{i}", cp.a_dur, clip.volume, 0.0 if silent else max(0.0, cp.a_in - ss)))
     _join(graph, plans, fps, video=False)
-    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k))
+    k, _, ov_audio = _overlays(project, use_proxies, fps, inputs, graph, k)
+    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
     workdir = tempfile.mkdtemp(prefix="audio_", dir=str(cache_dir("tmp")))
     try:
         with open(os.path.join(workdir, "graph.txt"), "w", encoding="utf-8") as fh:

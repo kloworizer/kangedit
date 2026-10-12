@@ -8,7 +8,7 @@ import threading
 from PySide6.QtCore import QMimeData, QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from .. import music, sfx
@@ -40,6 +40,8 @@ class SoundPanel(QWidget):
     volume_changed = Signal(float)        # new volume (1.0 = 100%) for the sound selected on the timeline
     fade_changed = Signal(str, float)     # "in" / "out", seconds, for the sound selected on the timeline
     fit_requested = Signal()              # fit the selected sound to the timeline
+    duck_changed = Signal(bool)           # auto ducking on / off for the sound selected on the timeline
+    duck_depth_changed = Signal(float)    # how far ducked sounds drop, dB (whole project)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -149,23 +151,43 @@ class SoundPanel(QWidget):
             v.addLayout(row)
             self.fades[which] = sl
         self.b_fit = QPushButton("⇔ Fit to timeline")
-        self.b_fit.setToolTip("Cover the whole timeline: repeat the sound with crossfades if it is shorter, "
-                              "cut it with a fade out if it is longer")
+        self.b_fit.setToolTip("Cover the whole timeline with this one sound: it loops with crossfades if it is "
+                              "shorter, and is cut with a fade out if it is longer")
         self.b_fit.clicked.connect(self.fit_requested.emit)
         v.addWidget(self.b_fit)
+        self.chk_duck = QCheckBox("Auto ducking: lower it while the clips have sound")
+        self.chk_duck.setToolTip("Turn this sound (usually music) down automatically under speech and other sound "
+                                 "of the clips and video layers, and back up in between. Music added from "
+                                 "the NCS list has it on.")
+        self.chk_duck.toggled.connect(self.duck_changed.emit)
+        v.addWidget(self.chk_duck)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Duck by"))
+        self.duck_depth = ParamSlider(0, 30, 12, 1, 0, " dB")
+        self.duck_depth.setToolTip("How much quieter ducked sounds get under the clips' sound (every ducked "
+                                   "sound in the project)")
+        self.duck_depth.changed.connect(self.duck_depth_changed.emit)
+        row.addWidget(self.duck_depth, 1)
+        v.addLayout(row)
         self.set_selected_sound(None)
         return box
 
     def set_selected_sound(self, x) -> None:
         """Show the volume of a timeline SoundClip (None: nothing selected, slider disabled)."""
-        for w in (self.vol, self.b_fit, *self.fades.values()):
+        for w in (self.vol, self.b_fit, self.chk_duck, *self.fades.values()):
             w.setEnabled(x is not None)
+        self.chk_duck.blockSignals(True)
+        self.chk_duck.setChecked(bool(x is not None and x.duck))
+        self.chk_duck.blockSignals(False)
         self.lbl_selected.setText(x.name or os.path.basename(x.path) if x is not None
                                   else "Click a sound effect or music on the timeline to change its volume and fades.")
         if x is not None:
             self.vol.set_value(x.volume * 100.0)
             self.fades["in"].set_value(x.fade_in)
             self.fades["out"].set_value(x.fade_out)
+
+    def set_duck_depth(self, db: float) -> None:
+        self.duck_depth.set_value(db)
 
     # ------------------------------------------------------------------ music
     def _music_box(self) -> QGroupBox:

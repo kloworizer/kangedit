@@ -131,6 +131,11 @@ class FrameDecoder:
         self._last_img = (frame, img)
         return img
 
+    def rgba_of(self, frame) -> np.ndarray:
+        """rgb_of with an opaque alpha channel (overlay layers)."""
+        rgb = self.rgb_of(frame)
+        return np.dstack([rgb, np.full(rgb.shape[:2], 255, np.uint8)])
+
     def raw_at(self, t: float, interrupt: Optional[Callable[[], bool]] = None) -> tuple:
         """(av.VideoFrame shown at source time t or None, whether t was reached without an interrupt).
 
@@ -187,13 +192,25 @@ class FrameDecoder:
 class DecoderPool:
     """Keeps one open decoder per media file (proxy or original). Safe to use from several threads."""
 
-    def __init__(self, limit: int = 12):
+    def __init__(self, limit: int = 24):
         self._pool: dict[str, FrameDecoder] = {}
         self._limit = limit
         self._lock = threading.Lock()
 
-    def get(self, footage: Footage, use_proxy: bool, max_height: int = 720, slot: int = 0) -> FrameDecoder:
-        """`slot` > 0 opens extra decoders on the same file, so two positions can be read independently."""
+    def get(self, footage: Footage, use_proxy: bool, max_height: int = 720, slot: int = 0):
+        """`slot` > 0 opens extra decoders on the same file, so two positions can be read independently.
+        Images (see images.py) get an ImageDecoder, shared by every slot."""
+        if footage.is_image:
+            from .images import ImageDecoder
+            key = f"{footage.path}|{max_height}|image"
+            with self._lock:
+                dec = self._pool.get(key)
+                if dec is not None:
+                    return dec
+            dec = ImageDecoder(footage.path, max_height)
+            with self._lock:
+                self._pool[key] = dec
+            return dec
         proxy = use_proxy and footage.has_proxy()
         path = footage.proxy_path if proxy else footage.path
         key = f"{path}|{max_height}|{slot}"

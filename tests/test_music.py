@@ -2,6 +2,7 @@
 
 import shutil
 
+import numpy as np
 import pytest
 
 from kangedit import music
@@ -62,18 +63,18 @@ def test_music_goes_under_the_whole_edit(qapp, tmp_path):
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_fit_to_timeline_repeats_short_sounds_with_crossfades():
+def test_fit_to_timeline_loops_short_sounds_in_one_clip():
     from kangedit import sfx
     from kangedit.models import SoundClip
     x = SoundClip("loop.mp3", 3.0, 0.0, 5.0, 0.5, "loop", fade_in=1.0)
-    copies = sfx.fit_to_timeline(x, 10.0, 25.0)
+    [y] = sfx.fit_to_timeline(x, 10.0, 25.0)          # one clip, so one row on the timeline
     c = sfx.FIT_CROSSFADE
-    assert copies[0].id == x.id and copies[0].start == 0.0 and copies[0].fade_in == 1.0
-    assert copies[-1].end == pytest.approx(25.0)
-    for a, b in zip(copies, copies[1:]):
-        assert a.end - b.start == pytest.approx(c)          # neighbours overlap by the crossfade
-        assert a.fade_out == b.fade_in == pytest.approx(c)
-    assert all(y.volume == 0.5 and y.src_in == 0.0 for y in copies)
+    assert y.id == x.id and y.start == 0.0 and y.fade_in == 1.0 and y.volume == 0.5
+    assert y.end == pytest.approx(25.0) and y.looping and y.loop == 10.0
+    assert y.repeats() == 3                            # 10 + 8 + 8 >= 25 with 2 s crossfades
+    t = np.array([0.0, 7.9, 8.0, 17.0])
+    assert y.source_time(t) == pytest.approx([0.0, 7.9, 0.0, 1.0])   # repeats start every loop - crossfade
+    assert c == 2.0
 
 
 def test_fit_to_timeline_cuts_long_sounds_with_a_fade_out():

@@ -13,15 +13,16 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, Q
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
+from .. import reframe
 from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
 from ..color import Grade
 from ..config import frame_size
 from ..decoder import DecoderPool
 from ..edits import TRANSITIONS, edits
 from ..fonts import ensure_qt_font
-from ..models import Project, TextClip
+from ..models import OverlayClip, Project, TextClip
 from ..titles import text_state
-from ..preview import Look, PreviewEngine, Rendered, Shot
+from ..preview import Look, OverlayShot, PreviewEngine, Rendered, Shot
 from .platform_overlay import draw_platform_overlay
 from .text_render import draw_text, text_rect
 from .theme import fmt_time
@@ -36,6 +37,10 @@ class Canvas(QWidget):
     text_activated = Signal(str)               # double-click: edit the title
     context_menu = Signal(object, str)         # global position, title id under the mouse ("" = none)
     background_activated = Signal()            # double-click outside the titles
+    overlay_pressed = Signal(str)              # a video-layer clip was clicked
+    overlay_dragged = Signal(str, float, float)   # overlay id, new centre x / y (0..1 of the frame)
+    overlay_released = Signal(str, bool)       # overlay id, whether it was moved
+    overlay_scaled = Signal(str, float)        # overlay id, size factor (mouse wheel over it)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,6 +52,10 @@ class Canvas(QWidget):
         self._frame_rect = QRectF()
         self._text_rects: list[tuple[str, QRectF]] = []
         self._text_drag: Optional[dict] = None
+        # Video-layer clips showing now: (id, centre x, y, width, height as parts of the frame, rotation °).
+        self.overlay_boxes: list[tuple[str, float, float, float, float, float]] = []
+        self.selected_overlay = ""
+        self._ov_drag: Optional[dict] = None
         self.setMouseTracking(True)
         self.caption: Optional[Caption] = None
         self.caption_t = 0.0
@@ -82,6 +91,7 @@ class Canvas(QWidget):
             for k in (1, 2):
                 p.drawLine(QPointF(r.left() + r.width() * k / 3, r.top()), QPointF(r.left() + r.width() * k / 3, r.bottom()))
                 p.drawLine(QPointF(r.left(), r.top() + r.height() * k / 3), QPointF(r.right(), r.top() + r.height() * k / 3))
+        self._draw_overlay_outline(p, r)
         self._draw_texts(p, r)
         if self.caption and self.caption_style is not None:
             p.setOpacity(self.overlay_gain)
@@ -104,6 +114,37 @@ class Canvas(QWidget):
                 p.setBrush(Qt.NoBrush)
                 p.drawRect(rect)
 
+    def _draw_overlay_outline(self, p: QPainter, r: QRectF):
+        for oid, cx, cy, w, h, rot in self.overlay_boxes:
+            if oid != self.selected_overlay:
+                continue
+            p.save()
+            p.translate(r.left() + cx * r.width(), r.top() + cy * r.height())
+            p.rotate(rot)
+            p.setPen(QPen(QColor("#ffb84d"), 1.5, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(-w * r.width() / 2, -h * r.height() / 2, w * r.width(), h * r.height()))
+            p.restore()
+
+    def _overlay_at(self, pos: QPointF) -> str:
+        """The topmost video-layer clip under pos ("" for none)."""
+        r = self._frame_rect
+        if r.width() <= 0:
+            return ""
+        for oid, cx, cy, w, h, rot in reversed(self.overlay_boxes):
+            pt = QTransform().rotate(-rot).map(QPointF(pos.x() - (r.left() + cx * r.width()),
+                                                        pos.y() - (r.top() + cy * r.height())))
+            if abs(pt.x()) <= w * r.width() / 2 and abs(pt.y()) <= h * r.height() / 2:
+                return oid
+        return ""
+
+    def wheelEvent(self, e):
+        oid = self._overlay_at(e.position())
+        if oid and oid == self.selected_overlay:
+            self.overlay_scaled.emit(oid, 1.05 if e.angleDelta().y() > 0 else 1 / 1.05)
+            return
+        super().wheelEvent(e)
+
     def _text_at(self, pos: QPointF) -> str:
         for tid, rect in reversed(self._text_rects):
             if rect.contains(pos):
@@ -124,13 +165,33 @@ class Canvas(QWidget):
                 self.text_pressed.emit(tid)
                 self._text_drag = {"id": tid, "p0": pos, "x0": tc.x, "y0": tc.y, "moved": False}
                 return
+        oid = self._overlay_at(pos) if e.button() == Qt.LeftButton else ""
+        if oid:
+            box = next(b for b in self.overlay_boxes if b[0] == oid)
+            self.overlay_pressed.emit(oid)
+            self._ov_drag = {"id": oid, "p0": pos, "x0": box[1], "y0": box[2], "moved": False}
+            return
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
         d = self._text_drag
         pos = e.position()
+        od = self._ov_drag
+        if od is not None:
+            r = self._frame_rect
+            dx, dy = pos.x() - od["p0"].x(), pos.y() - od["p0"].y()
+            if r.width() <= 0 or (not od["moved"] and abs(dx) + abs(dy) < 3):
+                return
+            od["moved"] = True
+            x, y = od["x0"] + dx / r.width(), od["y0"] + dy / r.height()
+            if abs(x - 0.5) * r.width() < 6:      # snap to the centre lines
+                x = 0.5
+            if abs(y - 0.5) * r.height() < 6:
+                y = 0.5
+            self.overlay_dragged.emit(od["id"], x, y)
+            return
         if d is None:
-            self.setCursor(Qt.SizeAllCursor if self._text_at(pos) else Qt.ArrowCursor)
+            self.setCursor(Qt.SizeAllCursor if self._text_at(pos) or self._overlay_at(pos) else Qt.ArrowCursor)
             return
         r = self._frame_rect
         if r.width() <= 0:
@@ -148,6 +209,10 @@ class Canvas(QWidget):
         self.text_dragged.emit(d["id"], x, y)
 
     def mouseReleaseEvent(self, e):
+        od, self._ov_drag = self._ov_drag, None
+        if od is not None:
+            self.overlay_released.emit(od["id"], od["moved"])
+            return
         d, self._text_drag = self._text_drag, None
         if d is not None:
             self.text_released.emit(d["id"], d["moved"])
@@ -158,6 +223,8 @@ class Canvas(QWidget):
         tid = self._text_at(e.position())
         if tid:
             self.text_activated.emit(tid)
+        elif self._overlay_at(e.position()):
+            pass
         else:
             self.background_activated.emit()
 
@@ -240,6 +307,7 @@ class Viewer(QWidget):
         self._bridge.still.connect(self._on_still)
         self.engine = PreviewEngine(self._bridge.still.emit)
         self._play_shots: list[Shot] = []
+        self._play_overlays: tuple = ()
         self._frame: Optional[np.ndarray] = None
         self.captions: list[Caption] = []
         self.t = 0.0
@@ -495,6 +563,7 @@ class Viewer(QWidget):
         self._audio_resume = False
         self.player.pause()
         self._play_shots = self._shots()
+        self._play_overlays = self._overlay_shots()
         self.engine.start_playback(self._play_shots, self._look(), self._play_t0, None,
                                    self.project.settings.fps)
 
@@ -555,7 +624,28 @@ class Viewer(QWidget):
         color = self.adjust_mode == "on" or (self.adjust_mode == "playback" and not self.playing)
         end = self.project.duration
         fi, fo = s.fades(end)
-        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT, color, fi, fo, end)
+        return Look(s.use_proxies, s.fit_mode, tw, th, self.PREVIEW_SHORT, color, fi, fo, end, self._overlay_shots())
+
+    def _overlay_shots(self) -> tuple:
+        """The overlay layers (private copies), bottom layer first."""
+        out = []
+        for c in sorted(self.project.overlays, key=lambda x: x.track):
+            f = self.project.footage.get(c.footage_id)
+            if f is not None and c.duration > 0 and c.start < self.project.duration:
+                out.append(OverlayShot(OverlayClip.from_dict(c.to_dict()), f.log_profile, f.tonemap, f))
+        return tuple(out)
+
+    def overlay_boxes(self, t: float) -> list:
+        """Where the video-layer clips showing at t sit in the frame (see Canvas.overlay_boxes)."""
+        tw, th = self.preview_size()
+        out = []
+        for c in sorted(self.project.overlays, key=lambda x: x.track):
+            f = self.project.footage.get(c.footage_id)
+            if f is None or not (c.start <= t < c.end) or c.start >= self.project.duration:
+                continue
+            w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h)
+            out.append((c.id, c.x, c.y, w / tw, h / th, c.rotation))
+        return out
 
     def _shot(self, clip, start: float, index: Optional[int] = None) -> Optional[Shot]:
         f = self.project.footage.get(clip.footage_id)
@@ -564,7 +654,8 @@ class Viewer(QWidget):
         g = clip.grade or Grade()
         return Shot(self.project.index_of(clip.id) if index is None else index, start, clip.duration, clip.src_in,
                     f.id, Grade.from_dict(g.to_dict()), f.log_profile, f.tonemap, clip.zoom, clip.offset_x,
-                    clip.offset_y, f)
+                    clip.offset_y, f, rot=clip.rotation,
+                    box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else ())
 
     def _shots(self) -> list[Shot]:
         out, t = [], 0.0
@@ -594,7 +685,7 @@ class Viewer(QWidget):
             return
         if self.playing:
             # Edited during playback: re-read the timeline from here if what plays changed.
-            if self._shots() != self._play_shots:
+            if self._shots() != self._play_shots or self._overlay_shots() != self._play_overlays:
                 self._restart_playback()
             return
         idx = proj.index_of(self._override[0]) if self._override else -1
@@ -630,6 +721,7 @@ class Viewer(QWidget):
         t = self.t if still else r.t
         self.canvas.texts = self.project.texts
         self.canvas.text_t = t if self._override is None else -1.0
+        self.canvas.overlay_boxes = self.overlay_boxes(t) if self._override is None else []
         self.canvas.overlay_gain = self._look().fade_gain(t)
         st = self.project.settings.captions
         if self._override is None and st.enabled:
