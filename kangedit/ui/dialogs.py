@@ -202,6 +202,13 @@ class AutoEditDialog(QDialog):
     # ------------------------------------------------------------------ multicam
     ANGLE_LABELS = ["Main angle", "Angle 2", "Angle 3", "Angle 4", "Not used"]
 
+    def _layout_changed(self):
+        key = self.cb_layout.currentData()
+        self.lbl_layout.setText(multicam.TEMPLATE_HINTS[key])
+        # Switching shows one angle at a time: the sound stays on the main angle.
+        self.cb_audio.setEnabled(key != "switch")
+        self.cb_audio.setToolTip("Switching keeps the main angle's sound" if key == "switch" else "")
+
     def _multicam_box(self, project: Project) -> QGroupBox:
         g = QGroupBox("Multicam — several angles of the same moments")
         v = QVBoxLayout(g)
@@ -240,8 +247,7 @@ class AutoEditDialog(QDialog):
         f.addRow(grid)
         last = project.settings.multicam or {}
         self.cb_layout = _combo(multicam.TEMPLATES, last.get("template", "pip"))
-        self.cb_layout.currentIndexChanged.connect(
-            lambda: self.lbl_layout.setText(multicam.TEMPLATE_HINTS[self.cb_layout.currentData()]))
+        self.cb_layout.currentIndexChanged.connect(self._layout_changed)
         self.lbl_layout = QLabel(multicam.TEMPLATE_HINTS[self.cb_layout.currentData()])
         self.lbl_layout.setWordWrap(True)
         self.lbl_layout.setStyleSheet("color: #8b909a;")
@@ -253,6 +259,7 @@ class AutoEditDialog(QDialog):
         f.addRow(self.lbl_layout)
         f.addRow("Sound", self.cb_audio)
         f.addRow(self.chk_covered)
+        self._layout_changed()
         self.lbl_angles = QLabel("")
         self.lbl_angles.setWordWrap(True)
         self.lbl_angles.setStyleSheet("color: #e0b050;")
@@ -431,6 +438,12 @@ class ExportDialog(QDialog):
                                 "Falls back to the CPU automatically if the card can't do it. ProRes always uses the CPU.\n"
                                 "GPU files are a little larger at the same quality setting.")
         self.chk_gpu.setChecked(use_gpu)
+        self.chk_blend = QCheckBox("Smooth slow motion (blend frames)")
+        self.chk_blend.setToolTip("Slowed-down clips blend neighbouring frames instead of showing each one twice or "
+                                  "more:\nsmoother movement, slightly softer. Off: crisp repeated frames.")
+        self.chk_blend.setChecked(True)
+        slow = [c for c in project.clips + project.overlays if c.ramp or c.speed < 1.0]
+        self.chk_blend.setVisible(bool(slow))
         self.lbl_size = QLabel("")
         self.lbl_size.setStyleSheet("color: #8b909a;")
         for cb in (self.cb_aspect, self.cb_res):
@@ -446,6 +459,7 @@ class ExportDialog(QDialog):
         form.addRow("Captions", self.cb_caps)
         form.addRow(self.chk_proxy)
         form.addRow(self.chk_gpu)
+        form.addRow(self.chk_blend)
         lay.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Export")
@@ -489,6 +503,7 @@ class ExportDialog(QDialog):
             captions=self.cb_caps.currentData() if self.cb_caps.isEnabled() else "none",
             use_proxies=self.chk_proxy.isChecked(),
             use_gpu=self.chk_gpu.isChecked(),
+            blend_slowmo=self.chk_blend.isChecked(),
         )
 
 

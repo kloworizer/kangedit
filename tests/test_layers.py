@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tarfile
+import threading
 import zipfile
 
 import cv2
@@ -357,3 +358,119 @@ def test_ctrl_a_then_conversion_lut_changes_every_selected_clip(window, qapp, lu
     window.inspector_request("import_lut_look")
     looks = {c.grade.look for c in p.clips}
     assert len(looks) == 1 and looks.pop().endswith(".cube")
+
+
+# ----------------------------------------------------------------------------- refining clips on every layer
+def _layered(window, tmp_path):
+    p, f, logo = _project(tmp_path, overlays=[("video", {"start": 0.5, "src_in": 2.0, "src_out": 5.0, "track": 0}),
+                                              ("video", {"start": 1.0, "src_in": 6.0, "src_out": 8.0, "track": 1}),
+                                              ("logo", {"start": 0.0, "src_out": 4.0, "track": 2})])
+    window.set_project(p)
+    return p, f, logo
+
+
+def test_inspector_refines_a_layer_clip(window, tmp_path):
+    p, f, _ = _layered(window, tmp_path)
+    o = p.overlays[1]                                   # on V3
+    window.tl.select_overlay(o.id)
+    ins = window.inspector
+    assert ins.clip is o and "layer V3" in ins.lbl_title.text()
+    assert ins.b_layer.isVisibleTo(ins) and not ins.grp_edit.isVisibleTo(ins) and not ins.grp_reframe.isVisibleTo(ins)
+    ins.params["exposure"].set_value(0.7, emit=True)
+    ins.params["saturation"].set_value(120, emit=True)
+    assert (o.grade.exposure, o.grade.saturation) == (0.7, 120.0)
+    assert p.clips[0].grade.exposure == 0.0 and p.overlays[0].grade.exposure == 0.0   # only that clip
+    ins.sp_out.setValue(7.5)                             # trim its source
+    assert o.src_out == 7.5
+    ins.vol.set_value(40, emit=True)
+    assert o.volume == pytest.approx(0.4)
+    ins.cb_log.setCurrentIndex(ins.cb_log.findData("vlog"))   # the footage's log profile
+    assert f.log_profile == "vlog"
+    window.undo()
+    assert f.log_profile != "vlog"
+    for _ in range(3):                                   # volume, trim, saturation: one step each
+        window.undo()
+    o = window._overlay(o.id)
+    assert o.src_out == 8.0 and o.volume == 1.0 and o.grade.saturation == 100.0 and o.grade.exposure == 0.7
+    window.undo()
+    assert window._overlay(o.id).grade.exposure == 0.0
+    # back on the main track the Inspector shows the main clip again, with its transition and reframe
+    window.tl.selected = p.clips[1].id
+    window.tl.select_overlay("")
+    window._on_select(p.clips[1].id)
+    assert window.inspector.clip is window.project.clips[1] and window.inspector.grp_reframe.isVisibleTo(ins)
+
+
+def test_layer_grade_reaches_the_preview_and_the_export(window, tmp_path):
+    p, f, _ = _layered(window, tmp_path)
+    o = p.overlays[0]
+    window.tl.select_overlay(o.id)
+    window.inspector.params["exposure"].set_value(1.0, emit=True)
+    shots = window.viewer._overlay_shots()
+    assert next(s for s in shots if s.clip.id == o.id).grade.exposure == 1.0
+    g = _graph(tmp_path, window.project)
+    assert "lut_ov0.cube" in g or "lut_ov1.cube" in g
+
+
+def test_copy_and_reset_grade_across_layers(window, tmp_path):
+    p, f, logo = _layered(window, tmp_path)
+    a, b, pic = p.overlays
+    a.grade.contrast = 25.0
+    window._timeline_action("ov_copy_grade", a.id)
+    assert b.grade.contrast == 25.0 and p.clips[0].grade.contrast == 25.0
+    assert pic.grade.contrast == 0.0                   # a picture on a layer (logo) is left alone
+    window._timeline_action("ov_reset_color", b.id)
+    assert b.grade.contrast == 0.0 and a.grade.contrast == 25.0
+    window.undo()
+    assert window._overlay(b.id).grade.contrast == 25.0
+    # from a main-track clip, "Copy to all clips" reaches the layers too
+    c = window.project.clips[0]
+    c.grade.temperature = -12.0
+    window.tl.selected = c.id
+    window._on_select(c.id)
+    window.inspector_request("copy_grade_all")
+    assert all(o.grade.temperature == -12.0 for o in window.project.overlays[:2])
+    assert window.project.overlays[2].grade.temperature == 0.0
+
+
+def test_auto_color_covers_every_layer(window, tmp_path, monkeypatch):
+    import kangedit.ui.main_window as mw
+    from kangedit.color import Grade
+
+    class FakeDec:
+        def frame_at(self, t):
+            return np.full((36, 64, 3), 90, np.uint8)
+
+    class FakePool:
+        def __init__(self, *a, **k):
+            pass
+
+        def get(self, *a, **k):
+            return FakeDec()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mw, "DecoderPool", FakePool)
+    monkeypatch.setattr(mw, "auto_correct", lambda frames, lp, tm, base=None: Grade(exposure=0.4))
+    monkeypatch.setattr(window.tasks, "submit",
+                        lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+    p, f, logo = _layered(window, tmp_path)
+    window._timeline_action("ov_auto_color", p.overlays[1].id)
+    assert p.overlays[1].grade.exposure == 0.4 and p.overlays[0].grade.exposure == 0.0
+    window.inspector_request("auto_color_all")
+    assert all(c.grade.exposure == 0.4 for c in p.clips) and p.overlays[0].grade.exposure == 0.4
+    assert p.overlays[2].grade.exposure == 0.0         # the logo
+    window.undo()
+    assert window.project.overlays[0].grade.exposure == 0.0
+
+
+def test_layer_tab_and_menu_lead_to_the_color_tools(window, tmp_path):
+    p, f, _ = _layered(window, tmp_path)
+    o = p.overlays[0]
+    window.tl.select_overlay(o.id)
+    assert window.right_tabs.currentWidget() is window.layer_panel
+    window.layer_panel.b_color.click()
+    assert window.right_tabs.currentWidget() is window.inspector and window.inspector.clip is o
+    window.inspector.b_layer.click()
+    assert window.right_tabs.currentWidget() is window.layer_panel

@@ -58,7 +58,7 @@ if sys.platform == "darwin":
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "12.0",
+            "LSMinimumSystemVersion": "14.0",   # the bundled Qt 6, onnxruntime and NumPy need macOS 14
             "CFBundleDocumentTypes": [{
                 "CFBundleTypeName": "KangEdit project",
                 "CFBundleTypeExtensions": ["kgproj"],

@@ -9,6 +9,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 ## Contents
 
 - [Features](#features)
+- [System requirements](#system-requirements)
 - [Install and run](#install-and-run)
 - [Quick start](#quick-start)
 - [Keyboard and mouse](#keyboard-and-mouse)
@@ -51,7 +52,8 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
 | **Multicam** | Two or more cameras (or a phone and a camera) on the same scene: turn on *Multicam* in ✨ Auto Edit and give each file its angle. The angles are synced by their sound (onset matching over the whole recording, then sample-accurate matching in windows across it, with clock drift corrected), the main angle is edited as usual and the others follow on the video layers, cut at the same moments. Layouts: picture in picture, main video + talking cam, stacked, side by side, 2 × 2 grid; boxes are cropped around each angle's face. The angles keep in sync as you trim, slip, split or swap moments; *Tools → Multicam layout* changes the layout later. |
 | **Images** | Import JPG, PNG, GIF, BMP, WebP and TIFF pictures along with your footage. On the main track an image is a 5-second clip (trim it to any length); an animated GIF loops; PNG transparency is kept on video layers. |
-| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. |
+| **Video layers** | Layers **V2, V3…** above the main track for picture in picture, logos, B-roll and images on top. Drag footage or an image from Media onto a layer (or right-click it → *Add on a video layer*). Drag the clip in the viewer to place it and use the mouse wheel over it to resize it; the **🧩 Layer** tab sets position, size, rotation, opacity, fades and the clip's own volume, with one-click corners for picture in picture. Higher layers sit in front. Add layers from the layer's right-click menu. A layer clip is refined like a main-track clip: with it selected, the **🎨 Color** tab sets its log conversion, exposure and color, ✨ Auto, look LUT, source in / out, speed and volume. |
+| **Slow & fast motion, speed ramps** | Right-click a clip → *Speed* (0.25× to 4×, or any speed from 0.1× to 8×), or the Inspector's **Speed** group. *Speed ramp* templates change the speed along the clip: *Hero moment*, *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse*, *Montage*. *Sound at this speed* keeps the sound in sync (pitch kept, or pitch following the speed like a tape), plays it at normal speed, or mutes it. Captions and multicam angles follow, and the export can blend frames for smoother slow motion. |
 | **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
 | **Lane heights and zoom** | Drag the bottom edge of the video track, the video layers or the sound lane to make them taller (double-click the edge to reset), or use **↕ Lanes** (sliders and *Fit to panel*). **⇔ Fit** (Shift+Z) zooms so the whole edit, every lane included, fits the width; **− / +** (Ctrl+− / Ctrl+=) zoom out / in. |
 | **Used in the edit** | The Media list's **In edit** column and a green **✓** on the thumbnails show which footage the timeline uses, and how many times. |
@@ -89,11 +91,40 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 ---
 
+## System requirements
+
+### Ready-made builds
+
+| | Minimum | Notes |
+|---|---|---|
+| **Windows** | Windows 10 version 1809 or Windows 11, 64-bit (x64) | Windows on ARM isn't tested. |
+| **macOS** | macOS 14 Sonoma, Apple Silicon (M1 or newer) | No Intel build. The app says so on older macOS versions. |
+| **Linux** | x86-64 with glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36, Linux Mint 21, RHEL / Rocky / Alma 10, or newer | X11 or Wayland desktop. No ARM64 build. RHEL 9 and its clones (glibc 2.34) are too old. Needs the Qt libraries listed under [Linux](#linux-x86-64-or-arm64). |
+
+These are the oldest systems the bundled libraries support: Qt 6.12, onnxruntime, NumPy and OpenCV in the macOS build need macOS 14, and the Linux build is made on Ubuntu 22.04 (glibc 2.35).
+
+### From source
+
+Python **3.10 or newer** on 64-bit Windows 10 / 11, macOS or Linux (x86-64 or ARM64). Each release is tested on Windows (latest), macOS 14 and Ubuntu 22.04 with Python 3.10 and 3.12. On older systems (macOS 12 or 13, Intel Macs, Linux with glibc 2.28 to 2.33) pip installs older versions of Qt and the other packages that still support them. That should work, but it isn't tested.
+
+### Hardware
+
+| | Minimum | Recommended |
+|---|---|---|
+| **CPU** | 64-bit, 4 cores | 8 cores or more for 4K |
+| **Memory** | 8 GB | 16 GB or more for 4K or long edits |
+| **Disk** | about 1.5 GB for the app, FFmpeg and the speech model, plus space for analysis, proxies and exports | an SSD for the footage and the cache |
+| **Graphics** | any (preview and export work on the CPU) | a GPU with a video encoder (NVIDIA, AMD, Intel, Apple) for faster proxies and exports; an NVIDIA card with CUDA for faster captions |
+
+An internet connection is needed once, to download FFmpeg and the speech model, and later for updates, NCS music, sound effects and official LUTs.
+
+---
+
 ## Install and run
 
 ### Ready-made builds
 
-Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon)** and **Linux (x64)**: no Python needed. Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time. `SHA256SUMS.txt` lists the archives' checksums.
+Each [GitHub release](../../releases) has a packaged KangEdit for **Windows (x64)**, **macOS (Apple Silicon, macOS 14 or newer)** and **Linux (x64)**: no Python needed (see [System requirements](#system-requirements)). Unpack it and start `KangEdit.exe`, `KangEdit.app` or `KangEdit/KangEdit`. FFmpeg is downloaded on the first start. The builds aren't code-signed: on Windows choose *More info → Run anyway*; on macOS right-click the app → *Open* the first time. `SHA256SUMS.txt` lists the archives' checksums.
 
 ### From source
 
@@ -110,7 +141,7 @@ The first start takes a few minutes and needs about 1.5 GB of disk space. Later 
 1. Install Python from [python.org](https://www.python.org/downloads/). Tick **"Add python.exe to PATH"** in the installer.
 2. Double-click **`run.bat`**.
 
-### macOS 12 or newer (Apple Silicon or Intel)
+### macOS (Apple Silicon or Intel)
 
 1. Install Python: `brew install python@3.12`, or the installer from [python.org](https://www.python.org/downloads/).
 2. In Terminal, in the KangEdit folder:
@@ -234,16 +265,25 @@ an image, a second camera angle. Higher layers are in front of lower ones.
   clip resizes it.
 - The **🧩 Layer** tab (double-click the clip, or select it) has one-click positions (full frame, centre and the
   four picture-in-picture corners), X / Y, size, rotation (⟲ / ⟳ 90°), opacity, fade in / out, start, length,
-  layer and the clip's own volume.
+  speed and speed ramp, layer and the clip's own volume.
 - Clips cropped to fill a box (the multicam layouts) also get **Crop X / Y**, to choose which part of the picture
   fills it.
+
+**Refine it**
+
+- With a layer clip selected, the **🎨 Color** (Clip) tab works on it as on a main-track clip: log conversion and
+  camera detection, exposure and color, ✨ Auto, look LUT, source in / out, speed and volume. The 🧩 Layer tab's
+  *Color, log, LUT, trim & speed* button gets you there; right-click the clip → *Color* for auto color, reset and
+  *Copy this grade to all clips*.
+- *✨ Auto all clips* and *Copy to all clips* cover the main track and the video on every layer (pictures on the
+  layers, such as logos, keep their own look).
 
 **Time it**
 
 - On the timeline, drag a layer clip to move it in time, or up / down to another layer; drag its edges to trim.
   It snaps to the playhead, the cuts and other layer clips.
-- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, fades, layer
-  up / down and *Delete*.
+- Right-click it for *Move to playhead*, *Split at playhead*, *Duplicate*, positions, rotation, *Speed*,
+  *Speed ramp*, fades, layer up / down and *Delete*.
 - A layer clip's sound is mixed in at its own volume (0 % mutes it). PNG transparency is kept.
 
 **Multicam: several cameras of the same moments**
@@ -267,9 +307,14 @@ sound doesn't match is left out with a warning.
 | Stacked, top / bottom | A full-width band per angle, each cropped around its subject (for 9:16). |
 | Side by side | A full-height column per angle (for 16:9). |
 | Grid (2 × 2) | Up to four angles. |
+| Switching | Like a live multicam edit: one angle fills the frame at a time and the edit cuts between them at the best moments: to whoever is speaking (each camera's microphone is loudest for the person nearest it), the closer face, the steadier and sharper picture. Shots last at least 2 s, and an angle held for long gives way to another for a few seconds (a reaction shot). The sound stays on the main angle. |
 
 Two angles take the main track and one layer, three angles two layers, and so on: in the boxed layouts the main
-angle's clips are shown in their box on the main track itself.
+angle's clips are shown in their box on the main track itself. Switching uses one layer for every other angle,
+one clip per shot.
+
+Transitions between main-track clips include the angles: a dissolve (or wipe, slide, zoom) cross-fades every
+angle along with the main picture, and a dip to black or white fades them out and in.
 
 The angles are **linked** to the main clip they were cut with (🔗 on the layer clip). Trims, slips, splits,
 *Other moment*, a new hook and reordering on the main track re-time them, and the angle clips are handles on the
@@ -424,6 +469,7 @@ kangedit/
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
   images.py             still images and animated GIFs as footage
+  speed.py              slow / fast motion and speed ramps (timeline ↔ source time map, FFmpeg setpts / atempo)
   sync.py               syncing recordings by their sound (onset envelope + GCC-PHAT, drift fit)
   multicam.py           multicam layouts and keeping the angles in step with the edit
   faces.py              face detection (YuNet model in assets/) for Zoom to face and best-moment scoring

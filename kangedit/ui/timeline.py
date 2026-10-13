@@ -18,6 +18,8 @@ from ..analysis import WAVE_RATE, Analysis
 from ..captions import Caption
 from ..edits import TRANSITIONS, edits
 from ..models import OverlayClip, Project, SoundClip
+from ..speed import RAMPS, SOUND_MODES, SPEED_PRESETS, sound_mode
+from ..speed import label as speed_label
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS
 from .flow import FlowBar
 from .theme import CLIP_COLORS, fmt_time
@@ -483,7 +485,7 @@ class TimelineView(QWidget):
             if x < 0:  # skip tiles scrolled out on the left
                 x += int(-x // th_w) * th_w
             while x < min(r.right(), self.width()):
-                src_t = c.src_in + (x - r.left()) / self.pps
+                src_t = c.src_at((x - r.left()) / self.pps)
                 idx = int(np.searchsorted(a.thumb_times, src_t, side="right") - 1)
                 img = self._thumb(c.footage_id, max(0, idx))
                 if img is not None:
@@ -498,8 +500,9 @@ class TimelineView(QWidget):
             x1 = int(min(r.right(), self.width()))
             if x1 > x0:
                 xs = np.arange(x0, x1, 2)
-                ts = c.src_in + (xs - r.left()) / self.pps
-                vals = a.wave[np.clip((ts * WAVE_RATE).astype(int), 0, a.wave.size - 1)] * c.volume
+                ts = np.asarray(c.sound_src_at((xs - r.left()) / self.pps), dtype=np.float64)
+                vol = 0.0 if c.audio_mode == "mute" else c.volume
+                vals = a.wave[np.clip((ts * WAVE_RATE).astype(int), 0, a.wave.size - 1)] * vol
                 mid = wr.center().y()
                 amp = (self.wave_h / 2 - 1) * np.clip(vals, 0, 1)
                 poly = QPolygonF([QPointF(x, mid - h) for x, h in zip(xs, amp)] +
@@ -516,6 +519,8 @@ class TimelineView(QWidget):
             p.setFont(fnt)
             p.setPen(QColor("white"))
             label = f"{f.name}  {c.duration:.1f}s"
+            if speed_label(c.speed, c.ramp):
+                label += f"  ⏱{speed_label(c.speed, c.ramp)}"
             if abs(c.rotation) > 0.05:
                 label += f"  ⟳{c.rotation:g}°"
             if c.score is not None:
@@ -568,7 +573,8 @@ class TimelineView(QWidget):
             p.drawImage(QRectF(x, strip.top(), th_w, th_h), img)
             x += th_w
 
-    def _paint_footage_strip(self, p: QPainter, fid: str, src_in: float, strip: QRectF, r: QRectF):
+    def _paint_footage_strip(self, p: QPainter, c, strip: QRectF, r: QRectF):
+        fid = c.footage_id
         f = self.project.footage.get(fid)
         if f is None:
             return
@@ -584,7 +590,7 @@ class TimelineView(QWidget):
         if x < 0:
             x += int(-x // th_w) * th_w
         while x < min(r.right(), self.width()):
-            idx = int(np.searchsorted(a.thumb_times, src_in + (x - r.left()) / self.pps, side="right") - 1)
+            idx = int(np.searchsorted(a.thumb_times, c.src_at((x - r.left()) / self.pps), side="right") - 1)
             img = self._thumb(fid, max(0, idx))
             if img is not None:
                 p.drawImage(QRectF(x, strip.top(), th_w, th_h), img)
@@ -640,8 +646,7 @@ class TimelineView(QWidget):
             p.fillRect(r, col.darker(170))
             head = min(14.0, r.height())
             if r.height() > 26:
-                self._paint_footage_strip(p, c.footage_id, c.src_in,
-                                          QRectF(r.left(), r.top() + head, r.width(), r.height() - head), r)
+                self._paint_footage_strip(p, c, QRectF(r.left(), r.top() + head, r.width(), r.height() - head), r)
             p.fillRect(QRectF(r.left(), r.top(), r.width(), head), col.darker(115))
             fi, fo = c.fades()
             p.setPen(QPen(QColor(255, 255, 255, 190), 1))
@@ -655,6 +660,8 @@ class TimelineView(QWidget):
                 p.setPen(QColor("white"))
                 link = ("🔗 " if c.linked else "⛓ unlinked · ") if c.link else ""
                 label = f"{link}{'🖼 ' if ft.is_image else ''}{ft.name}  {c.duration:.1f}s"
+                if speed_label(c.speed, c.ramp):
+                    label += f"  ⏱{speed_label(c.speed, c.ramp)}"
                 if c.opacity < 0.999:
                     label += f"  {c.opacity * 100:.0f}%"
                 p.drawText(QRectF(r.left() + 4, r.top(), r.width() - 8, head), Qt.AlignVCenter | Qt.AlignLeft,
@@ -712,8 +719,9 @@ class TimelineView(QWidget):
             self._drag = {"kind": kind, "clip": main.id, "x0": pos.x(), "in0": main.src_in, "out0": main.src_out,
                           "active": False, "drop": None, "mods": Qt.NoModifier, "angle": c.id}
             return True
+        tm = c.timemap()
         self._drag = {"kind": part, "overlay": c.id, "x0": pos.x(), "start0": c.start, "in0": c.src_in,
-                      "out0": c.src_out, "track0": c.track, "active": False}
+                      "out0": c.src_out, "track0": c.track, "active": False, "v_in": tm.v_in, "v_out": tm.v_out}
         return True
 
     def _linked_main(self, c: OverlayClip):
@@ -753,13 +761,14 @@ class TimelineView(QWidget):
             c.start = max(0.0, self._snap(start))
             c.track = track
         elif d["kind"] == "o_trim_l":
-            new_in = min(max(0.0, d["in0"] + dt), d["out0"] - MIN_DUR)
-            new_in = max(new_in, d["in0"] - d["start0"])      # can't start before the timeline
+            v = d.get("v_in", 1.0)          # timeline seconds -> source seconds at the clip's speed
+            new_in = min(max(0.0, d["in0"] + dt * v), d["out0"] - MIN_DUR)
+            new_in = max(new_in, d["in0"] - d["start0"] * v)      # can't start before the timeline
             c.src_in = new_in
-            c.start = d["start0"] + (new_in - d["in0"])
+            c.start = d["start0"] + (new_in - d["in0"]) / v
         else:
             limit = f.duration if f is not None else d["out0"]
-            c.src_out = max(min(limit, d["out0"] + dt), d["in0"] + MIN_DUR)
+            c.src_out = max(min(limit, d["out0"] + dt * d.get("v_out", 1.0)), d["in0"] + MIN_DUR)
         self.update()
         self.overlays_changed.emit()
 
@@ -780,6 +789,13 @@ class TimelineView(QWidget):
         sub = m.addMenu("Rotate")
         for key, label in (("-90", "⟲ 90° left"), ("90", "⟳ 90° right"), ("0", "Straight (0°)")):
             self._menu_action(sub, label, f"ov_rotate:{key}", oid)
+        if not (self.project.footage.get(c.footage_id) and self.project.footage[c.footage_id].is_image):
+            self._speed_menu(m, "ov_", oid, c.speed, c.ramp, audio=c.audio_mode)
+        sub = m.addMenu("Color")
+        self._menu_action(sub, "Color, log && LUT…", "ov_color", oid)
+        self._menu_action(sub, "Auto color", "ov_auto_color", oid)
+        self._menu_action(sub, "Reset color", "ov_reset_color", oid)
+        self._menu_action(sub, "Copy this grade to all clips (every layer)", "ov_copy_grade", oid)
         for key, label, cur in (("ov_fade_in", "Fade in", c.fade_in), ("ov_fade_out", "Fade out", c.fade_out)):
             sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
             for v in (0.0, 0.25, 0.5, 1.0, 2.0):
@@ -1019,6 +1035,36 @@ class TimelineView(QWidget):
             x.duration = end - d["start0"]
         self.update()
         self.texts_changed.emit()
+
+    def _speed_menu(self, m: QMenu, prefix: str, payload: str, speed: float, ramp: str, many: str = "",
+                    audio: str = "sync"):
+        """Speed submenus: constant slow / fast motion, the ramp templates and what the sound does (actions
+        {prefix}speed:<x>, {prefix}speed_custom, {prefix}ramp:<key>, {prefix}audio:<mode>)."""
+        cur = speed_label(speed, ramp)
+        sub = m.addMenu(f"Speed{many} ({cur})" if cur else f"Speed{many}")
+        for v in SPEED_PRESETS:
+            name = "Normal (1×)" if v == 1.0 else (f"{v:g}× slow motion" if v < 1 else f"{v:g}× fast motion")
+            a = self._menu_action(sub, name, f"{prefix}speed:{v:g}", payload)
+            a.setCheckable(True)
+            a.setChecked(abs(speed - v) < 1e-6)
+        self._menu_action(sub, "Custom speed…", f"{prefix}speed_custom", payload)
+        sub = m.addMenu("Speed ramp" + (f" ({RAMPS[ramp][0]})" if ramp in RAMPS else ""))
+        a = self._menu_action(sub, "None (constant speed)", f"{prefix}ramp:", payload)
+        a.setCheckable(True)
+        a.setChecked(ramp not in RAMPS)
+        for k, (name, desc, _keys) in RAMPS.items():
+            a = self._menu_action(sub, name, f"{prefix}ramp:{k}", payload)
+            a.setCheckable(True)
+            a.setChecked(ramp == k)
+            a.setToolTip(desc)
+        sub.setToolTipsVisible(True)
+        sub = m.addMenu("Sound at this speed")
+        for k, (name, desc) in SOUND_MODES.items():
+            a = self._menu_action(sub, name, f"{prefix}audio:{k}", payload)
+            a.setCheckable(True)
+            a.setChecked(sound_mode(audio) == k)
+            a.setToolTip(desc)
+        sub.setToolTipsVisible(True)
 
     def _menu_action(self, m: QMenu, label: str, key: str, payload: str):
         a = QAction(label, m)
@@ -1306,8 +1352,10 @@ class TimelineView(QWidget):
         if part == "body":
             slip = self.mode == "slip" or (mods & (Qt.AltModifier | Qt.ShiftModifier))
             kind = "slip" if slip else "move"
+        tm = c.timemap()
         self._drag = {"kind": kind, "clip": c.id, "x0": pos.x(), "in0": c.src_in, "out0": c.src_out,
-                      "active": False, "drop": None, "mods": mods}
+                      "active": False, "drop": None, "mods": mods, "v_in": tm.v_in, "v_out": tm.v_out,
+                      "v": tm.speed}
         self.update()
 
     def mouseMoveEvent(self, e):
@@ -1350,7 +1398,9 @@ class TimelineView(QWidget):
                 slip = self.mode == "slip" or (e.modifiers() & (Qt.AltModifier | Qt.ShiftModifier))
                 self.setCursor(Qt.OpenHandCursor if slip else Qt.PointingHandCursor)
                 f = self.project.footage.get(c.footage_id)
-                self.setToolTip(f"{f.name if f else ''}\nSource {c.src_in:.2f}s → {c.src_out:.2f}s\n"
+                spd = speed_label(c.speed, c.ramp)
+                self.setToolTip(f"{f.name if f else ''}\nSource {c.src_in:.2f}s → {c.src_out:.2f}s"
+                                + (f" · speed {spd}" if spd else "") + "\n"
                                 "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
             else:
                 self.setCursor(Qt.ArrowCursor)
@@ -1394,16 +1444,16 @@ class TimelineView(QWidget):
         dt = dx / self.pps
         group = self._has_angles(c.id)     # multicam: the viewer keeps showing every angle, in sync
         if d["kind"] == "trim_l":
-            c.src_in = self._snap(min(max(0.0, d["in0"] + dt), d["out0"] - MIN_DUR))
+            c.src_in = self._snap(min(max(0.0, d["in0"] + dt * d.get("v_in", 1.0)), d["out0"] - MIN_DUR))
             if not group:
                 self.slip_preview.emit(c.id, c.src_in)
         elif d["kind"] == "trim_r":
-            c.src_out = self._snap(max(min(f.duration, d["out0"] + dt), d["in0"] + MIN_DUR))
+            c.src_out = self._snap(max(min(f.duration, d["out0"] + dt * d.get("v_out", 1.0)), d["in0"] + MIN_DUR))
             if not group:
                 self.slip_preview.emit(c.id, max(c.src_in, c.src_out - 1.0 / max(1.0, f.fps)))
         elif d["kind"] == "slip":
             dur = d["out0"] - d["in0"]
-            new_in = self._snap(min(max(0.0, d["in0"] - dt), max(0.0, f.duration - dur)))
+            new_in = self._snap(min(max(0.0, d["in0"] - dt * d.get("v", 1.0)), max(0.0, f.duration - dur)))
             c.src_in, c.src_out = new_in, new_in + dur
             if not group:
                 self.slip_preview.emit(c.id, c.src_in)
@@ -1530,7 +1580,7 @@ class TimelineView(QWidget):
                   ("reset_color", f"Reset color{many}"),
                   ("copy_grade", "Copy this clip's grade to the selected clips" if n > 1 else "Copy grade to all clips"),
                   ("alt_moment", f"Other moment{many}	R"),
-                  ("link_toggle", None),
+                  ("link_toggle", None), ("speed", None),
                   ("face_zoom", f"Zoom{many} to face"),
                   ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
                   (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
@@ -1545,6 +1595,11 @@ class TimelineView(QWidget):
                     self._menu_action(m, ("Unlink its camera angles\tCtrl+L" if on else
                                           "Link its camera angles again (back in sync)\tCtrl+L"), "link_toggle",
                                       clip_id)
+                continue
+            if key == "speed":
+                c = next((x for x in self.project.clips if x.id == clip_id), None)
+                if c is not None:
+                    self._speed_menu(m, "", clip_id, c.speed, c.ramp, many, c.audio_mode)
                 continue
             if key == "transition":
                 sub = m.addMenu(f"Transition into {'these clips' if n > 1 else 'this clip'}")

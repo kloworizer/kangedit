@@ -11,7 +11,9 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayo
 from .. import lut as lutlib
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
-from ..models import Project, TimelineClip
+from ..models import OverlayClip, Project, TimelineClip
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
+from ..speed import clamp as clamp_speed
 
 
 class ParamSlider(QWidget):
@@ -166,6 +168,11 @@ class Inspector(QScrollArea):
         self.lbl_title.setStyleSheet("font-weight: 600; font-size: 13px;")
         self.lbl_title.setWordWrap(True)
         lay.addWidget(self.lbl_title)
+        # A clip on a video layer: its position, size and opacity are in the Layer tab.
+        self.b_layer = QPushButton("🧩 Position, size && opacity on the layer…")
+        self.b_layer.clicked.connect(lambda: self.request.emit("layer_tab"))
+        self.b_layer.hide()
+        lay.addWidget(self.b_layer)
 
         # --- Clip timing
         g = QGroupBox("Clip")
@@ -180,6 +187,44 @@ class Inspector(QScrollArea):
         f.addRow("Source in", self.sp_in)
         f.addRow("Source out", self.sp_out)
         f.addRow("Duration", self.lbl_dur)
+        lay.addWidget(g)
+
+        # --- Speed: slow / fast motion and ramps
+        g = QGroupBox("Speed")
+        f = QFormLayout(g)
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        for v in (0.25, 0.5, 1.0, 2.0, 4.0):
+            b = QPushButton(f"{v:g}×")
+            b.setToolTip("Normal speed" if v == 1 else (f"{v:g}× slow motion" if v < 1 else f"{v:g}× fast motion"))
+            b.setFixedWidth(46)
+            b.clicked.connect(lambda _=False, v=v: self.sp_speed.set_value(v, emit=True))
+            row.addWidget(b)
+        row.addStretch(1)
+        f.addRow(row)
+        self.sp_speed = ParamSlider(MIN_SPEED, MAX_SPEED, 1.0, 0.05, 2, "×")
+        self.sp_speed.setToolTip("Below 1× is slow motion, above 1× fast motion. The clip gets longer or shorter "
+                                 "on the timeline; its sound keeps its pitch.")
+        self.sp_speed.changed.connect(self._set_speed)
+        f.addRow("Speed", self.sp_speed)
+        self.cb_ramp = QComboBox()
+        self.cb_ramp.addItem("None (constant speed)", "")
+        for key, (label, desc, _keys) in RAMPS.items():
+            self.cb_ramp.addItem(label, key)
+            self.cb_ramp.setItemData(self.cb_ramp.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_ramp.setToolTip("Speed ramp template: the speed changes along the clip (multiplied by the speed "
+                                "above)")
+        self.cb_ramp.currentIndexChanged.connect(lambda _: self._set_ramp())
+        f.addRow("Ramp", self.cb_ramp)
+        self.cb_sound = QComboBox()
+        for key, (label, desc) in SOUND_MODES.items():
+            self.cb_sound.addItem(label, key)
+            self.cb_sound.setItemData(self.cb_sound.count() - 1, desc, Qt.ToolTipRole)
+        self.cb_sound.setToolTip("What the clip's sound does at another speed: stay in sync with the picture "
+                                 "(pitch kept or following the speed), play at normal speed, or be muted")
+        self.cb_sound.currentIndexChanged.connect(lambda _: self._set_sound())
+        f.addRow("Sound", self.cb_sound)
+        self.grp_speed = g
         lay.addWidget(g)
 
         # --- Edit into this clip (from the previous one)
@@ -247,10 +292,13 @@ class Inspector(QScrollArea):
         b_auto.setToolTip("Analyze this clip and set exposure, white balance and contrast automatically")
         b_auto.clicked.connect(lambda: self.request.emit("auto_color"))
         b_auto_all = QPushButton("✨ Auto all clips")
+        b_auto_all.setToolTip("Auto color every clip: the main track and the video on every layer")
         b_auto_all.clicked.connect(lambda: self.request.emit("auto_color_all"))
         b_reset = QPushButton("Reset")
         b_reset.clicked.connect(lambda: self.request.emit("reset_color"))
         b_copy = QPushButton("Copy to all clips")
+        b_copy.setToolTip("Give every clip this clip's grade: the main track and the video on every layer "
+                          "(pictures on the layers, such as logos, are left as they are)")
         b_copy.clicked.connect(lambda: self.request.emit("copy_grade_all"))
         btns.addWidget(b_auto, 0, 0)
         btns.addWidget(b_auto_all, 0, 1)
@@ -310,6 +358,7 @@ class Inspector(QScrollArea):
             b.clicked.connect(lambda _=False, k=step: self._rotate_by(k))
             rot_row.addWidget(b)
         f.addRow("Rotation", rot_row)
+        self.grp_reframe = g
         lay.addWidget(g)
 
         # --- Audio
@@ -337,29 +386,44 @@ class Inspector(QScrollArea):
         """The clips an edit applies to: the shown clip and the rest of the selection."""
         return ([self.clip] if self.clip is not None else []) + self.others
 
-    def set_clip(self, clip: Optional[TimelineClip]):
+    def set_clip(self, clip):
+        """Show a clip: one on the main track (TimelineClip), or on a video layer (OverlayClip)."""
         self.clip = clip
-        sel = set(self.selection()) if clip is not None else set()
+        layer = isinstance(clip, OverlayClip)
+        sel = set(self.selection()) if clip is not None and not layer else set()
         self.others = [c for c in self.project.clips if c.id in sel and c is not clip] if clip and clip.id in sel else []
         self.widget().setEnabled(clip is not None)
+        self.b_layer.setVisible(layer)
+        self.grp_edit.setVisible(not layer)          # transitions and J / L cuts: between main-track clips
+        self.grp_reframe.setVisible(not layer)       # a layer clip is placed and sized in the Layer tab
         if clip is None:
-            self.lbl_title.setText("Select a clip on the timeline")
+            self.lbl_title.setText("Select a clip on the timeline (main track or a video layer)")
             return
         f = self.project.footage[clip.footage_id]
-        score = f"  ·  score {clip.score * 100:.0f}" if clip.score is not None else ""
+        score = f"  ·  score {clip.score * 100:.0f}" if getattr(clip, "score", None) is not None else ""
         many = f"\n{len(self.others) + 1} clips selected: changes apply to all of them" if self.others else ""
-        self.lbl_title.setText(f"{f.name}{score}{many}")
+        where = f"  ·  layer V{clip.track + 2}" if layer else ""
+        self.lbl_title.setText(f"{f.name}{where}{score}{many}")
         for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
                   self.sp_split):
             w.blockSignals(True)
-        self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
-        self.sp_tdur.setValue(clip.transition_dur)
-        self.sp_split.setValue(clip.audio_split)
-        self.grp_edit.setEnabled(any(self.project.index_of(c.id) > 0 for c in self.targets))
+        if not layer:
+            self.cb_trans.setCurrentIndex(max(0, self.cb_trans.findData(clip.transition)))
+            self.sp_tdur.setValue(clip.transition_dur)
+            self.sp_split.setValue(clip.audio_split)
+            self.grp_edit.setEnabled(any(self.project.index_of(c.id) > 0 for c in self.targets))
         self.sp_in.setMaximum(f.duration)
         self.sp_out.setMaximum(f.duration)
         self.sp_in.setValue(clip.src_in)
         self.sp_out.setValue(clip.src_out)
+        self.cb_ramp.blockSignals(True)
+        self.cb_ramp.setCurrentIndex(max(0, self.cb_ramp.findData(clip.ramp if clip.ramp in RAMPS else "")))
+        self.cb_ramp.blockSignals(False)
+        self.cb_sound.blockSignals(True)
+        self.cb_sound.setCurrentIndex(max(0, self.cb_sound.findData(sound_mode(clip.audio_mode))))
+        self.cb_sound.blockSignals(False)
+        self.sp_speed.set_value(clip.speed)
+        self.grp_speed.setEnabled(not f.is_image)
         select_data(self.cb_log, f.log_profile, profile_label(f.log_profile))
         self.cb_tone.setCurrentIndex(max(0, self.cb_tone.findData(f.tonemap)))
         self.cb_tone.setEnabled(effective_profile(f.log_profile) in LOG_PROFILES)
@@ -373,10 +437,11 @@ class Inspector(QScrollArea):
         self.lbl_dur.setText(f"{clip.duration:.2f} s")
         for key, ps in self.params.items():
             ps.set_value(getattr(clip.grade, key))
-        self.rf_zoom.set_value(clip.zoom)
-        self.rf_x.set_value(clip.offset_x)
-        self.rf_y.set_value(clip.offset_y)
-        self.rf_rot.set_value(clip.rotation)
+        if not layer:
+            self.rf_zoom.set_value(clip.zoom)
+            self.rf_x.set_value(clip.offset_x)
+            self.rf_y.set_value(clip.offset_y)
+            self.rf_rot.set_value(clip.rotation)
         self.vol.set_value(clip.volume * 100.0)
 
     def _set_trim(self, which: str, v: float):
@@ -390,6 +455,35 @@ class Inspector(QScrollArea):
         else:
             c.src_out = max(min(f.duration, v), c.src_in + 0.25)
         self.lbl_dur.setText(f"{c.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_speed(self, v: float):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:speed")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.speed = clamp_speed(v)
+        self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_ramp(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:ramp")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.ramp = self.cb_ramp.currentData() or ""
+        self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
+        self.changed.emit("trim")
+
+    def _set_sound(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("trim:audio_mode")
+        for c in self.targets:
+            if not self.project.footage[c.footage_id].is_image:
+                c.audio_mode = self.cb_sound.currentData() or "sync"
         self.changed.emit("trim")
 
     def _set_edit(self, key: str):

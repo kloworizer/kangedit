@@ -655,7 +655,8 @@ class Viewer(QWidget):
         return Shot(self.project.index_of(clip.id) if index is None else index, start, clip.duration, clip.src_in,
                     f.id, Grade.from_dict(g.to_dict()), f.log_profile, f.tonemap, clip.zoom, clip.offset_x,
                     clip.offset_y, f, rot=clip.rotation,
-                    box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else ())
+                    box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else (),
+                    speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur)
 
     def _shots(self) -> list[Shot]:
         out, t = [], 0.0
@@ -701,7 +702,7 @@ class Viewer(QWidget):
         shots = self._shots()
         shot = next((s for s in shots if s.index == idx), None)
         if shot is not None:
-            self.engine.request_still(shot, shot.src_in + off, self.t, self._look(), shots)
+            self.engine.request_still(shot, shot.src_at(off), self.t, self._look(), shots)
 
     def _on_still(self, r: Rendered):
         if not self.playing:

@@ -38,6 +38,9 @@ from ..export import export, render_audio
 from ..ffmpeg import Cancelled, probe
 from ..models import Footage, OverlayClip, Project, SoundClip, TextClip, TimelineClip, new_id
 from ..proxy import generate_proxy, proxy_path_for
+from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
+from ..speed import clamp as clamp_speed
+from ..speed import label as speed_label
 from ..tasks import TaskQueue
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
@@ -145,7 +148,8 @@ class MainWindow(QMainWindow):
         tabs.add(self.caps_panel, "💬 Captions")
         tabs.add(self.text_panel, "🔤 Text")
         tabs.add(self.sfx_panel, "🔊 Sounds")
-        tabs.setTabToolTip(0, "Colour, log conversion, reframe, rotation, volume and transition of the selected clip")
+        tabs.setTabToolTip(0, "Colour, log conversion, reframe, rotation, speed, volume and transition of the selected clip "
+                              "(on the main track or a video layer)")
         tabs.setTabToolTip(1, "Video layers: position, size, crop, rotation, opacity, fades and volume of the clip "
                               "selected on a layer above the main track (picture in picture, logos, images, "
                               "multicam angles), and how to add one")
@@ -422,7 +426,7 @@ class MainWindow(QMainWindow):
         refine = QLabel("3. Refine")
         refine.setStyleSheet("color: #9aa0ab;")
         btns = [refine]
-        for text, tab, tip in (("🎨 Color", self.inspector, "Colour, reframe and audio of the selected clip"),
+        for text, tab, tip in (("🎨 Color", self.inspector, "Colour, reframe and audio of the selected clip (main track or a video layer)"),
                                ("💬 Captions", self.caps_panel, "Generate and edit captions"),
                                ("🔤 Text", self.text_panel, "Add animated titles and text"),
                                ("🔊 Sounds", self.sfx_panel, "Add sound effects")):
@@ -754,8 +758,7 @@ class MainWindow(QMainWindow):
         if captions:
             self.update_captions()
         self.viewer.refresh()
-        clip = self.selected_clip()
-        self.inspector.set_clip(clip)
+        self.inspector.set_clip(self._inspected())
         self.layer_panel.set_clip(self.selected_overlay())
         self.viewer.canvas.selected_overlay = self.tl.selected_overlay
         self.text_panel.refresh()
@@ -808,6 +811,10 @@ class MainWindow(QMainWindow):
     def selected_overlay(self) -> Optional[OverlayClip]:
         oid = self.tl.selected_overlay
         return next((c for c in self.project.overlays if c.id == oid), None) if oid else None
+
+    def _inspected(self):
+        """The clip the Inspector refines: the selected main-track clip or the selected clip on a video layer."""
+        return self.selected_clip() or self.selected_overlay()
 
     def selected_clip(self) -> Optional[TimelineClip]:
         i = self.project.index_of(self.tl.selected) if self.tl.selected else -1
@@ -1283,6 +1290,11 @@ class MainWindow(QMainWindow):
                     blockers = multicam.coverage_blockers(mc_footage, mc_angles, syncs)
             progress(0.3, "Analyzing footage…")
             analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
+            if multi and multi.get("template") == "switch":       # switching scores every angle's picture
+                progress(0.45, "Analyzing the camera angles…")
+                for fid, f in mc_footage.items():
+                    if fid not in analyses:
+                        analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
             order = story_order(footage, ids)
             intro = outro = None
             notes: list[str] = []
@@ -1395,13 +1407,16 @@ class MainWindow(QMainWindow):
                 self.project.footage[fid].face = face
         if replace:
             self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
-        new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"))
+        plan = (multicam.switch_plan(self.project, self.analyses, angles, syncs)
+                if multi["template"] == "switch" else (self.project.settings.multicam or {}).get("switch"))
+        new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"),
+                             switch=plan)
         self.project.overlays += new
         top = max((c.track for c in self.project.overlays), default=0)
         self.project.settings.overlay_tracks = max(1, top + 1)
         self.project.settings.multicam = {
             "angles": dict(angles), "template": multi["template"], "audio": multi.get("audio", "main"),
-            "covered": multi.get("covered", True),
+            "covered": multi.get("covered", True), "switch": plan or {},
             "syncs": {fid: [ref, r.offset, r.drift, r.confidence, r.overlap] for fid, (ref, r) in syncs.items()},
             "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
         notes = []
@@ -1428,10 +1443,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "There are no synced angles on the timeline yet: turn on "
                                                     "Multicam in ✨ Auto Edit.")
             return
+        if template == "switch":
+            self._multicam_switch()
+            return
         self.project_checkpoint()
         n = multicam.relayout(self.project, template)
         self._overlays_changed()
         self.lbl_status.setText(f"Multicam layout: {multicam.TEMPLATES[template]} ({n} camera-angle clips)")
+
+    def _multicam_switch(self):
+        """Switch to the switching layout: analyse the angles (in the background), plan the cuts, rebuild."""
+        mc = self.project.settings.multicam or {}
+        footage = {fid: self.project.footage[fid] for fid in (mc.get("angles") or {}) if fid in self.project.footage}
+        have = {fid: self.analyses[fid] for fid in footage if fid in self.analyses}
+        use_gpu = self.a_gpu_analysis.isChecked()
+
+        def job(progress, cancel):
+            out = dict(have)
+            todo = [fid for fid in footage if fid not in out]
+            for k, fid in enumerate(todo):
+                progress(k / max(1, len(todo)), f"Analyzing the camera angles: {k + 1}/{len(todo)}")
+                out[fid] = load_or_analyze(footage[fid], cancel=cancel, use_gpu=use_gpu)
+            return out
+
+        def done(analyses: dict):
+            self.analyses.update(analyses)
+            self.project_checkpoint()
+            st = self.project.settings
+            st.multicam = {**st.multicam, "switch": multicam.switch_plan(self.project, self.analyses)}
+            n = multicam.relayout(self.project, "switch")
+            self._overlays_changed()
+            cuts = sum(max(0, len(v) - 1) for v in st.multicam["switch"].values())
+            self.lbl_status.setText(f"Multicam layout: switching ({n} camera-angle shots; the recording has "
+                                    f"{cuts} angle changes to choose from)")
+
+        self.tasks.submit("Multicam switching", job, done, self._task_error("Multicam switching"))
 
     def new_hook(self):
         """Replace the hook (the leading clips labelled "hook", else the first clip unless it is the opening)
@@ -1485,7 +1531,7 @@ class MainWindow(QMainWindow):
         self._after_structure_change()
         self.tl.selected = hooks[0].id
         self.tl.update()
-        self.inspector.set_clip(self.selected_clip())
+        self.inspector.set_clip(self._inspected())
         self.viewer.seek(0)
         f = self.project.footage[hooks[0].footage_id]
         if len(hooks) > 1:
@@ -1775,7 +1821,7 @@ class MainWindow(QMainWindow):
                              + ("" if profile else f"  ({note})"))
             self.project.dirty = True
             self.refresh_all(captions=False)
-            self.inspector.set_clip(self.selected_clip())
+            self.inspector.set_clip(self._inspected())
             self.viewer.refresh()
             if len(lines) == 1:
                 QTimer.singleShot(0, lambda: self.lbl_status.setText(lines[0]))
@@ -1797,7 +1843,7 @@ class MainWindow(QMainWindow):
         if not imported:
             return
         lut = imported[0]
-        clip = self.selected_clip()
+        clip = self._inspected()
         targets = self.inspector.targets if clip is not None else []   # the shown clip and the rest of the selection
         if target == "log":
             ids = ids or list(dict.fromkeys(c.footage_id for c in targets))
@@ -1878,7 +1924,7 @@ class MainWindow(QMainWindow):
                 changed += 1
         self.project.dirty = changed > 0 or self.project.dirty
         self.refresh_all(captions=False)
-        self.inspector.set_clip(self.selected_clip())
+        self.inspector.set_clip(self._inspected())
         self.viewer.refresh()
         self._update_title()
         self.lbl_status.setText(f"Official LUTs: {changed} footage file(s) switched" if changed
@@ -2064,7 +2110,7 @@ class MainWindow(QMainWindow):
         self._schedule_audio()
 
     def _on_select(self, clip_id: str):
-        self.inspector.set_clip(self.selected_clip())
+        self.inspector.set_clip(self._inspected())
         if clip_id:
             self.right_tabs.setCurrentWidget(self.inspector)
 
@@ -2076,11 +2122,48 @@ class MainWindow(QMainWindow):
         self.tl.captions = self.captions
         self.viewer.captions = self.captions
         self.viewer.refresh()
-        self.inspector.set_clip(self.selected_clip())
+        self.inspector.set_clip(self._inspected())
 
     def _on_timeline_finished(self):
         self.refresh_all()
         self._schedule_audio()
+
+    def _ask_speed(self, cur: float) -> Optional[float]:
+        v, ok = QInputDialog.getDouble(self, "Clip speed",
+                                       f"Speed ({MIN_SPEED:g}× to {MAX_SPEED:g}×; below 1 is slow motion, "
+                                       "above 1 fast motion):", cur, MIN_SPEED, MAX_SPEED, 2)
+        return clamp_speed(v) if ok else None
+
+    def set_speed(self, targets: list, action: str):
+        """Slow / fast motion and speed ramps on main-track clips: 'speed:<x>', 'ramp:<key>' or 'speed_custom'
+        (asks). The timeline closes up around the new lengths; linked camera angles follow."""
+        if not targets:
+            return
+        if action == "speed_custom":
+            v = self._ask_speed(targets[0].speed)
+            if v is None:
+                return
+            action = f"speed:{v}"
+        key, val = action.split(":", 1)
+        self.project_checkpoint()
+        for x in targets:
+            f = self.project.footage.get(x.footage_id)
+            if f is not None and f.is_image:
+                continue                       # a still has no motion to slow down
+            if key == "speed":
+                x.speed = clamp_speed(float(val))
+            elif key == "audio":
+                x.audio_mode = sound_mode(val)
+            else:
+                x.ramp = val if val in RAMPS else ""
+        self._after_structure_change()
+        c = targets[0]
+        if key == "audio":
+            self.lbl_status.setText(f"Sound: {SOUND_MODES[c.audio_mode][0]} — {len(targets)} clip(s)")
+            return
+        what = speed_label(c.speed, c.ramp) or "normal speed"
+        self.lbl_status.setText(f"Speed: {what} — {len(targets)} clip(s); "
+                                f"{'the ramp' if c.ramp else 'the clip'} now runs {c.duration:.1f} s.")
 
     def split_at_playhead(self):
         idx, off = self.project.clip_at(self.viewer.t)
@@ -2090,13 +2173,15 @@ class MainWindow(QMainWindow):
         if off < 0.1 or off > c.duration - 0.1:
             return
         self.project_checkpoint()
-        cut = c.src_in + off
+        cut = c.src_at(off)
         new = TimelineClip.from_dict(c.to_dict())
         new.id = new_id()
         new.src_in = cut
         c.src_out = cut
         self.project.clips.insert(idx + 1, new)
         self._after_structure_change()
+        if c.ramp:
+            self.lbl_status.setText("Split a speed-ramped clip: each part now plays the whole ramp.")
 
     def clip_action(self, action: str, clip_id: str):
         if action == "select_all":
@@ -2121,7 +2206,7 @@ class MainWindow(QMainWindow):
                             x.transition = ""
             self._on_timeline_edited()
             self.tl.refresh()
-            self.inspector.set_clip(self.selected_clip())
+            self.inspector.set_clip(self._inspected())
             self._schedule_audio()
             self._update_title()
             return
@@ -2158,11 +2243,13 @@ class MainWindow(QMainWindow):
             self._replace_moments(targets)
         elif action == "face_zoom":
             self._face_zoom(targets)
+        elif action.startswith(("speed:", "ramp:", "audio:")) or action == "speed_custom":
+            self.set_speed(targets, action)
         elif action.startswith("rotate:"):
             self.project_checkpoint()
             for x in targets:
                 x.rotation = wrap_angle(x.rotation + float(action.split(":", 1)[1]))
-            self.inspector.set_clip(self.selected_clip())
+            self.inspector.set_clip(self._inspected())
             self.tl.update()
             self.viewer.refresh()
             self._update_title()
@@ -2172,7 +2259,7 @@ class MainWindow(QMainWindow):
             self.project_checkpoint()
             for x in targets:
                 x.grade = Grade()
-            self.inspector.set_clip(self.selected_clip())
+            self.inspector.set_clip(self._inspected())
             self.viewer.refresh()
             self._update_title()
         elif action == "copy_grade":
@@ -2389,6 +2476,7 @@ class MainWindow(QMainWindow):
 
     def _on_overlay_selected(self, oid: str):
         self.layer_panel.set_clip(self._overlay(oid))
+        self.inspector.set_clip(self._inspected())
         self.viewer.canvas.selected_overlay = oid
         self.viewer.canvas.update()
         if oid:
@@ -2450,6 +2538,13 @@ class MainWindow(QMainWindow):
             if not (c.start <= self.viewer.t < c.end):
                 self.viewer.seek(c.start + 0.01)
             return
+        if action == "ov_auto_color":                 # in the background; one undo step when it's done
+            self._auto_color([c])
+            return
+        if action == "ov_color":
+            self.tl.select_overlay(oid)
+            self.show_refine(self.inspector)
+            return
         key = action.split(":", 1)[0]
         self.project_checkpoint(f"layer:{oid}:{key}" if key in ("ov_fade_in", "ov_fade_out") else "")
         if action == "ov_delete":
@@ -2469,8 +2564,8 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText("Put the playhead inside the layer clip to split it.")
                 return
             d = OverlayClip.from_dict(c.to_dict())
-            d.id, d.start, d.src_in = new_id(), c.start + cut, c.src_in + cut
-            c.src_out = c.src_in + cut
+            d.id, d.start, d.src_in = new_id(), c.start + cut, c.src_at(cut)
+            c.src_out = d.src_in
             c.fade_out, d.fade_in = 0.0, 0.0
             self.project.overlays.append(d)
         elif action.startswith("ov_place:"):
@@ -2482,6 +2577,25 @@ class MainWindow(QMainWindow):
             c.fade_in = max(0.0, float(action.split(":", 1)[1]))
         elif action.startswith("ov_fade_out:"):
             c.fade_out = max(0.0, float(action.split(":", 1)[1]))
+        elif action == "ov_reset_color":
+            c.grade = Grade()
+        elif action == "ov_copy_grade":
+            for x in self._graded_clips():
+                if x is not c:
+                    x.grade = Grade.from_dict(c.grade.to_dict())
+            self.inspector.set_clip(self._inspected())
+            self.viewer.refresh()
+        elif action.startswith("ov_speed:"):
+            c.speed = clamp_speed(float(action.split(":", 1)[1]))
+        elif action.startswith("ov_ramp:"):
+            c.ramp = action.split(":", 1)[1]
+        elif action.startswith("ov_audio:"):
+            c.audio_mode = sound_mode(action.split(":", 1)[1])
+        elif action == "ov_speed_custom":
+            v = self._ask_speed(c.speed)
+            if v is None:
+                return
+            c.speed = v
         elif action.startswith("ov_layer:"):
             c.track = max(0, min(MAX_LAYERS - 1, c.track + (1 if action.endswith("up") else -1)))
             self.project.settings.overlay_tracks = max(self.project.settings.overlay_tracks, c.track + 1)
@@ -2790,11 +2904,17 @@ class MainWindow(QMainWindow):
 
     # ================================================================== inspector
     def _inspector_before(self, kind: str):
-        c = self.selected_clip()
+        c = self._inspected()
         self.project_checkpoint(f"{kind}:{c.id if c else ''}")
 
     def _inspector_changed(self, kind: str):
         self.project.dirty = True
+        if self.selected_overlay() is not None and self.selected_clip() is None:
+            # A clip on a video layer: its grade, trim, speed or sound.
+            if kind == "footage_color":
+                self.bin.refresh()
+            self._overlays_changed()
+            return
         multicam.follow(self.project)      # a main-angle box on a layer shows the clip's grade and trim
         if kind in ("trim",):
             self._on_timeline_edited()
@@ -2810,8 +2930,14 @@ class MainWindow(QMainWindow):
             self.viewer.refresh()
         self._update_title()
 
+    def _graded_clips(self) -> list:
+        """Every clip whose picture can be graded: the main track and the video on the layers (pictures on the
+        layers, such as logos and graphics, are left as they are)."""
+        return list(self.project.clips) + [o for o in self.project.overlays if o.footage_id in self.project.footage
+                                           and not self.project.footage[o.footage_id].is_image]
+
     def inspector_request(self, req: str):
-        clip = self.selected_clip()
+        clip = self._inspected()
         if req in ("import_lut_log", "import_lut_look"):
             self.import_lut(req.rsplit("_", 1)[1])
             return
@@ -2819,11 +2945,14 @@ class MainWindow(QMainWindow):
             if clip is not None:
                 self.detect_log(list(dict.fromkeys(c.footage_id for c in self.inspector.targets or [clip])))
             return
+        if req == "layer_tab":
+            self.show_refine(self.layer_panel)
+            return
         if req == "detect_log_all":
             self.detect_log(list(self.project.footage))
             return
         if req == "auto_color_all":
-            self._auto_color(list(self.project.clips))
+            self._auto_color(self._graded_clips())
             return
         elif clip is None:
             return
@@ -2843,9 +2972,11 @@ class MainWindow(QMainWindow):
                 c.grade = Grade()
         elif req == "copy_grade_all":
             self.project_checkpoint()
-            for c in self.project.clips:
-                c.grade = Grade.from_dict(clip.grade.to_dict())
-        self.inspector.set_clip(self.selected_clip())
+            for c in self._graded_clips():
+                if c is not clip:
+                    c.grade = Grade.from_dict(clip.grade.to_dict())
+        self.inspector.set_clip(self._inspected())
+        self.layer_panel.set_clip(self.selected_overlay())
         self.viewer.refresh()
         self._update_title()
 
@@ -2873,7 +3004,7 @@ class MainWindow(QMainWindow):
                     dec = pool.get(f, use_proxies, 720)
                     quarters = reframe.split_rotation(c.rotation)[0]
                     frames = [reframe.rotate_quarters(img.copy(), quarters) for i in range(FACE_SAMPLES)
-                              if (img := dec.frame_at(c.src_in + c.duration * (i + 0.5) / FACE_SAMPLES))
+                              if (img := dec.frame_at(c.src_in + c.src_dur * (i + 0.5) / FACE_SAMPLES))
                               is not None]
                     face = reframe.find_face(frames)
                     if face is not None:
@@ -2891,7 +3022,7 @@ class MainWindow(QMainWindow):
                 for c in targets:
                     c.zoom, c.offset_x, c.offset_y = framing[c.id]
                 self.project.dirty = True
-                self.inspector.set_clip(self.selected_clip())
+                self.inspector.set_clip(self._inspected())
                 self.viewer.refresh()
                 self._update_title()
             self.lbl_status.setText(f"Zoomed in on the face in {len(targets)} clip{'s' * (len(targets) != 1)}"
@@ -2925,7 +3056,7 @@ class MainWindow(QMainWindow):
                     dec = pool.get(footage[c.footage_id], use_proxies, 360)
                     frames = []
                     for i in range(5):
-                        img = dec.frame_at(c.src_in + c.duration * (i + 0.5) / 5)
+                        img = dec.frame_at(c.src_in + c.src_dur * (i + 0.5) / 5)
                         if img is not None:
                             frames.append(img.copy())
                     grades[c.id] = auto_correct(frames, lp, tm, base=base)
@@ -2935,14 +3066,14 @@ class MainWindow(QMainWindow):
                 pool.close()
 
         def done(grades: dict):
-            targets = [(c, grades[c.id]) for c in self.project.clips if c.id in grades]
+            targets = [(c, grades[c.id]) for c in [*self.project.clips, *self.project.overlays] if c.id in grades]
             if not targets:
                 return
             self.project_checkpoint()
             for c, g in targets:
                 c.grade = g
             self.project.dirty = True
-            self.inspector.set_clip(self.selected_clip())
+            self.inspector.set_clip(self._inspected())
             self.viewer.refresh()
             self._update_title()
 
@@ -3230,17 +3361,21 @@ class MainWindow(QMainWindow):
             "Timeline: drag a clip to reorder · drag its edges to trim ·\n"
             "Alt/Shift+drag (or Slip mode) to slide the moment inside the clip ·\n"
             "Ctrl+click adds a clip to the selection · Shift+click selects a range ·\n"
+            "Speed: right-click a clip → Speed (slow / fast motion, 0.1× to 8×) or Speed ramp (Hero moment,\n"
+            "Bullet time, Slow → fast…), or the Inspector's Speed group · Sound at this speed: synced\n"
+            "(pitch kept or following the speed), normal speed (not synced) or muted\n"
             "SFX layer: drag sounds to move, edges to trim, right-click for volume, fades, fit to timeline,\n"
             "auto ducking\n"
             "Video layers (V2, V3… above the main track): drag footage or images from Media onto a layer\n"
             "(or right-click footage → Add on a video layer) · drag the clip in the viewer to place it,\n"
             "mouse wheel over it to resize · on the timeline drag it to move (up / down: another layer),\n"
             "its edges to trim · double-click it (or the 🧩 Layer tab) for size, crop, rotation, opacity,\n"
-            "fades, volume · higher layers are in front · right-click an empty layer to add a layer\n"
+            "fades, speed, volume · the 🎨 Color tab grades the selected layer clip like a main clip ·\n"
+            "higher layers are in front · right-click an empty layer to add a layer\n"
             "Multicam: ✨ Auto Edit → Multicam syncs camera angles by sound; Tools → Multicam layout\n"
             "changes their layout later · camera angles are linked to their main clip: dragging an angle\n"
             "slips the group, its edges trim it, R gives it another moment · Ctrl+L (🔗 Link) unlinks /\n"
-            "links them\n"
+            "links them · layouts include Switching (one angle at a time, cut to the best angle)\n"
             "Lanes: drag a lane's bottom edge to make it taller · Shift+wheel scrolls the lanes up / down"))
 
     def closeEvent(self, e):

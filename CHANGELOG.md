@@ -6,6 +6,58 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-13
+
+### Added
+- Slow and fast motion: any clip (main track or video layer) plays from 0.1× to 8×. Right-click → *Speed* for
+  0.25×, 0.5×, 0.75×, 1.5×, 2×, 3×, 4× or a custom speed, or use the Inspector's new **Speed** group (one-click
+  presets and a slider; the Layer tab has the same for layer clips). The clip keeps its in and out points and gets
+  longer or shorter on the timeline; its sound is time-stretched with its pitch kept.
+- Speed ramps: templates that change the speed along the clip, smoothly: *Hero moment* (fast in, slow motion in
+  the middle, fast out), *Bullet time*, *Slow → fast*, *Fast → slow*, *Slow finish*, *Speed burst*, *Pulse* and
+  *Montage*. A ramp combines with the clip's speed (a 2× *Pulse* is twice as fast throughout). Ramps follow the
+  footage frame for frame in the preview and the export, and the sound follows the ramp.
+- Sound at another speed, per clip (right-click → *Speed* → *Sound at this speed*, the Inspector's Speed group
+  or the Layer tab): *Synced, pitch kept* (the default), *Synced, pitch follows speed* (slow motion sounds deeper,
+  fast motion higher, like a tape), *Not synced (normal speed)* (the sound plays at normal speed from the in point,
+  whatever the picture does) or *Muted*. Captions follow the sound.
+- Smooth slow motion in the export: slowed-down parts blend neighbouring frames instead of repeating them (an
+  option in the Export dialog, on by default).
+- Speed works with everything else: transitions and J / L cuts use the footage around the clip at its speed,
+  captions follow the new timing, the timeline's filmstrip and waveform show the clip as it plays (and its speed in
+  the clip header), trims and slips move at the clip's speed, and multicam angles play at their main clip's speed.
+- Refine clips on every video layer, not only the main track: select a clip on V2, V3… and the **🎨 Color** /
+  Clip tab refines it like a main-track clip: log conversion and camera detection, exposure and color, ✨ Auto,
+  look LUT, source in / out, speed and volume (its position, size and opacity stay in the 🧩 Layer tab, which
+  has a button to the color tools). Right-click a layer clip → *Color* for color, auto color, reset and copying
+  its grade. *Auto all clips* and *Copy to all clips* now cover the video on every layer too (pictures on the
+  layers, such as logos, are left as they are).
+- Multicam **Switching** layout (✨ Auto Edit → Multicam → Layout, or *Tools → Multicam layout*): one camera fills
+  the frame at a time and the edit cuts between the angles at the best moments, like a live multicam edit,
+  instead of showing every angle together. Each angle is scored along the recording (who is speaking, judged
+  by which camera's microphone is loudest, the closer face, the subject's activity, sharpness, shake) and the
+  cuts are chosen with a minimum shot length of 2 s, no cutting on noise, and a short cutaway when one angle
+  is held too long. The shots follow trims, slips and splits like the other layouts; the sound stays on the
+  main angle.
+- README: *System requirements* (minimum Windows, macOS and Linux versions for the ready-made builds and from
+  source, and hardware).
+
+### Fixed
+- Generating proxies could stay at 0 % forever: on some machines (seen with Intel Quick Sync on Windows) the
+  GPU decode + encode never starts, and the stuck FFmpeg also blocked every task queued after it. A GPU attempt
+  that makes no progress for 60 s is now stopped and the proxy is made the next way (CPU decoding, then fully on
+  the CPU); a way that hung is skipped for the rest of the session. A GPU export that hangs is redone on the
+  CPU the same way (after 3 minutes), and *Cancel* now stops an FFmpeg that has gone silent.
+- Transitions in multicam edits: the camera angles on the layers cut hard while only the main angle
+  dissolved, so a transition hardly showed (in the boxed layouts most of the frame jumped). The angles now take
+  part: a dissolve-like transition cross-fades them too, a dip fades them out and in.
+- Undo after changing the multicam layout left the new layout's settings behind, so the next edit rebuilt the
+  angles in the undone layout. The multicam settings are now part of undo.
+- The preview gives overlapping clips on one video layer their own decoders, so a cross-fade between two
+  clips of the same camera plays without seeking back and forth.
+- The macOS build now declares macOS 14 as its minimum (it said 12, but the Qt, onnxruntime and NumPy it bundles
+  need macOS 14), so older Macs get a clear message instead of a crash.
+
 ## [0.3.0] - 2026-10-12
 
 ### License

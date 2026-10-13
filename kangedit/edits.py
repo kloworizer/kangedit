@@ -47,16 +47,19 @@ def edits(project: Project) -> list[Edit]:
         if fa is None or fb is None:
             out.append(Edit())
             continue
+        # Source handles are spent at the clips' edge speeds (slow motion uses less of them per second).
+        ma, mb = a.timemap(), b.timemap()
+        after_a, before_b = (fa.duration - a.src_out) / ma.v_out, b.src_in / mb.v_in
         if b.transition in TRANSITIONS:
-            half = min(b.transition_dur / 2, fa.duration - a.src_out, b.src_in, a.duration / 2, b.duration / 2)
+            half = min(b.transition_dur / 2, after_a, before_b, a.duration / 2, b.duration / 2)
             if 2 * half >= MIN_TRANSITION:
                 out.append(Edit(b.transition, half))
                 continue
         s = b.audio_split
         if s < 0:      # J: the incoming sound starts before its in point, under the outgoing picture
-            s = max(s, -b.src_in, -a.duration * MAX_SPLIT_SHARE, -b.duration * MAX_SPLIT_SHARE)
+            s = max(s, -before_b, -a.duration * MAX_SPLIT_SHARE, -b.duration * MAX_SPLIT_SHARE)
         elif s > 0:    # L: the outgoing sound continues past its out point, under the incoming picture
-            s = min(s, fa.duration - a.src_out, a.duration * MAX_SPLIT_SHARE, b.duration * MAX_SPLIT_SHARE)
+            s = min(s, after_a, a.duration * MAX_SPLIT_SHARE, b.duration * MAX_SPLIT_SHARE)
         out.append(Edit("", 0.0, s if abs(s) >= 0.04 else 0.0))
     return out
 
@@ -71,6 +74,9 @@ class ClipPlan:
     a_in: float       # source time where this clip's audio starts
     a_dur: float      # audio length, seconds
     xfade: str        # ffmpeg xfade name for the transition into this clip ("" = cut)
+    v_end: float = 0.0   # source time just after the last rendered video frame
+    a_end: float = 0.0   # source time where this clip's audio ends
+    a_t0: float = 0.0    # timeline offset (from the clip's start) where its audio starts
 
     @property
     def v_frames(self) -> int:
@@ -91,9 +97,10 @@ def plan(project: Project, fps: float) -> list[ClipPlan]:
         # Audio extends over the transition handles, or shifts with the split edits.
         a_pre = pre_f / fps if pre_f else -e_in.split
         a_post = post_f / fps if post_f else e_out.split
-        out.append(ClipPlan(start_f, nfr, pre_f, post_f, c.src_in - pre_f / fps,
-                            c.src_in - a_pre, max(0.02, nfr / fps + a_pre + a_post),
-                            TRANSITIONS[e_in.trans][1] if pre_f else ""))
+        a_dur = max(0.02, nfr / fps + a_pre + a_post)
+        out.append(ClipPlan(start_f, nfr, pre_f, post_f, c.src_at(-pre_f / fps), c.sound_src_at(-a_pre), a_dur,
+                            TRANSITIONS[e_in.trans][1] if pre_f else "",
+                            c.src_at((nfr + post_f) / fps), c.sound_src_at(a_dur - a_pre), -a_pre))
     return out
 
 

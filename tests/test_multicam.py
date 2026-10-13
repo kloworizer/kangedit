@@ -306,3 +306,119 @@ def test_link_button_and_unlinked_drag(window, qapp):
     assert o.linked and o.start == 0.0 and b.isChecked()
     window.undo()
     assert not next(x for x in p.overlays if x.link == p.clips[0].id).linked
+
+
+# ----------------------------------------------------------------------------- transitions and switching
+def test_angles_take_part_in_a_dissolve():
+    p, main, cam2, angles, syncs = _project()
+    p.clips = [TimelineClip(main.id, 30.0, 33.0), TimelineClip(main.id, 40.0, 44.0, transition="dissolve",
+                                                                transition_dur=1.0)]
+    _store(p, angles, syncs, "stack")
+    a, b = sorted(p.overlays, key=lambda o: o.start)
+    cut = p.clips[0].duration
+    # the outgoing angle runs on past the cut, the incoming one starts early and fades in over it
+    assert a.end == pytest.approx(cut + 0.5) and a.mix_out == 0.0
+    assert b.start == pytest.approx(cut - 0.5) and b.mix_in == pytest.approx(1.0)
+    assert b.src_in == pytest.approx(40.0 - 20.0 - 0.5)            # still in sync with the main clip
+    assert p.overlays.index(b) > p.overlays.index(a)               # drawn on top
+    assert b.alpha_at(cut - 0.5) == 0.0 and b.alpha_at(cut) == pytest.approx(0.5) and b.alpha_at(cut + 0.6) == 1.0
+    assert b.fade_in == 0.0                                        # the user's own fades are separate
+
+
+def test_angles_dip_with_a_dip_transition_and_follow_changes():
+    p, main, cam2, angles, syncs = _project()
+    p.clips = [TimelineClip(main.id, 30.0, 33.0), TimelineClip(main.id, 40.0, 44.0, transition="dip_black",
+                                                                transition_dur=1.0)]
+    _store(p, angles, syncs, "pip")
+    a, b = sorted(p.overlays, key=lambda o: o.start)
+    assert (a.mix_out, b.mix_in) == (0.5, 0.5) and a.end == pytest.approx(3.0) and b.start == pytest.approx(3.0)
+    p.clips[1].transition = ""                                     # removed: the angles cut again
+    multicam.follow(p)
+    a, b = sorted(p.overlays, key=lambda o: o.start)
+    assert (a.mix_out, b.mix_in) == (0.0, 0.0) and b.start == pytest.approx(3.0)
+
+
+def test_switching_choose_cuts_cleanly():
+    step = multicam.SWITCH_STEP
+    t = np.arange(0, 30, step)
+    a = np.where((t // 5) % 2 == 0, 1.0, -1.0)                   # who speaks changes every 5 s
+    noise = np.random.default_rng(1).normal(0, 0.6, len(t))
+    path = multicam._choose(np.vstack([a + noise, -a - noise]), step)
+    runs = np.diff(np.flatnonzero(np.diff(path)))
+    assert len(np.flatnonzero(np.diff(path))) == 5                # one cut per change of speaker, no flicker
+    assert runs.min() * step >= multicam.MIN_SHOT
+    # an angle that is always slightly better still gives way now and then (no endless single shot)
+    path = multicam._choose(np.vstack([np.full(400, 0.5), np.full(400, 0.4)]), step)
+    assert path.min() == 0 and path.max() == 1
+    # an angle that isn't recording can't be chosen
+    sc = np.vstack([np.zeros(100), np.full(100, 2.0)])
+    sc[1, :50] = np.nan
+    path = multicam._choose(sc, step)
+    assert (path[:50] == 0).all() and (path[60:] == 1).all()
+
+
+class _An:
+    """A stand-in Analysis: loud while its own speaker talks."""
+
+    def __init__(self, loud):
+        self.times = np.arange(0, 60, 0.5)
+        self.audio = np.where(loud(self.times), -12.0, -40.0)
+        z = np.zeros_like(self.times)
+        self.faces, self.activity, self.sharp, self.jerk, self.clipped = z + 0.1, z, z, z, z
+        self.thumbs, self.thumb_times, self.wave = np.zeros((0, 9, 16, 3), np.uint8), np.zeros(0), np.zeros(0)
+
+
+def test_switching_layout_follows_who_speaks():
+    p, main, cam2, angles, syncs = _project()
+    an = {main.id: _An(lambda t: (t // 10) % 2 == 0), cam2.id: _An(lambda t: ((t + 20) // 10) % 2 == 1)}
+    plan = multicam.switch_plan(p, an, angles, syncs)
+    shots = plan[main.id]
+    assert [k for *_, k in shots][:4] == [1, 2, 1, 2] and shots[1][0] == pytest.approx(20.0, abs=0.3)
+    p.clips = [TimelineClip(main.id, 25.0, 45.0)]                   # 25-30 main, 30-40 cam2, 40-45 main
+    p.settings.multicam = {"switch": plan}
+    _store(p, angles, syncs, "switch")
+    p.settings.multicam["switch"] = plan               # (as the auto edit stores it)
+    ov = p.overlays
+    assert len(ov) == 1 and (ov[0].angle, ov[0].track) == (2, 0)
+    assert ov[0].start == pytest.approx(5.0, abs=0.3) and ov[0].duration == pytest.approx(10.0, abs=0.3)
+    assert ov[0].box_w == 1.0 and ov[0].box_h == 1.0 and ov[0].volume == 0.0       # full frame, main sound
+    p.clips[0].src_in = 35.0                                        # trimmed: the shots follow
+    multicam.follow(p)
+    assert len(p.overlays) == 1 and p.overlays[0].start == pytest.approx(0.0, abs=0.3)
+    assert p.overlays[0].duration == pytest.approx(5.0, abs=0.3)
+    # to a layout and back
+    assert multicam.relayout(p, "side") == 1 and p.overlays[0].duration == pytest.approx(10.0)
+    assert multicam.relayout(p, "switch") == 1 and p.overlays[0].duration == pytest.approx(5.0, abs=0.3)
+
+
+def test_dialog_switching_keeps_the_main_sound(qapp):
+    from kangedit.autoedit import AutoEditSettings
+    from kangedit.ui.dialogs import AutoEditDialog
+    p, main, cam2, angles, syncs = _project()
+    d = AutoEditDialog(p, [], AutoEditSettings())
+    d.chk_multi.setChecked(True)
+    d.angle_rows[cam2.id].setCurrentIndex(1)
+    d.cb_layout.setCurrentIndex(d.cb_layout.findData("switch"))
+    assert not d.cb_audio.isEnabled() and "one camera" in d.lbl_layout.text()
+    assert d.multicam()["template"] == "switch"
+    d.cb_layout.setCurrentIndex(d.cb_layout.findData("pip"))
+    assert d.cb_audio.isEnabled()
+
+
+def test_switching_from_the_layout_menu(window, qapp, monkeypatch):
+    import threading
+    p, main, cam2, angles, syncs = _project()
+    p.clips = [TimelineClip(main.id, 25.0, 45.0)]
+    _store(p, angles, syncs, "pip")
+    window.set_project(p)
+    window.analyses = {main.id: _An(lambda t: (t // 10) % 2 == 0), cam2.id: _An(lambda t: ((t + 20) // 10) % 2 == 1)}
+    monkeypatch.setattr(window.tasks, "submit",
+                        lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+    window.multicam_layout("switch")
+    mc = window.project.settings.multicam
+    assert mc["template"] == "switch" and mc["switch"][main.id]
+    ov = window.project.overlays
+    assert [o.angle for o in ov] == [2] and ov[0].track == 0 and ov[0].box_w == 1.0
+    assert "switching" in window.lbl_status.text()
+    window.undo()
+    assert window.project.settings.multicam["template"] == "pip"

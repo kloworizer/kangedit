@@ -7,6 +7,7 @@ stream, driver hiccup) is retried with CPU decoding, then fully on the CPU.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Optional
@@ -18,6 +19,11 @@ from .models import Footage
 
 GOP = 12          # short GOP: any frame decodes quickly when scrubbing
 QUALITY = 22      # x264 CRF scale
+STALL = 60.0      # seconds without progress before a (GPU) attempt is given up for the next one
+
+log = logging.getLogger(__name__)
+# GPU decode / encode pairs that hung on this machine: later proxies skip them (for this session).
+_stalled: set[tuple] = set()
 
 
 def proxy_path_for(footage: Footage, height: int) -> str:
@@ -56,17 +62,25 @@ def generate_proxy(footage: Footage, height: int = 540, progress: Optional[Progr
         return out
     hw, enc = (hw_decoder(), hw_encoder("h264")) if use_gpu else (None, None)
     attempts = list(dict.fromkeys([(hw, enc), (None, enc), (None, None)]))   # best first, no repeats
+    attempts = [a for a in attempts if a not in _stalled] or [(None, None)]
     tmp = out + ".part.mp4"
     try:
         for k, (dec, encoder) in enumerate(attempts):
             gpu = " + ".join(p for p in (f"{dec} decode" if dec else "", hw_encoder_label(encoder) if encoder else "")
                              if p)
             label = f"Proxy: {footage.name}" + (f" (GPU: {gpu})" if gpu else " (CPU)" if use_gpu else "")
+            if progress:
+                progress(0.0, label)
             try:
+                # A GPU attempt that hangs (some driver / encoder combinations never start) is stopped after
+                # STALL seconds and the next way is tried; the CPU is only ever slow, never stopped.
                 run_ffmpeg(proxy_args(footage, height, tmp, dec, encoder), footage.duration, progress, cancel,
-                           label=label)
+                           label=label, stall=STALL if (dec or encoder) else None)
                 break
-            except FFmpegError:
+            except FFmpegError as e:
+                if "stopped making progress" in str(e):
+                    _stalled.add((dec, encoder))
+                log.warning("Proxy attempt %s failed for %s: %s", gpu or "CPU", footage.name, str(e)[-300:])
                 if k == len(attempts) - 1:
                     raise
         os.replace(tmp, out)

@@ -26,6 +26,7 @@ from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, nee
 from .decoder import DecoderPool
 from .edits import blend
 from .models import Footage, OverlayClip
+from .speed import timemap
 
 READ_AHEAD = 45          # frames buffered (ready or being rendered) during playback
 START_FRAMES = 6         # playback's clock starts once this many frames are ready (or the buffer stalls)
@@ -67,6 +68,15 @@ class Shot:
     half_out: float = 0.0        # half-length of the transition out of it (the next shot's trans_in)
     rot: float = 0.0             # rotation, degrees clockwise (see reframe.split_rotation)
     box: tuple = ()              # (centre x, centre y, width, height) in parts of the frame: shown in that box
+    speed: float = 1.0           # clip speed and ramp template (see speed.py)
+    ramp: str = ""
+    src_len: float = 0.0         # length of its source range
+
+    def src_at(self, off: float) -> float:
+        """Source time shown `off` seconds after the shot's start (also before / after it: handles)."""
+        if self.ramp or abs(self.speed - 1.0) > 1e-9:
+            return self.src_in + timemap(self.src_len, self.speed, self.ramp).src(off)
+        return self.src_in + off
 
 
 @dataclass(frozen=True)
@@ -351,7 +361,7 @@ class PreviewEngine:
             try:   # position the clip's decoder at its first frame; playback then continues from there
                 first_t = np.ceil((shot.start - shot.half_in) * fps - 1e-6) / fps
                 dec = self.decoders.get(shot.footage, look.use_proxies, look.decode_h, shot.index % SLOTS)
-                _, reached = dec.raw_at(shot.src_in + max(-shot.half_in, first_t - shot.start), starving)
+                _, reached = dec.raw_at(shot.src_at(max(-shot.half_in, first_t - shot.start)), starving)
             except Exception:  # noqa: BLE001
                 reached = True
             if not reached:
@@ -376,22 +386,26 @@ class PreviewEngine:
         if pair is not None:
             a, b, kind, cut, half = pair
             # Both sides run into their handles: a past its out point, b before its in point.
-            layers = (self._layer(a, a.src_in + (t - a.start), look, interrupt)
-                      + self._layer(b, b.src_in + (t - b.start), look, interrupt))
+            layers = (self._layer(a, a.src_at(t - a.start), look, interrupt)
+                      + self._layer(b, b.src_at(t - b.start), look, interrupt))
             if len(layers) == 2:
                 return layers, (kind, (t - (cut - half)) / (2 * half))
-        return self._layer(shot, shot.src_in + min(max(0.0, t - shot.start), shot.dur), look, interrupt), None
+        return self._layer(shot, shot.src_at(min(max(0.0, t - shot.start), shot.dur)), look, interrupt), None
 
     def _overlays(self, t: float, look: Look, interrupt) -> list:
         """Decode the overlay layers showing at timeline time t: [(decoder, frame, OverlayShot)]."""
         out = []
+        seen: dict[int, int] = {}
         for ov in look.overlays:
             c = ov.clip
+            # Clips on a layer alternate between two decoders, so two overlapping in a transition (or a
+            # multicam cross-fade) each keep reading forward instead of seeking back and forth.
+            n = seen[c.track] = seen.get(c.track, -1) + 1
             if not (c.start <= t < c.end) or c.alpha_at(t) <= 0:
                 continue
             try:
-                dec = self.decoders.get(ov.footage, look.use_proxies, look.decode_h, 10 + c.track)
-                frame, _ = dec.raw_at(c.src_in + (t - c.start), interrupt)
+                dec = self.decoders.get(ov.footage, look.use_proxies, look.decode_h, 10 + 2 * c.track + n % 2)
+                frame, _ = dec.raw_at(c.src_at(t - c.start), interrupt)
             except Exception:  # noqa: BLE001 - a missing overlay file doesn't stop the picture below
                 continue
             if frame is not None:

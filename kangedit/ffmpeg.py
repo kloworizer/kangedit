@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -165,8 +166,11 @@ def run_ffmpeg(
     cancel: Optional[threading.Event] = None,
     cwd: Optional[str] = None,
     label: str = "",
+    stall: Optional[float] = None,
 ) -> None:
-    """Run ffmpeg with -progress parsing. `args` excludes the ffmpeg executable."""
+    """Run ffmpeg with -progress parsing. `args` excludes the ffmpeg executable. With `stall`, an ffmpeg whose
+    output time hasn't moved for that many seconds (a GPU driver that hangs, for one) is stopped and
+    FFmpegError raised, so the caller can try another way. A cancel stops ffmpeg at once, even a silent one."""
     exe = ffmpeg_bin()
     if not exe:
         raise FFmpegError("ffmpeg was not found on PATH")
@@ -180,6 +184,23 @@ def run_ffmpeg(
 
     t = threading.Thread(target=_drain, daemon=True)
     t.start()
+    moved = [time.monotonic(), -1]      # when the output time last advanced, and to what
+    stalled = threading.Event()
+
+    def _watch():
+        # Reading ffmpeg's progress blocks while it prints nothing: cancel and stall are watched from here.
+        while proc.poll() is None:
+            if cancel is not None and cancel.is_set():
+                proc.kill()
+                return
+            if stall and time.monotonic() - moved[0] > stall:
+                stalled.set()
+                proc.kill()
+                return
+            time.sleep(0.2)
+
+    w = threading.Thread(target=_watch, daemon=True)
+    w.start()
     try:
         for raw in iter(proc.stdout.readline, b""):
             if cancel is not None and cancel.is_set():
@@ -191,6 +212,8 @@ def run_ffmpeg(
                     us = int(line.split("=", 1)[1])
                 except ValueError:
                     continue
+                if us > moved[1]:
+                    moved[:] = [time.monotonic(), us]
                 if progress and duration > 0:
                     progress(min(1.0, us / 1e6 / duration), label)
         proc.wait()
@@ -198,8 +221,11 @@ def run_ffmpeg(
         if proc.poll() is None:
             proc.kill()
         t.join(timeout=2)
+        w.join(timeout=1)
     if cancel is not None and cancel.is_set():
         raise Cancelled()
+    if stalled.is_set():
+        raise FFmpegError(f"ffmpeg stopped making progress for {stall:.0f} s" + (f" ({label})" if label else ""))
     if proc.returncode != 0:
         tail = "\n".join(l for l in err_tail if l)
         raise FFmpegError(f"ffmpeg failed ({proc.returncode}):\n{tail}")

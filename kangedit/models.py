@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 
 from .color import Grade
+from .speed import timemap
 
 LOOP_CROSSFADE = 2.0   # seconds of crossfade between the repeats of a looping sound
 
@@ -96,11 +97,39 @@ class TimelineClip:
     box_y: float = 0.5
     box_w: float = 0.0
     box_h: float = 0.0
+    speed: float = 1.0             # 0.5 = half speed (slow motion), 2 = double (see speed.py)
+    ramp: str = ""                 # speed.RAMPS key: speed ramp template along the clip ("" = constant)
+    audio_mode: str = "sync"       # speed.SOUND_MODES key: the sound at another speed (synced, pitch, normal, mute)
     id: str = field(default_factory=new_id)
 
     @property
-    def duration(self) -> float:
+    def src_dur(self) -> float:
+        """Length of the source range used."""
         return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def duration(self) -> float:
+        """Length on the timeline (the source range at the clip's speed)."""
+        return self.timemap().duration
+
+    def timemap(self):
+        return timemap(self.src_dur, self.speed, self.ramp)
+
+    def src_at(self, t: float) -> float:
+        """Source time shown `t` seconds into the clip on the timeline."""
+        return self.src_in + self.timemap().src(t)
+
+    def time_at(self, src: float) -> float:
+        """Seconds into the clip (timeline) where source time `src` shows."""
+        return self.timemap().time(src - self.src_in)
+
+    def sound_src_at(self, t: float) -> float:
+        """Source time heard `t` seconds into the clip: the picture's, unless the sound plays at normal speed."""
+        return self.src_in + t if self.audio_mode == "normal" else self.src_at(t)
+
+    def sound_time_at(self, src: float) -> float:
+        """Seconds into the clip where the sound of source time `src` is heard."""
+        return src - self.src_in if self.audio_mode == "normal" else self.time_at(src)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -142,18 +171,41 @@ class OverlayClip:
     angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
     link: str = ""                 # multicam: id of the main-track clip it follows
     linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
+    speed: float = 1.0             # see TimelineClip.speed
+    ramp: str = ""
+    audio_mode: str = "sync"
+    mix_in: float = 0.0            # multicam: fades for the main track's transitions (set by multicam, kept apart
+    mix_out: float = 0.0           # from the user's fade_in / fade_out)
+    piece: int = 0                 # multicam switching: which shot of its main clip
     id: str = field(default_factory=new_id)
 
     @property
-    def duration(self) -> float:
+    def src_dur(self) -> float:
         return max(0.0, self.src_out - self.src_in)
+
+    @property
+    def duration(self) -> float:
+        return self.timemap().duration
+
+    def timemap(self):
+        return timemap(self.src_dur, self.speed, self.ramp)
+
+    def src_at(self, t: float) -> float:
+        return self.src_in + self.timemap().src(t)
+
+    def time_at(self, src: float) -> float:
+        return self.timemap().time(src - self.src_in)
+
+    def sound_src_at(self, t: float) -> float:
+        return self.src_in + t if self.audio_mode == "normal" else self.src_at(t)
 
     @property
     def end(self) -> float:
         return self.start + self.duration
 
     def fades(self) -> tuple[float, float]:
-        d, fi, fo = self.duration, max(0.0, self.fade_in), max(0.0, self.fade_out)
+        d = self.duration
+        fi, fo = max(0.0, self.fade_in, self.mix_in), max(0.0, self.fade_out, self.mix_out)
         if fi + fo > d:
             k = d / (fi + fo)
             fi, fo = fi * k, fo * k
@@ -417,6 +469,7 @@ class Project:
             "texts": [x.to_dict() for x in self.texts],
             "overlays": [x.to_dict() for x in self.overlays],
             "overlay_tracks": self.settings.overlay_tracks,
+            "multicam": copy.deepcopy(self.settings.multicam),   # its layout follows the angles' clips
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
@@ -428,6 +481,8 @@ class Project:
         self.texts = [TextClip.from_dict(d) for d in snap.get("texts", [])]
         self.overlays = [OverlayClip.from_dict(d) for d in snap.get("overlays", []) if d.get("footage_id") in self.footage]
         self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
+        if "multicam" in snap:
+            self.settings.multicam = copy.deepcopy(snap["multicam"])
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
