@@ -1,7 +1,7 @@
 """KangEdit - automatic best-moment video editor."""
 
 # Single source of the version: release tags (vX.Y.Z) must match it; scripts/bump_version.py changes it.
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 APP_NAME = "KangEdit"
 
 try:   # written by scripts/build.py for packaged builds: commit and date

@@ -6,6 +6,13 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-16
+
+### Fixed
+- Media panel → *Transcribe for captions* transcribed every selected file again, even the ones already
+  transcribed. It now does only those without a transcript (saying how many it kept); when all of them have one,
+  it asks before transcribing them again.
+
 ## [0.6.1] - 2026-10-16
 
 ### Fixed

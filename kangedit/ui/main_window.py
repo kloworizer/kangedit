@@ -2019,7 +2019,7 @@ class MainWindow(QMainWindow):
         elif action == "analyze":
             self.queue_analysis(ids, force=True)
         elif action == "transcribe":
-            self.queue_transcription(ids, force=True)
+            self.transcribe_media(ids)
         elif action == "detect_log":
             self.detect_log(ids)
         elif action == "import_lut_log":
@@ -3474,6 +3474,25 @@ class MainWindow(QMainWindow):
 
         name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
         self.tasks.submit(name, job, finished, self._task_error("Transcription"))
+
+    def transcribe_media(self, ids: list[str]):
+        """Media panel → Transcribe for captions: the selected files without a transcript; when they all have
+        one, ask before transcribing them again (manual caption edits would be lost)."""
+        media = [fid for fid in ids if fid in self.project.footage and not self.project.footage[fid].is_image]
+        todo = [fid for fid in media if self.project.footage[fid].transcript is None]
+        if todo:
+            done = len(media) - len(todo)
+            self.lbl_status.setText(f"Transcribing {len(todo)} file(s)"
+                                    + (f" ({done} already transcribed, kept)" if done else ""))
+            self.queue_transcription(todo)
+            return
+        if not media:
+            return
+        r = QMessageBox.question(self, APP_NAME, ("The selected file is" if len(media) == 1 else
+                                                  f"All {len(media)} selected files are") + " already transcribed.\n"
+                                 "Transcribe again (manual caption edits will be lost)?")
+        if r == QMessageBox.Yes:
+            self.queue_transcription(media, force=True)
 
     def generate_captions(self):
         used = list(dict.fromkeys(c.footage_id for c in self.project.clips))

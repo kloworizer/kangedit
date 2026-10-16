@@ -99,3 +99,33 @@ def test_cancelled_batch_keeps_the_finished_files(qapp, monkeypatch):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_media_panel_transcribes_only_what_is_missing(qapp, monkeypatch):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        p = Project()
+        files = [Footage(f"m{k}.mp4", 30.0, 1920, 1080, 30.0, True) for k in range(3)]
+        files[0].transcript = [{"s": 0.0, "e": 0.5, "w": "kept"}]
+        files[2].transcript = []                                         # transcribed: no speech in it
+        p.footage = {f.id: f for f in files}
+        w.set_project(p)
+        queued = []
+        monkeypatch.setattr(w, "queue_transcription", lambda ids, force=False: queued.append((list(ids), force)))
+        asked = []
+        monkeypatch.setattr("kangedit.ui.main_window.QMessageBox.question",
+                            lambda *a: asked.append(a[2]) or QMessageBox.No)
+        from kangedit.ui.main_window import QMessageBox
+        w.bin_action("transcribe", [f.id for f in files])                 # all selected, right-click
+        assert queued == [([files[1].id], False)] and not asked
+        assert "2 already transcribed, kept" in w.lbl_status.text()
+        files[1].transcript = []
+        w.bin_action("transcribe", [f.id for f in files])                 # all done: ask first
+        assert len(asked) == 1 and "already transcribed" in asked[0] and len(queued) == 1
+        monkeypatch.setattr("kangedit.ui.main_window.QMessageBox.question", lambda *a: QMessageBox.Yes)
+        w.bin_action("transcribe", [files[0].id])
+        assert queued[-1] == ([files[0].id], True)
+    finally:
+        w.project.dirty = False
+        w.close()
