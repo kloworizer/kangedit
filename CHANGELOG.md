@@ -6,6 +6,22 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-16
+
+### Fixed
+- Multicam, *Use the whole recording*: the target length now follows the main angle's recording (and can't be
+  changed, as the whole recording is used); turning the option off brings back the length set before.
+- Multicam switching: an angle could stay on screen far longer than the clip lengths in the Auto Edit settings
+  (one angle for 30 s at the start, layer clips much longer than the longest clip). Every shot now lasts
+  between the shortest and longest clip length: an angle held longer gives way to another as often as needed
+  (only where no other camera is recording can one stay longer).
+- Multicam switching with the whole recording: the transitions from the Auto Edit settings weren't applied.
+  The main track is now cut at every angle change, so the transitions (and the angle shots) play there; the
+  recording keeps its length and stays in sync.
+- Windows updates: the restart helper could leave some files of the old version in place (robocopy skips files
+  of the same size and time stamp, which a new build can have). It now copies every file, and writes what it
+  did to `update.log` in the logs folder.
+
 ## [0.5.0] - 2026-10-16
 
 ### Added

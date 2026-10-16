@@ -309,7 +309,7 @@ sound doesn't match is left out with a warning.
 | Stacked, top / bottom | A full-width band per angle, each cropped around its subject (for 9:16). |
 | Side by side | A full-height column per angle (for 16:9). |
 | Grid (2 × 2) | Up to four angles. |
-| Switching | Like a live multicam edit: one angle fills the frame at a time and the edit cuts between them at the best moments: to whoever is speaking (each camera's microphone is loudest for the person nearest it), the closer face, the steadier and sharper picture. Shots last at least 2 s, and an angle held for long gives way to another for a few seconds (a reaction shot). The sound stays on the main angle. |
+| Switching | Like a live multicam edit: one angle fills the frame at a time and the edit cuts between them at the best moments: to whoever is speaking (each camera's microphone is loudest for the person nearest it), the closer face, the steadier and sharper picture. Shots last between the edit's shortest and longest clip length: an angle held longer gives way to another for a shot (a reaction shot), as often as needed, unless no other camera is recording. With *Use the whole recording* the main track is cut at every angle change, so the edit's transitions play between the angles. The sound stays on the main angle. |
 
 Two angles take the main track and one layer, three angles two layers, and so on: in the boxed layouts the main
 angle's clips are shown in their box on the main track itself. Switching uses one layer for every other angle,

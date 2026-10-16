@@ -1364,11 +1364,22 @@ class MainWindow(QMainWindow):
                     if fid not in analyses:
                         analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
             order = story_order(footage, ids)
+            shot = (s.clip_min, s.clip_max)
             if multi and multi.get("whole"):
-                # The whole recording, cut only between the angles (no best moments, hook or bookends).
+                # The whole recording, cut only between the angles (no best moments, hook or bookends). With
+                # switching, the main track is cut at every angle change (shots within the clip lengths), so
+                # the transitions play there and each angle shot follows its own clip.
                 clips = multicam.whole_clips(mc_footage, mc_angles, syncs, order, multi.get("covered", True))
+                plan, switches = None, set()
+                if multi.get("template") == "switch":
+                    progress(0.8, "Cutting between the angles…")
+                    plan = multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
+                    clips = multicam.split_at_shots(clips, plan)
+                    shown = [multicam.shot_angle(plan, c) for c in clips]
+                    switches = {k for k in range(1, len(clips)) if shown[k] != shown[k - 1]}
+                apply_edit_style(clips, footage, analyses, s, switches)
                 note = f"Whole recording: {sum(c.duration for c in clips) / 60:.1f} min"
-                return analyses, clips, [note], syncs, faces
+                return analyses, clips, [note], syncs, faces, plan
             intro = outro = None
             notes: list[str] = []
             sel = s
@@ -1392,10 +1403,12 @@ class MainWindow(QMainWindow):
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
             apply_edit_style(clips, footage, analyses, s)
-            return analyses, clips, notes, syncs, faces
+            plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
+                    if multi and multi.get("template") == "switch" else None)
+            return analyses, clips, notes, syncs, faces, plan
 
         def done(res):
-            analyses, clips, notes, syncs, faces = res
+            analyses, clips, notes, syncs, faces, plan = res
             self.analyses.update(analyses)
             if not clips:
                 QMessageBox.information(self, APP_NAME, "No suitable moments were found. Try shorter clip lengths "
@@ -1414,7 +1427,8 @@ class MainWindow(QMainWindow):
                 self.project.settings.aspect = aspect
                 self._sync_project_controls()
             if multi:
-                notes = self._multicam_place(multi, mc_angles, syncs, faces, clips, s.replace_timeline) + notes
+                notes = self._multicam_place(multi, mc_angles, syncs, faces, clips, s.replace_timeline, plan,
+                                             (s.clip_min, s.clip_max)) + notes
             elif s.replace_timeline:
                 self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
             self.tl.selected = ""
@@ -1423,7 +1437,8 @@ class MainWindow(QMainWindow):
             self.viewer.seek(0)
             self._schedule_audio()
             msg = f"Auto edit: {len(clips)} clips, {self.project.duration:.1f} s"
-            if s.replace_timeline and self.project.duration < 0.85 * s.target_duration:
+            if (s.replace_timeline and self.project.duration < 0.85 * s.target_duration
+                    and not (multi and multi.get("whole"))):
                 msg += (f" (only this much distinct material for the {s.target_duration:.0f} s target — "
                         "lower 'Gap between reuses' or allow more uses per footage)")
             self.lbl_status.setText(msg + (" · " + " · ".join(notes) if notes else ""))
@@ -1480,15 +1495,18 @@ class MainWindow(QMainWindow):
         return syncs, faces
 
     def _multicam_place(self, multi: dict, angles: dict[str, int], syncs: dict, faces: dict,
-                        clips: list[TimelineClip], replace: bool) -> list[str]:
-        """Lay the synced angles over the new clips; returns status notes."""
+                        clips: list[TimelineClip], replace: bool, plan: Optional[dict] = None,
+                        shot: Optional[tuple[float, float]] = None) -> list[str]:
+        """Lay the synced angles over the new clips (with switching, the shots of `plan`, else a new plan);
+        returns status notes. shot: the shortest and longest shot (the auto edit's clip lengths)."""
         for fid, face in faces.items():
             if fid in self.project.footage:
                 self.project.footage[fid].face = face
         if replace:
             self.project.overlays = [c for c in self.project.overlays if c.angle == 0]
-        plan = (multicam.switch_plan(self.project, self.analyses, angles, syncs)
-                if multi["template"] == "switch" else (self.project.settings.multicam or {}).get("switch"))
+        if plan is None:
+            plan = (multicam.switch_plan(self.project, self.analyses, angles, syncs, shot)
+                    if multi["template"] == "switch" else (self.project.settings.multicam or {}).get("switch"))
         new = multicam.build(self.project, clips, angles, syncs, multi["template"], multi.get("audio", "main"),
                              switch=plan)
         self.project.overlays += new
@@ -1497,6 +1515,8 @@ class MainWindow(QMainWindow):
         self.project.settings.multicam = {
             "angles": dict(angles), "template": multi["template"], "audio": multi.get("audio", "main"),
             "covered": multi.get("covered", True), "whole": multi.get("whole", False), "switch": plan or {},
+            "shot": list(shot or (self.project.settings.multicam or {}).get("shot") or
+                         (multicam.MIN_SHOT, multicam.MAX_SHOT)),
             "syncs": {fid: [ref, r.offset, r.drift, r.confidence, r.overlap] for fid, (ref, r) in syncs.items()},
             "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
         notes = []

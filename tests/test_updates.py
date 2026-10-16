@@ -1,5 +1,9 @@
 """The update check at startup and the Windows restart helper."""
 
+import os
+import shutil
+import subprocess
+import sys
 import time
 
 import pytest
@@ -10,8 +14,10 @@ from kangedit import updater
 def test_windows_helper_runs_hidden_and_waits_without_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "win32")
     monkeypatch.setattr(updater.os, "getpid", lambda: 28604)
-    cmd = updater._helper_frozen(tmp_path / "new" / "KangEdit", tmp_path / "KangEdit", str(tmp_path))
+    cmd = updater._helper_frozen(tmp_path / "new" / "KangEdit", tmp_path / "KangEdit", str(tmp_path),
+                                 tmp_path / "update.log")
     script = (tmp_path / "install_update.bat").read_text(encoding="utf-8")
+    assert "/IS /IT" in script and "update.log" in script         # copies every file, and says what it did
     assert cmd[:2] == ["cmd", "/c"]
     assert "timeout" not in script                  # needs an interactive console: it failed and spun
     assert "ping -n 2 127.0.0.1" in script and 'find "28604"' in script and "GEQ 120" in script
@@ -22,6 +28,39 @@ def test_windows_helper_runs_hidden_and_waits_without_timeout(tmp_path, monkeypa
     updater.launch(cmd)
     flags = seen["creationflags"]
     assert flags & updater.WIN_NO_WINDOW and not flags & 0x00000008   # a hidden console, not none at all
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="runs the real Windows helper")
+def test_windows_helper_really_waits_copies_and_restarts(tmp_path, monkeypatch):
+    """The helper exactly as an update runs it (hidden console): it waits while the app is still running,
+    then copies the new build over the old one, starts it and removes its folder, all without hanging."""
+    work = tmp_path / "update"
+    staging = work / "new" / "KangEdit"
+    staging.mkdir(parents=True)
+    whoami = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "whoami.exe")
+    shutil.copy(whoami, staging / "KangEdit.exe")              # "the new app": starts and exits at once
+    (staging / "data.txt").write_text("new", encoding="utf-8")
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "KangEdit.exe").write_bytes(b"old")
+    (target / "data.txt").write_text("old", encoding="utf-8")
+    app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(4)"])   # "the running app"
+    monkeypatch.setattr(updater.os, "getpid", lambda: app.pid)
+    log = tmp_path / "update.log"
+    cmd = updater._helper_frozen(staging, target, str(work), log)
+    t0 = time.monotonic()
+    updater.launch(cmd)
+    time.sleep(2)
+    assert (target / "data.txt").read_text(encoding="utf-8") == "old"    # still waiting for the app to close
+    app.wait()
+    while work.exists() and time.monotonic() - t0 < 60:
+        time.sleep(0.25)
+    said = log.read_text(errors="replace") if log.exists() else "(no log)"
+    assert not work.exists(), "the helper didn't finish:\n" + said
+    assert (target / "data.txt").read_text(encoding="utf-8") == "new", said
+    assert "robocopy result" in said
+    assert (target / "KangEdit.exe").read_bytes() == open(whoami, "rb").read()
+    assert time.monotonic() - t0 < 30                                    # no two-minute fallback wait
 
 
 @pytest.fixture

@@ -323,10 +323,12 @@ def angle_scores(an, times: np.ndarray) -> np.ndarray:
     return score
 
 
-def _choose(scores: np.ndarray, step: float) -> np.ndarray:
+def _choose(scores: np.ndarray, step: float, min_shot: float = MIN_SHOT, max_shot: float = MAX_SHOT) -> np.ndarray:
     """Pick one angle (row) per sample: the best score over time, minus SWITCH_COST per cut (Viterbi), then
-    shots shorter than MIN_SHOT folded into their neighbours and shots longer than MAX_SHOT broken by the next
-    best angle where it comes closest. Rows that are NaN can't be chosen there."""
+    shots shorter than min_shot folded into their neighbours and shots longer than max_shot broken by the next
+    best angle where it comes closest, as often as needed (only where no other angle is recording can a shot
+    stay longer). Rows that are NaN can't be chosen there."""
+    max_shot = max(max_shot, min_shot)
     k, n = scores.shape
     s = np.where(np.isnan(scores), -1e9, scores * step)
     back = np.zeros((k, n), dtype=np.int32)
@@ -342,7 +344,7 @@ def _choose(scores: np.ndarray, step: float) -> np.ndarray:
     path[-1] = int(np.argmax(acc))
     for i in range(n - 1, 0, -1):
         path[i - 1] = back[path[i], i]
-    min_len = max(1, int(round(MIN_SHOT / step)))
+    min_len = max(1, int(round(min_shot / step)))
 
     def runs(p):
         edges = np.flatnonzero(np.diff(p)) + 1
@@ -360,33 +362,83 @@ def _choose(scores: np.ndarray, step: float) -> np.ndarray:
                 changed = True
         if not changed:
             break
-    max_len = int(round(MAX_SHOT / step))
-    for a, b in runs(path):                  # a long hold gives way to the runner-up for a shot
-        if b - a <= max_len + 2 * min_len or k < 2:
-            continue
-        cur = path[a]
-        other = np.where(np.arange(k)[:, None] == cur, -np.inf, np.where(np.isnan(scores), -np.inf, scores))
-        alt = np.max(other[:, a:b], axis=0)
-        lo, hi = a + min_len, b - 2 * min_len
-        if hi <= lo or not np.isfinite(alt[lo - a:hi - a]).any():
-            continue
-        gap = scores[cur, a:b] - alt          # +inf where no other angle is recording
-        j = lo + int(np.argmin(gap[lo - a:hi - a]))
-        who = int(np.argmax(other[:, j]))
-        end = min(b - min_len, j + int(round(1.5 * min_len)))     # a short cutaway (reaction shot)
-        if end - j >= min_len and np.isfinite(other[who, j:end]).all():
-            path[j:end] = who
+    max_len = max(min_len, int(round(max_shot / step)))
+    if k < 2:
+        return path
+    finite = ~np.isnan(scores)
+    for _ in range(5):                       # a hold longer than max_shot gives way to the runner-up
+        broke = False
+        for a, b in runs(path):
+            p = a
+            others = np.delete(finite, path[a], axis=0).any(axis=0) if b - a > max_len else None
+            while b - p > max_len:
+                # Held only because no other angle was recording: the count starts when one is.
+                free = np.flatnonzero(others[p:b])
+                if free.size == 0:
+                    break
+                if free[0] > 0:
+                    p += int(free[0])
+                    continue
+                cut = _cutaway(path, scores, finite, p, b, min_len, max_len)
+                if cut is None:
+                    break
+                j, end, who = cut
+                path[j:end] = who
+                broke = True
+                p = end
+        if not broke:
+            break
     return path
 
 
+def _cutaway(path: np.ndarray, scores: np.ndarray, finite: np.ndarray, a: int, b: int, min_len: int,
+             max_len: int) -> Optional[tuple[int, int, int]]:
+    """Where to break a hold of path[a:b] (one angle, longer than max_len samples): (cut, end of the cutaway,
+    its angle), the cut where the runner-up comes closest within max_len of a, or None when no other angle is
+    recording after a."""
+    k = scores.shape[0]
+    cur = path[a]
+    lo, hi = a + min_len, min(a + max_len, b - min_len)      # where the cut may go
+    if hi < lo:
+        lo = hi = a + max_len // 2
+    other = np.where((np.arange(k)[:, None] == cur) | ~finite[:, a:b], -np.inf, scores[:, a:b])
+    alt = np.max(other[:, lo - a:hi - a + 1], axis=0)
+    if np.isfinite(alt).any():
+        gap = scores[cur, lo:hi + 1] - alt
+        j = lo + int(np.argmin(gap))
+    else:                                    # nothing else recording right here: the first moment after
+        later = np.flatnonzero(np.isfinite(np.max(other[:, hi - a:], axis=0)))
+        if later.size == 0:
+            return None
+        j = hi + int(later[0])
+    who = int(np.argmax(other[:, j - a]))
+    # About the middle of the shot lengths, while that angle is recording, never past max_len; the rest of
+    # the hold is left at least min_len long when that can be done.
+    avail = j + 1
+    while avail < min(b, j + max_len) and finite[who, avail]:
+        avail += 1
+    end = min(avail, j + (min_len + max_len) // 2)
+    rest = b - end
+    if 0 < rest < min_len:
+        if avail >= b and b - j <= max_len:
+            end = b
+        elif end - (min_len - rest) >= j + min_len:
+            end -= min_len - rest
+    return j, end, who
+
+
 def switch_plan(project: Project, analyses: dict, angles: Optional[dict] = None,
-                syncs: Optional[dict] = None) -> dict[str, list[list[float]]]:
+                syncs: Optional[dict] = None, shot: Optional[tuple[float, float]] = None) -> dict[str, list[list[float]]]:
     """The switching cut for each main-angle recording: {main footage id: [[start, end, angle], ...]} in its
     source time, from the angles' analyses (footage id -> Analysis). Angles not recording at a moment, or not
-    analysed, are skipped there."""
+    analysed, are skipped there. shot: (shortest, longest) shot in seconds (the auto edit's clip lengths), else
+    the one stored with the project's multicam setup, else MIN_SHOT..MAX_SHOT."""
     mc = project.settings.multicam or {}
     angles = angles if angles is not None else {f: k for f, k in (mc.get("angles") or {}).items()}
     syncs = syncs if syncs is not None else stored_syncs(project)
+    lo, hi = shot or tuple(mc.get("shot") or (MIN_SHOT, MAX_SHOT))
+    lo = max(SWITCH_STEP, float(lo))
+    hi = max(lo, float(hi))
     plan = {}
     for fid, k in angles.items():
         if k != 1 or fid not in project.footage:
@@ -406,7 +458,7 @@ def switch_plan(project: Project, analyses: dict, angles: Optional[dict] = None,
             sc = angle_scores(analyses[sid], tb)
             sc[(tb < 0) | (tb > project.footage[sid].duration)] = np.nan
             rows[a - 1] = np.where(np.isnan(rows[a - 1]), sc, np.fmax(rows[a - 1], sc))
-        path = _choose(rows, SWITCH_STEP)
+        path = _choose(rows, SWITCH_STEP, lo, hi)
         edges = np.flatnonzero(np.diff(path)) + 1
         plan[fid] = [[round(float(t[a]), 3), round(float(t[b - 1] + SWITCH_STEP), 3), int(path[a]) + 1]
                      for a, b in zip(np.r_[0, edges], np.r_[edges, len(path)])]
@@ -577,6 +629,36 @@ def whole_clips(project_footage: dict[str, Footage], angles: dict[str, int],
             if b - a >= MIN_PIECE:
                 out.append(TimelineClip(fid, round(a, 3), round(b, 3)))
     return out
+
+
+def split_at_shots(clips: list[TimelineClip], plan: dict[str, list[list[float]]]) -> list[TimelineClip]:
+    """Whole-recording clips cut at every switch of the plan, one main-track clip per shot, so the edit's
+    transitions play at the angle changes and each shot follows its own clip. Pieces too short to show join
+    the one before."""
+    out: list[TimelineClip] = []
+    for c in clips:
+        cuts = sorted({round(t, 3) for s0, s1, _k in plan.get(c.footage_id, []) for t in (s0, s1)
+                       if c.src_in + MIN_PIECE <= t <= c.src_out - MIN_PIECE})
+        edges = [c.src_in] + cuts + [c.src_out]
+        for a, b in zip(edges[:-1], edges[1:]):
+            if b - a < MIN_PIECE and out and out[-1].footage_id == c.footage_id:
+                out[-1].src_out = b
+                continue
+            piece = TimelineClip.from_dict(c.to_dict())
+            piece.id = TimelineClip(c.footage_id, a, b).id
+            piece.src_in, piece.src_out = a, b
+            out.append(piece)
+    return out
+
+
+def shot_angle(plan: dict[str, list[list[float]]], c: TimelineClip) -> int:
+    """The angle the plan shows for most of main clip c (1 when the plan has nothing there)."""
+    best, angle = 0.0, 1
+    for s0, s1, k in plan.get(c.footage_id, []):
+        overlap = min(s1, c.src_out) - max(s0, c.src_in)
+        if overlap > best:
+            best, angle = overlap, int(k)
+    return angle
 
 
 def coverage_blockers(project_footage: dict[str, Footage], angles: dict[str, int],

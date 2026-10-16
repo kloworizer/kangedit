@@ -79,7 +79,7 @@ class AutoEditDialog(QDialog):
         g = QGroupBox("Timing")
         f = QFormLayout(g)
         self.sp_target = QDoubleSpinBox(decimals=0, suffix=" s")
-        self.sp_target.setRange(5, 3600)
+        self.sp_target.setRange(5, 6 * 3600)
         self.sp_min = QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" s")
         self.sp_min.setRange(0.5, 60)
         self.sp_max = QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" s")
@@ -260,6 +260,7 @@ class AutoEditDialog(QDialog):
                                   "best moments, like editing a full multicam event: with Switching, the angles "
                                   "are cut all the way through.")
         self.chk_whole.setChecked(bool(last.get("whole", False)))
+        self.chk_whole.toggled.connect(lambda _: self._suggest_target())
         f.addRow("Layout", self.cb_layout)
         f.addRow(self.lbl_layout)
         f.addRow("Sound", self.cb_audio)
@@ -283,6 +284,7 @@ class AutoEditDialog(QDialog):
     def _multi_toggled(self, on: bool):
         self.multi_body.setVisible(on)
         self.grp_footage.setVisible(not on)     # with multicam, the main angle's files are the ones edited
+        self._suggest_target()
         self._fit_screen()
 
     def _fit_screen(self):
@@ -363,12 +365,32 @@ class AutoEditDialog(QDialog):
         if not hasattr(self, "list"):
             return
         total = sum(self.project.footage[fid].duration for fid in self.footage_ids() if fid in self.project.footage)
+        if self.whole_recording():
+            # The edit is the main angle's whole recording: its length is the target (not a choice).
+            if self.sp_target.isEnabled():
+                self._target_before = self.sp_target.value()
+            self.sp_target.setEnabled(False)
+            self.sp_target.blockSignals(True)
+            self.sp_target.setValue(max(self.sp_target.minimum(), round(total)))
+            self.sp_target.blockSignals(False)
+            self.lbl_target.setText("the main angle's whole recording" if total else "")
+            return
+        if not self.sp_target.isEnabled():       # whole recording turned off: the length chosen before
+            self.sp_target.setEnabled(True)
+            self.sp_target.blockSignals(True)
+            self.sp_target.setValue(getattr(self, "_target_before", self.sp_target.value()))
+            self.sp_target.blockSignals(False)
         d = suggest_duration(self.format_key(), total)
         self.lbl_target.setText(f"of {total / 60:.1f} min footage" if total else "")
         if d is not None and self._target_auto and self.format_key() == "long":
             self.sp_target.blockSignals(True)
             self.sp_target.setValue(d)
             self.sp_target.blockSignals(False)
+
+    def whole_recording(self) -> bool:
+        """Multicam with "Use the whole recording" on."""
+        multi, whole = getattr(self, "chk_multi", None), getattr(self, "chk_whole", None)
+        return bool(multi is not None and whole is not None and multi.isChecked() and whole.isChecked())
 
     def format_key(self) -> str:
         for k, b in self.fmt_buttons.items():

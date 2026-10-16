@@ -357,6 +357,24 @@ def test_switching_choose_cuts_cleanly():
     assert (path[:50] == 0).all() and (path[60:] == 1).all()
 
 
+def test_switching_shots_keep_to_the_clip_lengths():
+    """Every shot lasts between the auto edit's shortest and longest clip, however long one angle stays the
+    best (a long hold gives way to another angle again and again), unless no other angle is recording."""
+    step = multicam.SWITCH_STEP
+    rng = np.random.default_rng(0)
+    n = 6000                                                       # 10 minutes
+    sc = np.vstack([np.full(n, 1.0), np.zeros(n), np.full(n, -0.3)]) + rng.normal(0, 0.1, (3, n))
+    sc[1:, :300] = np.nan                                          # only the main angle for the first 30 s
+    for lo, hi in ((1.2, 3.0), (4.0, 10.0)):
+        path = multicam._choose(sc, step, lo, hi)
+        edges = np.flatnonzero(np.diff(path)) + 1
+        runs = np.diff(np.r_[0, edges, n]) * step
+        assert (path[:300] == 0).all() and 30.0 <= runs[0] <= 30.0 + hi + 1e-6   # held, then the count starts
+        inner = runs[1:]
+        assert inner.min() >= lo - 1e-6 and inner.max() <= hi + 1e-6
+        assert (path[300:] != 0).mean() > 0.3                      # the other angles get their turns
+
+
 class _An:
     """A stand-in Analysis: loud while its own speaker talks."""
 
@@ -371,9 +389,10 @@ class _An:
 def test_switching_layout_follows_who_speaks():
     p, main, cam2, angles, syncs = _project()
     an = {main.id: _An(lambda t: (t // 10) % 2 == 0), cam2.id: _An(lambda t: ((t + 20) // 10) % 2 == 1)}
-    plan = multicam.switch_plan(p, an, angles, syncs)
+    plan = multicam.switch_plan(p, an, angles, syncs, shot=(2.0, 12.0))      # 10 s turns: one shot each
     shots = plan[main.id]
-    assert [k for *_, k in shots][:4] == [1, 2, 1, 2] and shots[1][0] == pytest.approx(20.0, abs=0.3)
+    # main speaks 20-30 s (cam2 records from 20 s), cam2's speaker 30-40 s...
+    assert [k for *_, k in shots][:4] == [1, 2, 1, 2] and shots[1][0] == pytest.approx(30.0, abs=0.3)
     p.clips = [TimelineClip(main.id, 25.0, 45.0)]                   # 25-30 main, 30-40 cam2, 40-45 main
     p.settings.multicam = {"switch": plan}
     _store(p, angles, syncs, "switch")
@@ -410,6 +429,7 @@ def test_switching_from_the_layout_menu(window, qapp, monkeypatch):
     p, main, cam2, angles, syncs = _project()
     p.clips = [TimelineClip(main.id, 25.0, 45.0)]
     _store(p, angles, syncs, "pip")
+    p.settings.multicam["shot"] = [2.0, 12.0]                       # (as the auto edit stores its clip lengths)
     window.set_project(p)
     window.analyses = {main.id: _An(lambda t: (t // 10) % 2 == 0), cam2.id: _An(lambda t: ((t + 20) // 10) % 2 == 1)}
     monkeypatch.setattr(window.tasks, "submit",
@@ -485,3 +505,60 @@ def test_select_all_includes_the_layers(window, qapp):
     tl._ov_selection = {o.id for o in p.overlays}
     window._delete_selected()
     assert window.project.overlays == [] and len(window.project.clips) == 3
+
+
+def test_whole_recording_switching_in_the_app(window, monkeypatch):
+    """Multicam, whole recording, switching: the target is the recording's length, the main track is cut at
+    every angle change (each shot within the clip lengths) with the edit's transitions there, and the angle
+    shots on the layer follow those clips, from the first moment both angles recorded."""
+    import threading
+    from kangedit.autoedit import AutoEditSettings
+    from kangedit.ui.dialogs import AutoEditDialog
+    p, main, cam2, angles, syncs = _project()                  # cam2 covers main 20-80 s
+    p.clips = []
+    window.set_project(p)
+    d = AutoEditDialog(p, [], AutoEditSettings())
+    d.chk_multi.setChecked(True)
+    d.angle_rows[cam2.id].setCurrentIndex(1)
+    before = d.sp_target.value()
+    d.chk_whole.setChecked(True)
+    assert d.sp_target.value() == round(main.duration) and not d.sp_target.isEnabled()
+    d.chk_whole.setChecked(False)
+    assert d.sp_target.value() == before and d.sp_target.isEnabled()
+
+    an = {main.id: _An(lambda t: (t // 10) % 2 == 0), cam2.id: _An(lambda t: ((t + 20) // 10) % 2 == 1)}
+    an[main.id].times = an[cam2.id].times = np.arange(0, 130, 0.5)
+    for a in an.values():
+        a.audio = np.resize(a.audio, len(a.times))
+        for k in ("faces", "activity", "sharp", "jerk", "clipped"):
+            setattr(a, k, np.resize(getattr(a, k), len(a.times)))
+    monkeypatch.setattr("kangedit.ui.main_window.load_or_analyze", lambda f, **kw: an[f.id])
+    monkeypatch.setattr(window, "queue_analysis", lambda ids, force=False: None)
+    monkeypatch.setattr(window, "_multicam_prepare", lambda *a: (syncs, {}))
+    monkeypatch.setattr(window.tasks, "submit",
+                        lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+    s = AutoEditSettings(clip_min=2.0, clip_max=6.0, transitions="scenes", transition_style="dissolve",
+                         transition_dur=0.5)
+    window._run_auto_edit(s, [main.id], None,
+                          multi={"angles": angles, "template": "switch", "audio": "main", "covered": True,
+                                 "whole": True})
+    clips = window.project.clips
+    assert clips[0].src_in == pytest.approx(20.0) and clips[-1].src_out == pytest.approx(80.0)
+    assert all(abs(b.src_in - a.src_out) < 1e-6 for a, b in zip(clips, clips[1:]))   # one recording, cut
+    assert all(c.duration <= 6.0 + 1e-6 for c in clips) and all(c.duration >= 2.0 - 1e-6 for c in clips[1:-1])
+    ov = window.project.overlays
+    shots = {o.link for o in ov}
+    assert len(ov) >= 4 and all(o.angle == 2 and o.track == 0 for o in ov)
+    assert all(o.duration <= 6.0 + 0.5 + 1e-6 for o in ov)    # a shot (+ its half transitions into the handles)
+    # every cut is a switch of angle, and has the transition
+    switched = [k for k in range(1, len(clips)) if (clips[k].id in shots) != (clips[k - 1].id in shots)]
+    assert switched == list(range(1, len(clips)))
+    assert all(c.transition == "dissolve" for c in clips[1:])
+    assert min(o.start for o in ov) < 12.0                     # the angles cut in from the start
+    assert window.project.settings.multicam["shot"] == [2.0, 6.0]
+    assert window.project.duration == pytest.approx(60.0, abs=0.01)  # transitions don't shorten the recording
+    starts = window.project.clip_starts()
+    for o in ov:                                               # each shot in sync with its main clip
+        i = window.project.index_of(o.link)
+        main_t = clips[i].src_in + (o.start + o.mix_in - starts[i])
+        assert syncs[cam2.id][1].b_time(main_t) == pytest.approx(o.src_in + o.mix_in, abs=0.02)

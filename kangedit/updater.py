@@ -223,16 +223,30 @@ def app_bundle() -> Path:
     return APP_DIR
 
 
-def _helper_frozen(staging_app: Path, target: Path, workdir: str) -> list[str]:
+def update_log() -> Path:
+    """Where the Windows update helper writes what it did (the copy's summary and result)."""
+    from .crashlog import log_dir
+    return log_dir() / "update.log"
+
+
+def _helper_frozen(staging_app: Path, target: Path, workdir: str, log: Optional[Path] = None) -> list[str]:
     """A script that waits for this process to end, copies the new build over the old one and restarts it."""
     pid = os.getpid()
     if sys.platform == "win32":
         exe = target / "KangEdit.exe"
         script = Path(workdir) / "install_update.bat"
+        log = log or update_log()
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         # Runs in a hidden console (see launch): every command shares it, so no window opens. "timeout" needs
         # an interactive console, so the one-second pause is a ping; after ~2 minutes it goes on regardless.
+        # robocopy copies every file (/IS /IT): by default it skips files of the same size and time stamp,
+        # which a new build can have although they changed. What it did goes to the update log.
         script.write_text(
             "@echo off\r\n"
+            f'echo KangEdit update to "{target}" >"{log}" 2>NUL\r\n'
             "set n=0\r\n"
             ":wait\r\n"
             f'tasklist /FI "PID eq {pid}" /NH 2>NUL | find "{pid}" >NUL || goto copy\r\n'
@@ -241,7 +255,8 @@ def _helper_frozen(staging_app: Path, target: Path, workdir: str) -> list[str]:
             "ping -n 2 127.0.0.1 >NUL\r\n"
             "goto wait\r\n"
             ":copy\r\n"
-            f'robocopy "{staging_app}" "{target}" /E /R:10 /W:1 /NFL /NDL /NJH /NJS >NUL\r\n'
+            f'robocopy "{staging_app}" "{target}" /E /IS /IT /R:10 /W:1 /NP /NFL /NDL >>"{log}" 2>&1\r\n'
+            f'echo robocopy result %ERRORLEVEL% (0-7: copied, 8 or more: failed) >>"{log}" 2>NUL\r\n'
             f'start "" "{exe}"\r\n'
             f'rmdir /S /Q "{workdir}"\r\n', encoding="utf-8")
         return ["cmd", "/c", str(script)]
