@@ -170,6 +170,7 @@ def _curve(fade: float) -> str:
 
 
 DUCK_THRESHOLD = 0.01    # clip sound above this level (about -40 dBFS) turns the ducked music down
+VOICE_BAND = (200, 3800)  # Hz: the part of the edit's sound that ducks the music (speech)
 
 
 def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int, extra: tuple = ()) -> str:
@@ -220,7 +221,9 @@ def _mix_sounds(project: Project, inputs: list[str], graph: list[str], k: int, e
             graph.append(f"{ducked[0]}anull[amusic]")
         # mix < 1 keeps (1 - mix) of the music however loud the sidechain is: the floor of the ducking.
         mix = 1.0 - 10 ** (-depth / 20.0)
-        graph.append(f"[amusic][aduck_sc]sidechaincompress=threshold={DUCK_THRESHOLD}:ratio=20:attack=30:"
+        # The music listens to the voice band of the edit's sound: speech turns it down, wind and rumble don't.
+        graph.append(f"[aduck_sc]highpass=f={VOICE_BAND[0]},lowpass=f={VOICE_BAND[1]}[aduck_v]")
+        graph.append(f"[amusic][aduck_v]sidechaincompress=threshold={DUCK_THRESHOLD}:ratio=20:attack=30:"
                      f"release=400:makeup=1:mix={mix:.4f}[aducked]")
         base = "aprogm"
         plain.append("[aducked]")
@@ -335,7 +338,7 @@ def _join(graph: list[str], plans: list[ClipPlan], fps: float, video: bool) -> N
                 graph.append(f"[{cur_v}][v{i}]xfade=transition={cp.xfade}:duration={d:.4f}:"
                              f"offset={(cur_len - d_f) / fps:.4f}[xv{i}]")
                 cur_v = f"xv{i}"
-            graph.append(f"[{cur_a}][a{i}]acrossfade=d={d:.4f}:c1=tri:c2=tri[xa{i}]")
+            graph.append(f"[{cur_a}][a{i}]acrossfade=d={d + cp.a_lead:.4f}:c1=tri:c2=tri[xa{i}]")
             cur_a = f"xa{i}"
             cur_len += cp.v_frames - d_f
         else:

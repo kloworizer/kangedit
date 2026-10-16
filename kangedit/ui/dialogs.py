@@ -22,6 +22,7 @@ from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
 from ..fonts import ensure_qt_font, font_files, system_fonts
 from ..models import Project
 from .. import multicam
+from ..polish import PACING
 
 FIT_MODES = {"fill": "Fill (crop to frame)", "fit": "Fit (black bars)", "blur": "Fit with blurred background"}
 
@@ -153,6 +154,33 @@ class AutoEditDialog(QDialog):
         f.addRow("Style / length", trow)
         f.addRow(self.chk_jl)
         f.addRow(self.chk_bookends)
+        lay.addWidget(g)
+
+        # --- Finishing
+        g = QGroupBox("Finishing")
+        f = QFormLayout(g)
+        self.cb_pacing = _combo(PACING, last.pacing)
+        self.cb_pacing.setToolTip("How the clip lengths change along the edit (within the clip lengths above)")
+        self.chk_pauses = QCheckBox("Cut between words, never in the middle of one")
+        self.chk_pauses.setToolTip("Each cut moves to the nearest pause (the transcript's word timings, else a "
+                                   "quieter moment), up to 0.6 s")
+        self.chk_pauses.setChecked(last.cut_on_pauses)
+        self.chk_beats = QCheckBox("Cut on the beat of the music (when the timeline has music)")
+        self.chk_beats.setToolTip("Add music first (Sounds tab → Background music): the cuts then move to its nearest beat, up to "
+                                  "half a beat")
+        self.chk_beats.setChecked(last.beat_sync)
+        self.chk_fillers = QCheckBox("Remove filler words, long pauses and false starts")
+        self.chk_fillers.setToolTip("\"um\", \"eh\", \"anu\", silences over a second and words said twice in a "
+                                    "row are cut out of the clips (jump cuts). Uses the transcripts: footage "
+                                    "without one is transcribed first.")
+        self.chk_fillers.setChecked(last.remove_fillers)
+        self.chk_variety = QCheckBox("Vary the shot sizes (no three close-ups or wide shots in a row)")
+        self.chk_variety.setChecked(last.shot_variety)
+        self.chk_loud = QCheckBox("Even out the loudness of the clips")
+        self.chk_loud.setChecked(last.even_loudness)
+        f.addRow("Pacing", self.cb_pacing)
+        for w in (self.chk_pauses, self.chk_beats, self.chk_fillers, self.chk_variety, self.chk_loud):
+            f.addRow(w)
         lay.addWidget(g)
 
         # --- Footage
@@ -357,6 +385,8 @@ class AutoEditDialog(QDialog):
             self.sp_tdur.setValue(s["transition_dur"])
             self.chk_jl.setChecked(s["jl_cuts"])
             self.chk_bookends.setChecked(s["bookends"])
+            if "pacing" in s:
+                self.cb_pacing.setCurrentIndex(max(0, self.cb_pacing.findData(s["pacing"])))
             self._target_auto = True
             self._suggest_target()
 
@@ -427,6 +457,12 @@ class AutoEditDialog(QDialog):
             transition_dur=self.sp_tdur.value(),
             jl_cuts=self.chk_jl.isChecked(),
             bookends=self.chk_bookends.isChecked(),
+            pacing=self.cb_pacing.currentData(),
+            cut_on_pauses=self.chk_pauses.isChecked(),
+            beat_sync=self.chk_beats.isChecked(),
+            remove_fillers=self.chk_fillers.isChecked(),
+            shot_variety=self.chk_variety.isChecked(),
+            even_loudness=self.chk_loud.isChecked(),
         )
 
 

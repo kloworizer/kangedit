@@ -6,6 +6,47 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
+### Added
+- Long-form auto edit: **scenes** are time groups of the footage (a gap of over 30 minutes between recordings,
+  such as another day or place, starts a new one). Each scene after the first opens with a scenic / travel shot
+  from that scene (a view without faces or talking, sharp, colourful, steady or gently panning) when it has one,
+  and *Transitions between scenes* play between these scenes rather than at every change of file.
+- Media panel: right-click → *Bins* → **Clear all bins** (the media stays in the project; undoable).
+- **Finishing** options in ✨ Auto Edit (and *Tools → Finish the edit* for any timeline):
+  - **Cut between words**: a cut that falls inside a word moves to the pause next to it (the transcript's word
+    timings, else a clearly quieter moment), up to 0.6 s.
+  - **Cut on the beat**: with music on the timeline, each cut moves to its nearest beat (detected from the music,
+    looping music included), never into a word.
+  - **Pacing**: steady, build-up (long shots first, faster and faster), trailer (quick, longer, quick) or calm
+    finish; the clip lengths change along the edit within the clip lengths set.
+  - **Remove fillers, long pauses and false starts** ("um", "eh", "anu", silences over 0.9 s, words said twice in
+    a row) from the clips using the transcripts; missing transcripts are made first. They become jump cuts.
+  - **Vary the shot sizes**: where three close-ups, medium or wide shots would follow each other, the middle one
+    is swapped for a nearby moment of another size that scores nearly as well.
+  - **Even out the loudness**: each clip's sound is brought to the edit's typical level (at most ±9 dB).
+- Moments with the lens covered (a finger, the camera in a pocket), a blown-out picture or the focus hunting are
+  avoided when choosing the best moments.
+- **Highlight reel**: *Tools → Make a highlight reel (9:16)* turns the edit into a 30, 45 or 60 s vertical reel of
+  its best moments (hook first, trailer pacing, on the beat, framed on the faces); Undo brings the edit back.
+- Scenes also split by **place**: files that carry a location (phones, action cameras, drones) more than 1 km
+  apart are different scenes.
+- **B-roll bin**: right-click media → *Add to B-roll bin*. Scenic scene openers come from it first, even when it
+  wasn't among the files chosen for the edit.
+- A scene's scenic opener brings its natural sound in 1.2 s early, under the end of the scene before (also
+  through a transition: the sound crossfade starts before the picture one).
+- Multicam switching cuts to the other angles at a laugh, applause or an exclamation (a short burst in the
+  sound), most of all to an angle whose picture moves.
+
+### Changed
+- Auto ducking listens to the voice band of the edit's sound, so speech turns the music down and wind or rumble
+  doesn't.
+- The recording date of a file is the oldest one it carries: its creation time tag, its file creation date or its
+  modification date (copying a file renews its creation date; a camera with its clock unset writes a wrong tag,
+  and dates before 1995 are ignored). Bins by date, story order and the choice of the files searched for the
+  opening and closing all use it.
+
 ## [0.5.1] - 2026-10-16
 
 ### Fixed

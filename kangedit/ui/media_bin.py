@@ -397,6 +397,10 @@ class MediaBin(QWidget):
         else:
             self._bin_edit(lambda: binlib.add_bin(self.project, name), f"New bin “{name}”", name)
 
+    def add_to_broll(self, ids: list[str]):
+        self._bin_edit(lambda: binlib.move_to_bin(self.project, ids, binlib.BROLL),
+                       f"Added {len(ids)} item(s) to the {binlib.BROLL} bin: scenes open with it first")
+
     def move_to_bin(self, ids: list[str], name: str):
         self._bin_edit(lambda: binlib.move_to_bin(self.project, ids, name),
                        f"Moved {len(ids)} item(s) " + (f"to the bin “{name}”" if name else "out of their bin"))
@@ -411,6 +415,11 @@ class MediaBin(QWidget):
         if ok and new.strip() and new.strip() != name:
             self._bin_edit(lambda: binlib.rename_bin(self.project, name, new), f"Renamed the bin to “{new.strip()}”",
                            new.strip())
+
+    def clear_bins(self):
+        n = len(binlib.all_bins(self.project))
+        self._bin_edit(lambda: binlib.clear_bins(self.project),
+                       f"Cleared {n} bin(s) (all the media stays in the project)", binlib.ALL)
 
     def delete_bin(self, name: str):
         self._bin_edit(lambda: binlib.delete_bin(self.project, name),
@@ -437,6 +446,9 @@ class MediaBin(QWidget):
             sub.addSeparator()
             sub.addAction(f"Rename bin “{cur}”…", lambda: self.rename_bin(cur))
             sub.addAction(f"Delete bin “{cur}” (keeps its media)", lambda: self.delete_bin(cur))
+        if binlib.all_bins(self.project):
+            sub.addSeparator()
+            sub.addAction("Clear all bins (keeps the media)", self.clear_bins)
 
     def _menu(self, pos):
         ids = self.selected_ids()
@@ -446,6 +458,8 @@ class MediaBin(QWidget):
             m.exec(self.stack.currentWidget().viewport().mapToGlobal(pos))
             return
         self._bin_menu(m, ids)
+        a = m.addAction(f"Add to {binlib.BROLL} bin", lambda: self.add_to_broll(ids))
+        a.setToolTip("Cutaway footage (views, travel, details): scenes of a long-form auto edit open with it first")
         m.addSeparator()
         for key, label in (("append_best", "Append best moment to timeline"),
                            ("append_whole", "Append whole clip to timeline"),

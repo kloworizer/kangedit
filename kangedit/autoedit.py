@@ -80,6 +80,12 @@ class AutoEditSettings:
     transition_dur: float = 0.5
     jl_cuts: bool = False           # J/L split edits where the sound leads or trails a cut
     bookends: bool = False          # find the opening and closing (file names, recording time, speech)
+    pacing: str = "steady"          # polish.PACING key: how clip lengths change along the edit
+    cut_on_pauses: bool = True      # cuts between words, not in the middle of one
+    beat_sync: bool = True          # cuts on the beat of the music on the timeline (when there is music)
+    remove_fillers: bool = False    # take out "um / eh / anu", long pauses and false starts (needs transcripts)
+    shot_variety: bool = True       # avoid three shots of the same size in a row
+    even_loudness: bool = True      # every clip's sound at about the same loudness
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -149,25 +155,43 @@ def _loud(a: Optional[Analysis], t0: float, t1: float) -> bool:
     return float(seg.mean()) > max(0.12, 1.3 * float(np.median(a.wave)))
 
 
+SCENE_BRIDGE = 1.2       # seconds a scene opener's sound leads in under the scene before
+
+
 def apply_edit_style(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict[str, Analysis],
-                     s: AutoEditSettings, switches: Optional[set[int]] = None) -> None:
-    """Transitions and J/L cuts for an automatic edit (in place). switches: indices of the clips that start
-    on another camera angle (multicam switching): those cuts count as scene changes."""
+                     s: AutoEditSettings, switches: Optional[set[int]] = None,
+                     groups: Optional[dict[str, int]] = None) -> None:
+    """Transitions and J/L cuts for an automatic edit (in place). A scene change is a cut into another time
+    group of footage (`groups`: footage id -> scene, see scenes.time_groups), into or out of the hook, or, without
+    groups, into another file or a jump of over 30 s in one. switches: indices of the clips that start on
+    another camera angle (multicam switching): those cuts count as scene changes too."""
     n_style = 0
     switches = switches or set()
     for k in range(1, len(clips)):
         a, b = clips[k - 1], clips[k]
         b.transition, b.audio_split = "", 0.0
-        scene = a.footage_id != b.footage_id or abs(b.src_in - a.src_out) > 30.0 or k in switches
+        if groups and a.footage_id in groups and b.footage_id in groups:
+            scene = groups[a.footage_id] != groups[b.footage_id] or (a.label == "hook") != (b.label == "hook")
+        else:
+            scene = a.footage_id != b.footage_id or abs(b.src_in - a.src_out) > 30.0
+        scene = scene or k in switches
         continuous = a.footage_id == b.footage_id and abs(b.src_in - a.src_out) < 0.01   # one recording, cut
         bookend = a.label == "opening" or b.label == "closing"
-        if s.transitions == "all" or (s.transitions == "scenes" and (scene or bookend)):
+        # A new scene's scenic opener brings its natural sound in early, under the end of the scene before.
+        bridge = b.label == "scene" and scene
+        if bridge:
+            b.audio_split = -SCENE_BRIDGE
+        # a jump cut inside one take (a filler or pause taken out) stays a cut
+        jump = a.footage_id == b.footage_id and 0.0 <= b.src_in - a.src_out < 3.0 and not scene
+        if not jump and (s.transitions == "all" or (s.transitions == "scenes" and (scene or bookend))):
             style = s.transition_style
             if style == "mixed":
                 style = _MIXED[n_style % len(_MIXED)]
                 n_style += 1
             b.transition = "dissolve" if bookend and style not in ("dissolve", "dip_black") else style
             b.transition_dur = s.transition_dur
+            continue
+        if bridge:
             continue
         if not s.jl_cuts or continuous:    # (the sound runs on through a cut in one recording)
             continue
@@ -232,8 +256,38 @@ def score_samples(analyses: dict[str, Analysis], footage: dict[str, Footage], st
         if footage[i].has_audio:           # dead / silent sound makes a weak moment
             lo, hi = SILENCE_DB
             sc -= SILENCE_PENALTY * np.clip((hi - analyses[i].audio) / (hi - lo), 0.0, 1.0)
+        sc -= bad_frames(analyses[i])
         out[i] = sc
     return out
+
+
+def bad_frames(a: Analysis) -> np.ndarray:
+    """A penalty per sample for pictures nobody wants: the lens covered (a finger, a lens cap, the camera in a
+    pocket: dark, blurred and colourless), blown out (most of the picture clipped, a flare or the sun), and the
+    focus hunting (sharpness swinging back and forth while the camera holds still)."""
+    n = len(a.times)
+    if n == 0:
+        return np.zeros(0, np.float32)
+    bright = np.asarray(a.brightness, np.float32)
+    sharp = np.asarray(a.sharp, np.float32)
+    color = np.asarray(a.colorful, np.float32)
+    clipped = np.asarray(a.clipped, np.float32)
+    motion = np.asarray(a.motion, np.float32)
+    lo_sharp, lo_color = np.percentile(sharp, 15), np.percentile(color, 15)
+    covered = (bright < 0.05) | ((bright < 0.18) & (sharp <= lo_sharp) & (color <= lo_color))
+    blown = np.clip((clipped - 0.25) / 0.25, 0.0, 1.0)
+    # Hunting: the sharpness changes direction again and again within a second, by more than it usually moves.
+    d = np.diff(sharp, prepend=sharp[0])
+    swing = np.convolve(np.abs(d), np.ones(5) / 5, mode="same")
+    sign = np.sign(d)
+    last = np.maximum.accumulate(np.where(sign != 0, np.arange(n), 0))          # last change before (or at) i
+    prev = np.r_[0, sign[last[:-1]]]                                           # its direction
+    turn = ((sign != 0) & (prev != 0) & (sign != prev)).astype(np.float32)     # changes direction
+    flips = np.convolve(turn, np.ones(7), mode="same")
+    typical = float(np.median(swing)) + 1e-6
+    hunting = (swing > 4.0 * typical) & (flips >= 3) & (motion < np.median(motion) + 1.0)
+    pen = 1.0 * covered + 0.6 * blown + 0.5 * hunting
+    return np.convolve(pen, np.ones(3) / 3, mode="same").astype(np.float32)
 
 
 @dataclass

@@ -1,6 +1,7 @@
 """Story order and the opening / closing moments of an edit.
 
-Footage is put in story order by recording time (file metadata), then by natural file-name order.
+Footage is put in story order by recording time (the oldest of the file's creation tag, creation date and
+modification date, see scenes.recorded_time), then by natural file-name order.
 The opening is looked for in footage named like an intro (intro, opening, pembukaan, …) and in the
 first recorded files; the closing in outro-named and the last recorded files. Within those, speech is
 searched for greeting / sign-off phrases (English and Indonesian) and the whole utterance around the
@@ -12,10 +13,10 @@ from __future__ import annotations
 
 import re
 import threading
-from datetime import datetime
 from typing import Callable, Optional
 
 from .models import Footage, TimelineClip
+from .scenes import recorded_time
 
 OPENING_PHRASES = [
     "hello everyone", "hello guys", "hi everyone", "hi guys", "hey guys", "hey everyone", "welcome back",
@@ -41,12 +42,8 @@ GAP = 1.5                # silence that ends an utterance (pauses between senten
 
 
 def recorded_at(f: Footage) -> Optional[float]:
-    if not f.creation_time:
-        return None
-    try:
-        return datetime.fromisoformat(f.creation_time.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
+    """When the footage was recorded: the oldest of its creation tag, file creation and modification dates."""
+    return recorded_time(f)
 
 
 def _natural(name: str) -> list:

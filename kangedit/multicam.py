@@ -59,6 +59,9 @@ MIN_SHOT = 2.0
 MAX_SHOT = 8.0
 SWITCH_COST = 1.2
 MAIN_BIAS = 0.25       # the main angle (usually the wide shot) wins a tie
+REACTION_DB = 8.0      # a laugh / applause: the sound this much louder than the seconds before
+REACTION_MAX = 2.5     # seconds: longer than this it is someone talking louder, not a reaction
+REACTION_BONUS = 1.2   # how strongly a reaction calls for another angle (the listeners, the audience)
 
 
 def audio_choices(n_angles: int) -> dict[str, str]:
@@ -307,7 +310,7 @@ def _norm(x: np.ndarray) -> np.ndarray:
     return np.clip((x - med) / spread, -3.0, 3.0)
 
 
-def angle_scores(an, times: np.ndarray) -> np.ndarray:
+def angle_scores(an, times: np.ndarray, react: Optional[np.ndarray] = None) -> np.ndarray:
     """How good a shot angle footage (its Analysis) is at its own times `times`: louder than usual (this camera's
     microphone is nearest whoever is speaking), a bigger face, the subject moving, sharp, steady and well exposed.
     NaN where the recording has no picture."""
@@ -317,10 +320,37 @@ def angle_scores(an, times: np.ndarray) -> np.ndarray:
 
     def at(x):
         return np.interp(times, t, np.asarray(x, dtype=np.float64))
-    score = (1.0 * at(_norm(an.audio)) + 0.7 * at(_norm(an.faces)) + 0.3 * at(_norm(an.activity))
+    loud = at(_norm(an.audio))
+    if react is not None:              # a laugh / applause is loud on every microphone: not who is speaking
+        loud = loud * (1.0 - np.clip(react, 0.0, 1.0))
+    score = (1.0 * loud + 0.7 * at(_norm(an.faces)) + 0.3 * at(_norm(an.activity))
              + 0.3 * at(_norm(an.sharp)) - 0.4 * at(_norm(an.jerk)) - 0.5 * at(_norm(an.clipped)))
     score[(times < t[0] - 0.5) | (times > t[-1] + 0.5)] = np.nan
     return score
+
+
+def reaction_moments(an, times: np.ndarray) -> np.ndarray:
+    """Where the main recording's sound jumps up for a moment (a laugh, applause, an exclamation): at least
+    REACTION_DB louder than its last few seconds, for no longer than REACTION_MAX, then back down. A float mask
+    0..1 at `times` (the main angle's own time)."""
+    t = np.asarray(an.times, dtype=np.float64)
+    if t.size < 8:
+        return np.zeros(len(times))
+    a = np.asarray(an.audio, dtype=np.float64)
+    rate = 1.0 / max(1e-6, float(np.median(np.diff(t))))
+    w = max(2, int(round(4.0 * rate)))
+    base = np.array([np.median(a[max(0, i - w):i]) if i else a[0] for i in range(len(a))])
+    burst = a - base >= REACTION_DB
+    # only short bursts: a run longer than REACTION_MAX is someone talking louder, not a reaction
+    out = np.zeros(len(a))
+    edges = np.flatnonzero(np.diff(np.r_[0, burst.astype(int), 0]))
+    after = max(1, int(round(2.0 * rate)))
+    for s0, s1 in zip(edges[::2], edges[1::2]):
+        # short, and the sound falls back afterwards (else someone just started talking louder)
+        back = s1 < len(a) and np.median(a[s1:s1 + after]) < base[s0] + REACTION_DB / 2
+        if (s1 - s0) / rate <= REACTION_MAX and back:
+            out[max(0, s0 - 1):min(len(a), s1 + int(rate))] = 1.0      # and the second after it
+    return np.interp(times, t, out)
 
 
 def _choose(scores: np.ndarray, step: float, min_shot: float = MIN_SHOT, max_shot: float = MAX_SHOT) -> np.ndarray:
@@ -448,16 +478,22 @@ def switch_plan(project: Project, analyses: dict, angles: Optional[dict] = None,
         n_ang = max(angles.values(), default=1)
         rows = np.full((n_ang, len(t)), np.nan)
         main_an = analyses.get(fid)
-        rows[0] = (angle_scores(main_an, t) if main_an is not None else np.zeros(len(t))) + MAIN_BIAS
+        react = reaction_moments(main_an, t) if main_an is not None else None
+        rows[0] = (angle_scores(main_an, t, react) if main_an is not None else np.zeros(len(t))) + MAIN_BIAS
         rows[0] = np.where(np.isnan(rows[0]), MAIN_BIAS, rows[0])          # the main angle is always there
         for sid, (ref, r) in syncs.items():
             a = angles.get(sid, 0)
             if ref != fid or a < 2 or sid not in project.footage or analyses.get(sid) is None:
                 continue
             tb = r.b_time(t)
-            sc = angle_scores(analyses[sid], tb)
+            sc = angle_scores(analyses[sid], tb, react)
             sc[(tb < 0) | (tb > project.footage[sid].duration)] = np.nan
             rows[a - 1] = np.where(np.isnan(rows[a - 1]), sc, np.fmax(rows[a - 1], sc))
+            # At a laugh or an exclamation, cut to the others' reaction: more so where that angle's picture moves.
+            if react is not None:
+                moving = np.clip(0.5 + 0.25 * np.nan_to_num(np.interp(
+                    tb, np.asarray(analyses[sid].times), _norm(analyses[sid].activity))), 0.0, 1.0)
+                rows[a - 1] = rows[a - 1] + REACTION_BONUS * react * moving
         path = _choose(rows, SWITCH_STEP, lo, hi)
         edges = np.flatnonzero(np.diff(path)) + 1
         plan[fid] = [[round(float(t[a]), 3), round(float(t[b - 1] + SWITCH_STEP), 3), int(path[a]) + 1]

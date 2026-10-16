@@ -4,7 +4,9 @@ A transition is centered on the cut and uses source handles: the outgoing clip r
 past its out point and the incoming one starts `half` seconds before its in point, so clip positions,
 the timeline length and the captions don't move. A split edit moves only the audio cut: a J-cut
 (split < 0) brings the incoming clip's sound in early, an L-cut (split > 0) lets the outgoing clip's
-sound run on under the next picture. The export, the preview audio and the viewer all use plan().
+sound run on under the next picture. With a transition, a J-cut becomes a lead: the incoming sound starts
+fading in that much before the picture transition (a longer sound crossfade), as a new scene's ambience does.
+The export, the preview audio and the viewer all use plan().
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ class Edit:
     trans: str = ""      # TRANSITIONS key or "" for a cut
     half: float = 0.0    # transition half-length, seconds
     split: float = 0.0   # audio cut offset, seconds (< 0 J-cut, > 0 L-cut); 0 with a transition
+    lead: float = 0.0    # with a transition: the incoming sound fades in this much earlier than the picture
 
 
 def edits(project: Project) -> list[Edit]:
@@ -53,7 +56,13 @@ def edits(project: Project) -> list[Edit]:
         if b.transition in TRANSITIONS:
             half = min(b.transition_dur / 2, after_a, before_b, a.duration / 2, b.duration / 2)
             if 2 * half >= MIN_TRANSITION:
-                out.append(Edit(b.transition, half))
+                # A J-cut with a transition: the incoming sound (a new scene's ambience) starts fading in
+                # before the picture transition, over a longer sound crossfade.
+                lead = 0.0
+                if b.audio_split < 0:
+                    lead = min(-b.audio_split, before_b - half, a.duration * MAX_SPLIT_SHARE - half)
+                    lead = lead if lead >= 0.04 else 0.0
+                out.append(Edit(b.transition, half, 0.0, lead))
                 continue
         s = b.audio_split
         if s < 0:      # J: the incoming sound starts before its in point, under the outgoing picture
@@ -77,6 +86,7 @@ class ClipPlan:
     v_end: float = 0.0   # source time just after the last rendered video frame
     a_end: float = 0.0   # source time where this clip's audio ends
     a_t0: float = 0.0    # timeline offset (from the clip's start) where its audio starts
+    a_lead: float = 0.0  # its sound fades in this much before the transition into it (Edit.lead)
 
     @property
     def v_frames(self) -> int:
@@ -95,12 +105,13 @@ def plan(project: Project, fps: float) -> list[ClipPlan]:
         e_in, e_out = es[k], es[k + 1]
         pre_f, post_f = int(round(e_in.half * fps)), int(round(e_out.half * fps))
         # Audio extends over the transition handles, or shifts with the split edits.
-        a_pre = pre_f / fps if pre_f else -e_in.split
+        a_pre = pre_f / fps + e_in.lead if pre_f else -e_in.split
         a_post = post_f / fps if post_f else e_out.split
         a_dur = max(0.02, nfr / fps + a_pre + a_post)
         out.append(ClipPlan(start_f, nfr, pre_f, post_f, c.src_at(-pre_f / fps), c.sound_src_at(-a_pre), a_dur,
                             TRANSITIONS[e_in.trans][1] if pre_f else "",
-                            c.src_at((nfr + post_f) / fps), c.sound_src_at(a_dur - a_pre), -a_pre))
+                            c.src_at((nfr + post_f) / fps), c.sound_src_at(a_dur - a_pre), -a_pre,
+                            e_in.lead if pre_f else 0.0))
     return out
 
 

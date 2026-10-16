@@ -37,6 +37,7 @@ class Footage:
     color_transfer: str = ""
     rotation: int = 0
     creation_time: str = ""
+    gps: Optional[list] = None     # where it was recorded: [latitude, longitude]; [] = no location, None = not read
     face: Optional[list] = None    # main face (centre x, y, height as parts of the picture), for framing crops
     log_profile: str = "none"      # built-in camera profile key, "lut:<path>" or "none"
     tonemap: str = "filmic"

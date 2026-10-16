@@ -1,17 +1,17 @@
 """Media panel organisation: bins (folders of footage, saved with the project) and filters.
 
 A bin is just a name on the footage (Footage.bin, "" = not in a bin); empty bins the user made are kept in
-ProjectSettings.bins. Bins by date sort footage into "YYYY-MM-DD" bins by when it was recorded (the file's
-creation time tag, else its modification time). Filters show only video or only pictures, and only a shape
+ProjectSettings.bins. Bins by date sort footage into "YYYY-MM-DD" bins by when it was recorded (the oldest of
+the file's creation time tag, creation date and modification date). Filters show only video or only pictures, and only a shape
 of picture (as shown: a phone clip recorded sideways counts as portrait).
 """
 
 from __future__ import annotations
 
 import datetime
-import os
 
 from .models import Footage, Project
+from .scenes import recorded_time
 
 KINDS = {"all": "All types", "video": "Videos", "image": "Photos / images"}
 # key -> (label, aspect ratio or None for a range); exact ratios match within 3 %
@@ -27,6 +27,7 @@ RATIOS = {
     "21:9": ("21:9 (cinema)", 2.39),
 }
 ALL, UNSORTED = "\x00all", ""          # bin choices besides the bins themselves
+BROLL = "B-roll"                       # footage for cutaways: scenic openers come from it first
 
 
 def shown_size(f: Footage) -> tuple[int, int]:
@@ -104,17 +105,22 @@ def move_to_bin(project: Project, ids: list[str], name: str) -> None:
 
 
 def recorded_date(f: Footage) -> str:
-    """The day the footage was recorded, "YYYY-MM-DD": its creation time tag, else the file's date."""
-    tag = (f.creation_time or "").strip()
-    if len(tag) >= 10 and tag[4] == "-" and tag[7] == "-":
-        try:
-            return datetime.date.fromisoformat(tag[:10]).isoformat()
-        except ValueError:
-            pass
-    try:
-        return datetime.date.fromtimestamp(os.path.getmtime(f.path)).isoformat()
-    except OSError:
+    """The day the footage was recorded, "YYYY-MM-DD" (local time): the oldest of its creation time tag, the
+    file's creation date and its modification date (see scenes.recorded_time)."""
+    t = recorded_time(f)
+    if t is None:
         return "Unknown date"
+    return datetime.date.fromtimestamp(t).isoformat()
+
+
+def clear_bins(project: Project) -> int:
+    """Remove every bin; all the media stays in the project, out of any bin. Returns how many items were in
+    a bin."""
+    n = sum(1 for f in project.footage.values() if f.bin)
+    project.settings.bins = []
+    for f in project.footage.values():
+        f.bin = ""
+    return n
 
 
 def bins_by_date(project: Project, ids: list[str] | None = None) -> dict[str, int]:

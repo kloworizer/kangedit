@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDockWidget, QFileDialog, QFrame,
@@ -28,6 +29,8 @@ from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook
 from .. import images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
+from .. import bins as binlib
+from .. import polish, scenes
 from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
@@ -268,6 +271,19 @@ class MainWindow(QMainWindow):
                               "Rebuild the automatic edit with the same settings at a length you choose"))
         m.addAction(self._act("Find a new hook clip", self.new_hook, "H",
                               "Replace the opening hook with another strong moment not used in the edit"))
+        fin = m.addMenu("Finish the edit")
+        for key, label, tip in (
+                ("beats", "Cut on the music's beat", "Move each cut to the nearest beat of the music on the timeline"),
+                ("pauses", "Cut between words", "Move cuts that fall inside a word to the pause next to it"),
+                ("fillers", "Remove fillers, long pauses and false starts",
+                 "Take \"um / eh / anu\", long silences and words said twice out of the clips (transcribes the "
+                 "footage first when needed)"),
+                ("variety", "Vary the shot sizes", "Swap a shot where three of the same size follow each other"),
+                ("loudness", "Even out the loudness", "Bring every clip's sound to about the same loudness")):
+            fin.addAction(self._act(label, lambda _=False, k=key: self.finish_timeline(k), None, tip))
+        m.addAction(self._act("Make a highlight reel (9:16)…", self.highlight_reel, None,
+                              "Turn the edit into a 30-60 s vertical reel of its best moments, framed on the faces "
+                              "(Undo brings the edit back)"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -1062,7 +1078,7 @@ class MainWindow(QMainWindow):
                             fps=info.fps, has_audio=info.has_audio, codec=info.codec, pix_fmt=info.pix_fmt,
                             bit_depth=info.bit_depth, color_space=info.color_space, color_range=info.color_range,
                             color_transfer=info.color_transfer, rotation=info.rotation,
-                            creation_time=info.creation_time)
+                            creation_time=info.creation_time, gps=scenes.parse_location(info.tags))
                 self._identify_camera(f, info)
                 for h in (self.project.settings.proxy_height, 360, 540, 720, 1080):
                     pp = proxy_path_for(f, h)
@@ -1250,6 +1266,144 @@ class MainWindow(QMainWindow):
         self.tasks.submit("Auto edit from script", job, self._apply_script_edit,
                           self._task_error("Auto edit from script"))
 
+    def finish_timeline(self, kind: str):
+        """One finishing step (polish.py) on the main track: "beats", "pauses", "fillers", "variety" or
+        "loudness"; in the background, applied in one undo step."""
+        clips = [TimelineClip.from_dict(c.to_dict()) for c in self.project.clips]
+        footage = {fid: self.project.footage[fid] for fid in {c.footage_id for c in clips}
+                   if fid in self.project.footage}
+        if not clips:
+            self.lbl_status.setText("The timeline is empty")
+            return
+        sound = polish.music_track(self.project.sounds) if kind == "beats" else None
+        if kind == "beats" and sound is None:
+            QMessageBox.information(self, APP_NAME, "Add music to the timeline first (Sounds tab → Background "
+                                                    "music): the cuts move to its beat.")
+            return
+        if kind == "fillers":
+            todo = [fid for fid, f in footage.items() if f.has_audio and f.transcript is None]
+            if todo:
+                self.queue_transcription(todo)
+        use_gpu = self.a_gpu_analysis.isChecked()
+        s = copy.copy(self.last_auto)
+        for k in ("cut_on_pauses", "beat_sync", "remove_fillers", "shot_variety", "even_loudness"):
+            setattr(s, k, False)
+        s.pacing = "steady"
+        flag = {"beats": "beat_sync", "pauses": "cut_on_pauses", "fillers": "remove_fillers",
+                "variety": "shot_variety", "loudness": "even_loudness"}[kind]
+        setattr(s, flag, True)
+
+        def job(progress, cancel):
+            progress(0.1, "Reading the footage…")
+            analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()
+                        if not f.is_image}
+            beats = self._music_beats(sound, cancel) if sound is not None else None
+            before = [(c.src_in, c.src_out, c.volume) for c in clips]
+            out, notes = polish.finish(clips, footage, analyses, s, beats, 0.0)
+            changed = len(out) != len(before) or any(
+                (c.src_in, c.src_out, c.volume) != b for c, b in zip(out, before))
+            return analyses, out, notes, changed, beats
+
+        def done(res):
+            analyses, out, notes, changed, beats = res
+            self.analyses.update(analyses)
+            if kind == "beats" and (beats is None or len(beats) < 2):
+                self.lbl_status.setText("No clear beat found in the music")
+                return
+            if not changed:
+                self.lbl_status.setText("Nothing to change: the edit already does that")
+                return
+            self.project_checkpoint()
+            self.project.clips = out
+            self.refresh_all()
+            self._schedule_audio()
+            label = {"beats": "Cuts moved to the beat", "pauses": "Cuts moved between words",
+                     "fillers": "Fillers and pauses taken out", "variety": "Shot sizes varied",
+                     "loudness": "Loudness evened out"}[kind]
+            self.lbl_status.setText(label + (" · " + " · ".join(notes) if notes else ""))
+
+        self.tasks.submit("Finish the edit", job, done, self._task_error("Finish the edit"))
+
+    def highlight_reel(self, seconds: Optional[float] = None):
+        """Turn the edit into a short vertical reel: its best moments (only what the edit shows), a hook first,
+        quick cuts at a trailer pace on the music's beat, 9:16 framed on the faces. Undo brings the edit back."""
+        src = [c for c in self.project.clips if c.footage_id in self.project.footage
+               and not self.project.footage[c.footage_id].is_image]
+        if not src:
+            QMessageBox.information(self, APP_NAME, "Make an edit first: the reel is cut from its moments.")
+            return
+        if seconds is None:
+            choice, ok = QInputDialog.getItem(self, "Highlight reel", "Length of the reel:", ["30 s", "45 s", "60 s"],
+                                              0, False)
+            if not ok:
+                return
+            seconds = float(choice.split()[0])
+        footage = {c.footage_id: self.project.footage[c.footage_id] for c in src}
+        order = list(dict.fromkeys(c.footage_id for c in src))
+        # Only what the edit shows: everything else of each file is blocked.
+        blockers = []
+        for fid, f in footage.items():
+            t = 0.0
+            for a, b in sorted((c.src_in, c.src_out) for c in src if c.footage_id == fid):
+                if a - t > 0.05:
+                    blockers.append(TimelineClip(fid, t, a))
+                t = max(t, b)
+            if f.duration - t > 0.05:
+                blockers.append(TimelineClip(fid, t, f.duration))
+        position = {}
+        for k, c in enumerate(src):
+            position.setdefault((c.footage_id, c.src_in, c.src_out), k)
+        s = copy.copy(self.last_auto)
+        s.video_format, s.target_duration, s.clip_min, s.clip_max = "short", seconds, 1.2, 3.0
+        s.min_gap, s.max_uses, s.order, s.use_every_footage = 0.3, 0, "hook", False
+        s.transitions, s.jl_cuts, s.bookends, s.pacing, s.remove_fillers = "off", False, False, "trailer", False
+        s.replace_timeline = True
+        sound = polish.music_track(self.project.sounds) if s.beat_sync else None
+        use_gpu = self.a_gpu_analysis.isChecked()
+
+        def where(c: TimelineClip) -> int:
+            """Position in the edit of the clip a reel moment comes from (the reel keeps the edit's story)."""
+            for (fid, a, b), k in position.items():
+                if fid == c.footage_id and a - 0.01 <= c.src_in <= b + 0.01:
+                    return k
+            return len(src)
+
+        def job(progress, cancel):
+            progress(0.1, "Reading the edit's footage…")
+            analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
+            progress(0.6, "Choosing the best moments…")
+            clips = select(footage, analyses, s, order, existing=blockers)
+            hooks = [c for c in clips if c.label == "hook"]
+            body = sorted((c for c in clips if c.label != "hook"), key=where)
+            clips = hooks + body
+            beats = self._music_beats(sound, cancel) if sound is not None else None
+            clips, notes = polish.finish(clips, footage, analyses, s, beats, 0.0)
+            apply_edit_style(clips, footage, analyses, s)
+            return analyses, clips, notes
+
+        def done(res):
+            analyses, clips, notes = res
+            self.analyses.update(analyses)
+            if not clips:
+                QMessageBox.information(self, APP_NAME, "No moments for a reel were found in the edit.")
+                return
+            self.project_checkpoint()
+            self.project.clips = clips
+            self.project.settings.aspect = "9:16 (Vertical)"
+            self.project.settings.video_format = "short"
+            self._sync_project_controls()
+            self.tl.selected = ""
+            self.refresh_all()
+            self.tl.fit()
+            self.viewer.seek(0)
+            self._schedule_audio()
+            self.lbl_status.setText(f"Highlight reel: {len(clips)} clips, {self.project.duration:.0f} s, 9:16 · "
+                                    "Undo (Ctrl+Z) brings the full edit back" + (" · " + " · ".join(notes)
+                                                                                  if notes else ""))
+            self._face_zoom(clips, "medium")      # frame each clip on its face for the vertical picture
+
+        self.tasks.submit("Highlight reel", job, done, self._task_error("Highlight reel"))
+
     def _apply_script_edit(self, result):
         st = self.project.settings.script
         if not result.clips:
@@ -1349,6 +1503,16 @@ class MainWindow(QMainWindow):
         seed = int(time.time() * 1000) & 0x7FFFFFFF if fresh else None
         use_gpu = self.a_gpu_analysis.isChecked()
         lang = self.project.settings.whisper_language
+        # Footage in the B-roll bin can open the scenes even when it isn't among the files edited.
+        broll = {fid: f for fid, f in self.project.footage.items()
+                 if f.bin == binlib.BROLL and not f.is_image and fid not in footage}
+        music_clip = polish.music_track(self.project.sounds) if s.beat_sync else None
+        t_start = 0.0 if s.replace_timeline else self.project.duration
+        if s.remove_fillers and not multi:     # fillers are found in the transcripts: make the missing ones first
+            todo = [fid for fid, f in footage.items() if f.has_audio and f.transcript is None]
+            if todo:
+                self.lbl_status.setText(f"Transcribing {len(todo)} file(s) to find the fillers…")
+                self.queue_transcription(todo)
 
         def job(progress, cancel):
             syncs, faces, blockers = {}, {}, []
@@ -1395,14 +1559,39 @@ class MainWindow(QMainWindow):
                 ends = [c for c in (intro, outro) if c is not None]
                 sel = copy.copy(s)
                 sel.target_duration = max(s.clip_min, s.target_duration - sum(c.duration for c in ends))
+            # Scenes are time groups (and places) of the footage; in a long-form edit in story order each scene
+            # after the first opens with a scenic / travel shot from it, B-roll first (room for them is kept in
+            # the target).
+            everything = {**footage, **broll}
+            scenes.read_locations(everything)
+            for fid, f in broll.items():
+                if fid not in analyses:
+                    analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
+            groups = scenes.time_groups(everything, story_order(everything, list(ids) + list(broll)))
+            openers = (s.video_format == "long" or s.order == "chronological") and s.order != "best_first"
+            opener_len = round((s.clip_min + s.clip_max) / 2, 2)
+            if openers and len(set(groups.values())) > 1:
+                sel = copy.copy(sel)
+                sel.target_duration = max(s.clip_min, sel.target_duration
+                                          - opener_len * (len(set(groups.values())) - 1))
             progress(0.8, "Choosing the best moments…")
-            body = select(footage, analyses, sel, order,
-                          existing=existing + blockers + [c for c in (intro, outro) if c], avoid=avoid, seed=seed)
+            used = existing + blockers + [c for c in (intro, outro) if c]
+            body = select(footage, analyses, sel, order, existing=used, avoid=avoid, seed=seed)
             hooks = list(itertools.takewhile(lambda c: c.label == "hook", body))
             body = body[len(hooks):]
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
-            apply_edit_style(clips, footage, analyses, s)
+            if openers and len(set(groups.values())) > 1:
+                prefer = set(broll) | {f for f in footage if footage[f].bin == binlib.BROLL}
+                n = scenes.add_scene_openers(clips, groups, analyses, everything, opener_len, s.min_gap, used,
+                                             prefer=prefer)
+                if n:
+                    notes.append(f"{n} scene(s) open with a scenic shot")
+            progress(0.9, "Finishing the edit…")
+            beats = self._music_beats(music_clip, cancel) if music_clip is not None else None
+            clips, more = polish.finish(clips, everything, analyses, s, beats, t_start)
+            notes += more
+            apply_edit_style(clips, everything, analyses, s, groups=groups)
             plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
                     if multi and multi.get("template") == "switch" else None)
             return analyses, clips, notes, syncs, faces, plan
@@ -1444,6 +1633,19 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(msg + (" · " + " · ".join(notes) if notes else ""))
 
         self.tasks.submit(name, job, done, self._task_error("Auto edit"))
+
+    @staticmethod
+    def _music_beats(sound, cancel=None) -> np.ndarray:
+        """(In the background.) The beats of a music sound clip as timeline times (empty when its file can't be
+        read or has no clear beat)."""
+        from ..sync import RATE, load_audio
+        try:
+            audio = load_audio(sound.path, cancel)
+        except Cancelled:
+            raise
+        except Exception:  # noqa: BLE001
+            return np.zeros(0)
+        return polish.timeline_beats(sound, polish.detect_beats(audio, RATE))
 
     # ================================================================== multicam
     def _known_syncs(self, angles: dict[str, int]) -> dict[str, tuple[str, SyncResult]]:

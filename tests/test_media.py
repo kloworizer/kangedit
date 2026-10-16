@@ -98,6 +98,11 @@ def test_media_panel_bins_filters_and_select_all(window, project, qapp, monkeypa
     assert window.project.footage[ids[0]].bin == ""
     b.bins_by_date()
     assert "Sorted 4 item(s)" in window.lbl_status.text()
+    b.clear_bins()                                              # right-click → Bins → Clear all bins
+    assert bins.all_bins(window.project) == [] and len(_shown(window)) == 4
+    assert "Cleared" in window.lbl_status.text()
+    window.undo()
+    assert bins.all_bins(window.project)
 
 
 def test_camera_raw_gets_a_clear_message(tmp_path):
