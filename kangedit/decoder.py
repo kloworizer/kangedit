@@ -46,7 +46,15 @@ class FrameDecoder:
         self.stream = self.container.streams.video[0]
         self.stream.thread_type = "AUTO"
         self.tb = float(self.stream.time_base) if self.stream.time_base else 1 / 90000
-        self.start = float(self.stream.start_time * self.stream.time_base) if self.stream.start_time is not None else 0.0
+        # Source time is counted from the start of the file (its earliest stream), as FFmpeg's -ss does for the
+        # export, the sound and the transcripts: a video stream that starts later (audio priming, edit lists)
+        # then shows the same frame at the same time in the preview and in the export.
+        if self.container.start_time is not None:
+            self.start = self.container.start_time / 1_000_000
+        elif self.stream.start_time is not None:
+            self.start = float(self.stream.start_time * self.stream.time_base)
+        else:
+            self.start = 0.0
         rate = self.stream.average_rate or self.stream.guessed_rate or 30
         self.frame_dur = 1.0 / float(rate)
         cc = self.stream.codec_context

@@ -71,14 +71,20 @@ def render(img: np.ndarray, tw: int, th: int, mode: str, zoom: float = 1.0,
 
 
 def ffmpeg_filter(sw: int, sh: int, tw: int, th: int, mode: str, zoom: float, ox: float, oy: float,
-                  inp: str, out: str, tag: str) -> str:
-    """Filtergraph snippet reframing label `inp` into label `out` (export path)."""
+                  inp: str, out: str, tag: str, convert: str = "") -> str:
+    """Filtergraph snippet reframing label `inp` into label `out` (export path). convert: scale options and the
+    pixel format to convert to in the same pass (e.g. ":in_color_matrix=bt709:in_range=auto", "gbrp16le" as
+    "opts|fmt"): one swscale pass resizes and converts (not with the blurred background, which mixes two)."""
     p = place(sw, sh, tw, th, mode, zoom, ox, oy)
-    fg = (f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos,"
+    opts, fmt = convert.split("|") if convert else ("", "")
+    to = f",format={fmt}" if fmt else ""
+    fg = (f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos{opts}{to},"
           f"crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y}")
     if p.crop_w == tw and p.crop_h == th:
         return f"[{inp}]{fg},setsar=1[{out}]"
     if mode == "blur":
+        fg = (f"scale={p.scaled_w}:{p.scaled_h}:flags=lanczos,"
+              f"crop={p.crop_w}:{p.crop_h}:{p.crop_x}:{p.crop_y}")
         bp = place(sw, sh, tw, th, "fill")
         return (
             f"[{inp}]split=2[{tag}bgi][{tag}fgi];"

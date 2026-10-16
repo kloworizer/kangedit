@@ -229,10 +229,18 @@ def _helper_frozen(staging_app: Path, target: Path, workdir: str) -> list[str]:
     if sys.platform == "win32":
         exe = target / "KangEdit.exe"
         script = Path(workdir) / "install_update.bat"
+        # Runs in a hidden console (see launch): every command shares it, so no window opens. "timeout" needs
+        # an interactive console, so the one-second pause is a ping; after ~2 minutes it goes on regardless.
         script.write_text(
             "@echo off\r\n"
+            "set n=0\r\n"
             ":wait\r\n"
-            f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL && (timeout /t 1 /nobreak >NUL & goto wait)\r\n'
+            f'tasklist /FI "PID eq {pid}" /NH 2>NUL | find "{pid}" >NUL || goto copy\r\n'
+            "set /a n+=1\r\n"
+            "if %n% GEQ 120 goto copy\r\n"
+            "ping -n 2 127.0.0.1 >NUL\r\n"
+            "goto wait\r\n"
+            ":copy\r\n"
             f'robocopy "{staging_app}" "{target}" /E /R:10 /W:1 /NFL /NDL /NJH /NJS >NUL\r\n'
             f'start "" "{exe}"\r\n'
             f'rmdir /S /Q "{workdir}"\r\n', encoding="utf-8")
@@ -326,11 +334,17 @@ def git_pull() -> str:
     return r.stdout.strip()
 
 
+WIN_NO_WINDOW = 0x08000000           # CREATE_NO_WINDOW
+WIN_NEW_PROCESS_GROUP = 0x00000200   # CREATE_NEW_PROCESS_GROUP
+
+
 def launch(command: list[str]) -> None:
     """Start the helper / the new app detached from this process (it must outlive it)."""
     kw: dict = {"cwd": str(APP_DIR), "close_fds": True}
     if sys.platform == "win32":
-        kw["creationflags"] = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        # A hidden console of its own (CREATE_NO_WINDOW), not none at all (DETACHED_PROCESS): without one,
+        # every console command in the helper script opened a window of its own.
+        kw["creationflags"] = WIN_NO_WINDOW | WIN_NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
     subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)

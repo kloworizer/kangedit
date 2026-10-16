@@ -37,6 +37,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Opening & closing** | Looks for the greeting that opens the video and the sign-off that closes it, in English and Indonesian: "hello…", "welcome…", "assalamualaikum…", "thanks for watching", "sampai jumpa"… It searches intro/outro-named files and the first and last recordings, and uses the whole spoken passage. |
 | **Transitions & J/L cuts** | Optional transitions between scenes or at every cut: dissolve, dip to black or white, wipe, slide, zoom, or a mix. For long-form, J-cuts let the next scene's sound lead in, and L-cuts let a voice finish over the next picture. |
 | **Reuse rules** | Footage can be used several times, but its segments never overlap, always keep a minimum gap, and near-identical shots are rejected. Clips that break the rule after manual edits get a red outline. |
+| **Edit from a script** | ✨ Auto Edit → **📜 Script** (or *Tools → Auto Edit from script…*): paste the script and each line is found in the footage's transcripts by text similarity, then the clips are laid out in the script's order. The **similarity threshold** (30–100 %) decides how close a line must be; speech-recognition slips and small ad-libs still match. A line said in several takes uses the best match or the last good take. Clips are cut on word boundaries with adjustable padding, lines said one after the other in the same take become one clip, and a live preview lists every line with its score, file and time (lines not found in red). Files without a transcript are transcribed first. |
 | **Regenerate shorter / longer** | **− Shorter** / **+ Longer** on the toolbar rebuild the edit about 25% shorter or longer with the same settings. *Tools → Regenerate auto edit at length…* asks for an exact length. |
 
 ### Editing
@@ -45,8 +46,9 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 |---|---|
 | **Smooth preview** | Playback is a pipeline: one thread only decodes, while a pool of threads converts, grades and reframes, so 4K H.265 keeps up with the frame rate. The next clips are prepared while one plays, and that preparation steps aside whenever playback needs the CPU. Scrubbing never freezes the window. |
 | **Color on / off in the viewer** | The viewer menu below the picture (or *View → Color in viewer*, **Ctrl+Shift+B**) turns the log conversion, LUTs and grading off, always or only while playing, for lighter playback. Export always includes them. |
-| **Timeline** | Drag to reorder, drag edges to trim, **Alt/Shift+drag** to slip. **Ctrl+click** / **Shift+click** / **Ctrl+A** select several clips. Delete, duplicate, auto color, transitions and *Other moment* work on the whole selection. **↶ Undo** / **↷ Redo** buttons sit at the left of the timeline toolbar. |
+| **Timeline** | Drag to reorder, drag edges to trim, **Alt/Shift+drag** to slip. **Ctrl+click** / **Shift+click** / **Ctrl+A** select several clips (Ctrl+A and Ctrl+click include clips on the video layers). Delete, duplicate, auto color, transitions and *Other moment* work on the whole selection. **↶ Undo** / **↷ Redo** buttons sit at the left of the timeline toolbar. |
 | **Transitions & split edits** | Per clip, in the Inspector or the right-click menu. Transitions are centered on the cut and use the footage around each clip, so the timeline length and captions don't move. |
+| **Bins and filters** | The row above the Media list picks a **bin** and filters by **type** (videos, photos / images) and **picture shape** (landscape, portrait, square, 16:9, 9:16, 4:3, 21:9). Right-click → *Bins*: new bin, move the selected media into a bin, rename or delete a bin, or **Bins by date** to sort the media by recording day. Ctrl+A in the list selects everything it shows. |
 | **Media list views** | The **☰** / **▦** buttons above the Media list switch between the detail view (duration, format, camera, log profile, status) and a thumbnail grid. In the grid, move the mouse across a thumbnail to scrub through the clip; Ctrl+wheel resizes the thumbnails. |
 | **Recent projects** | *File → Open recent* lists the last 10 projects you opened or saved. |
 | **Sound-effect layer** | A layer of sound effects under the video track, placed freely in time. Drag to move, drag edges to trim, set the volume by right-clicking. Search and add sounds from MyInstants in the **Sounds** tab, or drop any audio file on the timeline. |
@@ -64,7 +66,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 | | |
 |---|---|
-| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices. DJI D-Log M, D-Log2 and the D-Log / D-Log2 *Vivid* looks are in the same menu and use DJI's official LUTs (see [Official camera LUTs](#official-camera-luts)). |
+| **Log → Rec.709** | Sony S-Log3/S-Log2, Panasonic V-Log, Canon C-Log2/3, ARRI LogC3/4, Fujifilm F-Log/F-Log2, Nikon N-Log, DJI D-Log, Apple Log, Blackmagic Film Gen5 and HLG, using the published curves and gamut matrices (full-range files read correctly). The filmic output keeps hues (bright reds stay red, skies don't turn cyan) and fades the brightest colours to white, and colours outside Rec.709 are compressed smoothly into it instead of clipping. DJI D-Log M, D-Log2 and the D-Log / D-Log2 *Vivid* looks are in the same menu and use DJI's official LUTs (see [Official camera LUTs](#official-camera-luts)). |
 | **Camera auto-detect** | The camera is identified from the file's metadata, and its log profile is chosen from the metadata or the picture. **Detect all** re-runs it for every file in the background. |
 | **Official camera LUTs** | Use the makers' own conversion LUTs (DJI D-Log M, Sony, Panasonic, Fujifilm, Nikon, ARRI…) instead of the built-in curves. See [Official camera LUTs](#official-camera-luts). |
 | **LUTs (.cube)** | Import 1D/3D `.cube` LUTs (or the `.zip` they come in) as a log conversion or as a creative look with a strength slider. |
@@ -208,7 +210,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | S | Split at the playhead |
 | Del | Delete the selected clips (or the selected sound) |
 | Ctrl+D | Duplicate clip |
-| Ctrl+A | Select all clips |
+| Ctrl+A | Select all clips, video layers included (in the Media panel: all the media it shows) |
 | R | Other moment: swap the clip for the best moment close by (its length follows the new moment) |
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
@@ -291,10 +293,10 @@ an image, a second camera angle. Higher layers are in front of lower ones.
 1. Import every camera's files (each needs its own sound).
 2. In **✨ Auto Edit**, tick *Multicam*, and give each file its angle: *Main angle*, *Angle 2*, *Angle 3*,
    *Angle 4* (KangEdit guesses one angle per camera model).
-3. Pick a **layout**, whose **sound** to use, and whether to keep to moments every angle recorded, then
-   *Create edit*.
+3. Pick a **layout**, whose **sound** to use, whether to keep to moments every angle recorded, and whether to
+   use the **whole recording** instead of its best moments, then *Create edit*.
 
-The angles are synced by their sound: first by matching where the loudness rises over the whole recordings
+The angles are synced by their sound, each to the longest recording (and through it to the main angle): first by matching where the loudness rises over the whole recordings
 (which works with different microphones and levels), then sample by sample in pieces spread across them, which
 also corrects the slow clock drift between cameras. The main angle is edited as usual and every other angle is
 cut at exactly the same moments on the layers above. The status bar shows each angle's offset; an angle whose
@@ -461,10 +463,11 @@ kangedit/
   ffmpeg_setup.py       FFmpeg download and unpacking (standard library only)
   analysis.py           per-footage signal extraction (OpenCV + FFmpeg, parallel CPU/GPU decode)
   autoedit.py           scoring, best-moment selection, presets, transition / J-L placement
+  scriptedit.py         edit from a script: line matching against transcripts (text similarity), clip layout
   bookends.py           story order and opening / closing detection
   edits.py              transitions and split edits shared by preview, export and preview audio
   captions.py           Whisper transcription, caption building, layouts, animations, SRT/ASS
-  color.py              log curves, gamut matrices, grading, preview LUTs, auto color
+  color.py              log curves, gamut matrices, gamut compression, tone map, grading, preview LUTs, auto color
   camera.py             camera identification and log-profile choice
   lut.py                .cube LUTs, the LUT library and the official camera LUT catalog
   sfx.py                sound library, MyInstants search and download
@@ -480,6 +483,7 @@ kangedit/
   reframe.py            aspect-ratio crop/fit geometry (shared by preview and export)
   proxy.py              proxy generation (GPU decode/encode with CPU fallback)
   models.py             project model, undo, save/load (.kgproj)
+  bins.py               Media panel bins (by hand or by recording date) and filters
   tasks.py              background task queue
   ui/                   PySide6 interface: viewer, timeline, media bin, inspector, video layers,
                         captions, sounds, dialogs

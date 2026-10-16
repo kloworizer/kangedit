@@ -106,3 +106,29 @@ def test_preview_lut_cache_rebuilds_when_official_lut_arrives(lut_library):
     write_cube(lut_library / "DJI Mini 4 Pro D-Log M to Rec.709 V1.cube")
     assert cache.peek(Grade(), "dlogm", "filmic") is None
     assert cache.get(Grade(), "dlogm", "filmic") is not approx
+
+
+def _resolve_cube(path, n1, size, n1_rows=None, range3=(0.0, 1.0)):
+    """A Resolve-style .cube: a gamma-0.5 shaper (LUT_1D) followed by an identity 3D LUT over range3."""
+    lines = ["TITLE \"Resolve shaper\"", f"LUT_1D_SIZE {n1}", "LUT_1D_INPUT_RANGE 0.0 1.0",
+             f"LUT_3D_SIZE {size}", f"LUT_3D_INPUT_RANGE {range3[0]} {range3[1]}"]
+    rows = n1 if n1_rows is None else n1_rows
+    lines += [" ".join([f"{(k / (rows - 1)) ** 0.5:.6f}"] * 3) for k in range(rows)]
+    g = np.linspace(range3[0], range3[1], size)
+    lines += [f"{r:.6f} {gg:.6f} {b:.6f}" for b in g for gg in g for r in g]
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_resolve_cube_with_a_shaper(tmp_path):
+    from kangedit.lut import CubeLut
+    lut = CubeLut(_resolve_cube(tmp_path / "r.cube", 4096, 65))       # the sizes of the reported file
+    assert lut.kind == "3d" and lut.size == 65 and lut.shaper is not None and len(lut.shaper) == 4096
+    x = np.array([[0.0, 0.25, 0.81], [0.04, 0.5, 1.0]], np.float32)
+    assert np.allclose(lut.apply(x), np.sqrt(x), atol=2e-3)            # shaper, then the 3D LUT
+    # one shaper row short of what LUT_1D_SIZE says (as in the reported file): still read, aligned on the 3D
+    lut = CubeLut(_resolve_cube(tmp_path / "s.cube", 4096, 17, n1_rows=4095))
+    assert len(lut.shaper) == 4095 and np.allclose(lut.apply(x), np.sqrt(x), atol=2e-3)
+    # the 3D part reads its own input range
+    lut = CubeLut(_resolve_cube(tmp_path / "t.cube", 1024, 17, range3=(0.0, 2.0)))
+    assert np.allclose(lut.apply(np.array([[0.36, 0.36, 0.36]], np.float32)), 0.6, atol=3e-3)

@@ -143,7 +143,7 @@ class PreviewEngine:
         self._buf: deque[_Pending] = deque()
         self._inflight = 0                        # submitted playback frames the pool hasn't finished
         self._pool = ThreadPoolExecutor(RENDER_THREADS, thread_name_prefix="preview-render")
-        self._lut_wanted: list[tuple] = []        # (grade, log_profile, tonemap), most urgent first
+        self._lut_wanted: list[tuple] = []        # (grade, log_profile, tonemap, full range), most urgent first
         self._quit = False
         threading.Thread(target=self._run, name="preview", daemon=True).start()
         threading.Thread(target=self._run_luts, name="preview-lut", daemon=True).start()
@@ -173,11 +173,12 @@ class PreviewEngine:
             first = max(0, bisect.bisect_right(self._play["starts"], t0) - 1)
             seen, wanted = set(), []
             for s in (shots[first:] + shots[:first]) if look.color else []:
-                key = (s.grade.key(), s.log_profile, s.tonemap)
+                full = s.footage.color_range == "pc"
+                key = (s.grade.key(), s.log_profile, s.tonemap, full)
                 if (key not in seen and needs_color(s.grade, s.log_profile)
-                        and self.luts.peek(s.grade, s.log_profile, s.tonemap) is None):
+                        and self.luts.peek(s.grade, s.log_profile, s.tonemap, full) is None):
                     seen.add(key)
-                    wanted.append((s.grade, s.log_profile, s.tonemap))
+                    wanted.append((s.grade, s.log_profile, s.tonemap, full))
             self._lut_wanted = wanted
             self._cv.notify_all()
 
@@ -456,19 +457,21 @@ class PreviewEngine:
 
     def _grader(self, shot, playing: bool):
         g, lp, tm = shot.grade, shot.log_profile, shot.tonemap
+        full = shot.footage.color_range == "pc"
         if not needs_color(g, lp):
             return None
-        lut = self.luts.peek(g, lp, tm)
+        lut = self.luts.peek(g, lp, tm, full)
         if lut is not None:
             return lut.apply
         if playing:
-            return self.luts.get(g, lp, tm).apply
+            return self.luts.get(g, lp, tm, full).apply
         # Adjusting sliders: grade this frame exactly and build its LUT in the background
         # (only the latest grade is worth building while a slider moves).
         with self._cv:
-            self._lut_wanted = [(g, lp, tm)]
+            self._lut_wanted = [(g, lp, tm, full)]
             self._cv.notify_all()
-        return lambda a: (apply_grade(a.astype(np.float32) / 255.0, g, lp, tm) * 255.0 + 0.5).astype(np.uint8)
+        return lambda a: (apply_grade(a.astype(np.float32) / 255.0, g, lp, tm, full) * 255.0
+                          + 0.5).astype(np.uint8)
 
     def _run_luts(self) -> None:
         while True:
@@ -477,10 +480,10 @@ class PreviewEngine:
                     self._cv.wait()
                 if self._quit:
                     return
-                g, lp, tm = self._lut_wanted.pop(0)
+                g, lp, tm, full = self._lut_wanted.pop(0)
             try:
-                if self.luts.peek(g, lp, tm) is None:
-                    self.luts.get(g, lp, tm)
+                if self.luts.peek(g, lp, tm, full) is None:
+                    self.luts.get(g, lp, tm, full)
             except Exception:  # noqa: BLE001
                 pass
 

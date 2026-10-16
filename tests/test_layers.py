@@ -452,7 +452,7 @@ def test_auto_color_covers_every_layer(window, tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(mw, "DecoderPool", FakePool)
-    monkeypatch.setattr(mw, "auto_correct", lambda frames, lp, tm, base=None: Grade(exposure=0.4))
+    monkeypatch.setattr(mw, "auto_correct", lambda frames, lp, tm, base=None, full_range=False: Grade(exposure=0.4))
     monkeypatch.setattr(window.tasks, "submit",
                         lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
     p, f, logo = _layered(window, tmp_path)

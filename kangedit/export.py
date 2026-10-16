@@ -27,6 +27,7 @@ CODECS = {
     "prores": ("Apple ProRes 422 HQ (MOV) - for further editing", ".mov"),
 }
 GPU_STALL = 180.0   # seconds without progress before a GPU export is redone on the CPU
+GRADE_FMT = "gbrp16le"   # pixel format clips are graded in (16-bit planar RGB)
 QUALITIES = {"High": 18, "Medium": 21, "Small file": 26}
 CAPTION_MODES = {
     "none": "No captions",
@@ -51,6 +52,21 @@ class ExportSettings:
     # used here: copying full-size frames back for the CPU filters measured slower than CPU decoding.)
     use_gpu: bool = True
     blend_slowmo: bool = True   # slow motion: blend neighbouring frames instead of repeating them (smoother)
+
+
+_cubes: dict[str, dict[tuple, str]] = {}      # export folder -> {grade key: .cube already written there}
+
+
+def _grade_cube(workdir: str, name: str, grade, f: Footage) -> str:
+    """Write the grade's .cube LUT for footage f as `name` in workdir, or return the one an earlier clip with
+    the same grade and colour settings already wrote (each is a few MB, read by FFmpeg at start)."""
+    full = f.color_range == "pc"
+    key = (grade.key(), f.log_profile, f.tonemap, full)
+    done = _cubes.setdefault(workdir, {})
+    if key not in done:
+        write_cube(os.path.join(workdir, name), grade, f.log_profile, f.tonemap, full_range=full)
+        done[key] = name
+    return done[key]
 
 
 def _clip_inputs(project: Project, use_proxies: bool, i: int, cp: ClipPlan, fps: float) -> tuple[list[str], int, bool, float]:
@@ -258,11 +274,12 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
             tm = c.timemap()
             spd = "" if (tm.normal or f.is_image) else f"setpts='{tm.setpts(0.0)}',"
             chain = f"[{k}:v:0]setpts=PTS-STARTPTS,{trim}{spd}fps={fps:.4f},trim=duration={length:.4f},"
+            matrix = "bt709" if (use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
             if needs_color(c.grade, f.log_profile):
-                lut = f"lut_ov{j}.cube"
-                write_cube(os.path.join(workdir, lut), c.grade, f.log_profile, f.tonemap)
-                matrix = "bt709" if (use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
+                lut = _grade_cube(workdir, f"lut_ov{j}.cube", c.grade, f)
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
+            elif not f.is_image:
+                chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,"
             pl = reframe.overlay_place(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
             chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
             if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
@@ -278,6 +295,8 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                 chain += f"fade=t=in:st=0:d={fi:.4f}:alpha=1,"
             if fo > 0:
                 chain += f"fade=t=out:st={max(0.0, c.duration - fo):.4f}:d={fo:.4f}:alpha=1,"
+            # To YUV here, as BT.709 (the overlay filter would otherwise convert with its BT.601 default).
+            chain += "scale=out_color_matrix=bt709:out_range=tv,format=yuva444p,"
             graph.append(chain + f"setpts=PTS+{c.start:.4f}/TB[ov{j}]")
             graph.append(f"[{vout}][ov{j}]overlay=x='{c.x * tw:.2f}-w/2':y='{c.y * th:.2f}-h/2':eof_action=pass:"
                          f"format=auto[vov{j}]")
@@ -362,22 +381,25 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         sw, sh = reframe.quarter_dims(f.width, f.height, quarters)
         box = reframe.box_rect(tw, th, (clip.box_x, clip.box_y, clip.box_w, clip.box_h)) \
             if clip.box_w > 0 and clip.box_h > 0 else None
-        if box:   # a box of the frame (multicam layouts), cropped to fill it; padded with black at the end
-            chain.append(reframe.ffmpeg_filter(sw, sh, box[2], box[3], "fill", clip.zoom,
-                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
-        else:
-            chain.append(reframe.ffmpeg_filter(sw, sh, tw, th, s.fit_mode, clip.zoom,
-                                               clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}"))
-        post = f"[v{i}b]"
         color = needs_color(clip.grade, f.log_profile)
         ph = box[3] if box else th          # picture height: halation and sharpening scale with it
         halation = ffmpeg_halation(clip.grade, ph, f"v{i}g", f"v{i}h")
+        # Graded clips are converted to 16-bit planar RGB (as precise as packed RGB48, faster through the
+        # LUT) in the same swscale pass that resizes them, instead of a second full-frame pass.
+        convert = ""
+        # The source's colour matrix is always named (FFmpeg would take an untagged HD stream for SD BT.601
+        # and shift its colours on the way to BT.709).
+        matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
         if color or halation:
-            matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
-            post += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb48le,"
+            convert = f":in_color_matrix={matrix}:in_range=auto|{GRADE_FMT}"
+        mode = "fill" if box else s.fit_mode
+        chain.append(reframe.ffmpeg_filter(sw, sh, box[2] if box else tw, box[3] if box else th, mode, clip.zoom,
+                                           clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}", convert))
+        post = f"[v{i}b]"
+        if convert and f"format={GRADE_FMT}" not in chain[-1].split("overlay")[-1]:
+            post += f"scale={convert.split('|')[0][1:]},format={GRADE_FMT},"     # (blurred background)
         if color:
-            lut = f"lut_{i}.cube"
-            write_cube(os.path.join(workdir, lut), clip.grade, f.log_profile, f.tonemap)
+            lut = _grade_cube(workdir, f"lut_{i}.cube", clip.grade, f)
             post += f"lut3d=file={lut}:interp=tetrahedral,"
         if halation:
             chain.append(post + f"null[v{i}g]")
@@ -386,7 +408,8 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         sharpen = ffmpeg_sharpen(clip.grade, ph)
         rot = reframe.ffmpeg_tilt(tilt)
         pad = f"pad={tw}:{th}:{box[0]}:{box[1]}:black," if box else ""
-        post += (f"scale=out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
+        to_out = "scale=" + ("" if convert or f.is_image else f"in_color_matrix={matrix}:in_range=auto:")
+        post += (f"{to_out}out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
                  f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
         chain.append(post)
         graph += chain
@@ -472,6 +495,7 @@ def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] =
         run_ffmpeg(build_export(project, s, workdir), project.duration, progress, cancel, cwd=workdir,
                    label=f"Exporting {name}" + (" (CPU)" if s.use_gpu else ""))
     finally:
+        _cubes.pop(workdir, None)
         shutil.rmtree(workdir, ignore_errors=True)
     return s.output
 

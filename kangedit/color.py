@@ -306,12 +306,38 @@ def _aces_fit(x):
     return np.clip((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0)
 
 
-def _to_linear(rgb: np.ndarray, log_profile: str) -> np.ndarray:
-    """Signal (IRE domain, 0..1) -> scene/display linear Rec.709."""
+def _signal(rgb: np.ndarray, domain: str, full_range: bool) -> np.ndarray:
+    """The decoded picture (0..1 over the file's range: legal 64..940 or full 0..1023 code values) -> the
+    domain a log curve is written in: 10-bit code values / 1023 ("cv") or legal-range IRE ("ire").
+    The camera's curve is the same in either kind of file; only how the decoder scaled it differs."""
+    if domain == "cv":
+        return rgb if full_range else (rgb * 876.0 + 64.0) / 1023.0
+    return (rgb * 1023.0 - 64.0) / 876.0 if full_range else rgb
+
+
+_DENSE = np.linspace(0.0, 1.0, 65536)
+_dense_tables: dict[tuple, np.ndarray] = {}
+
+
+def _dense_table(profile: str, full_range: bool) -> np.ndarray:
+    key = (profile, full_range)
+    if key not in _dense_tables:
+        p = LOG_PROFILES[profile]
+        _dense_tables[key] = np.asarray(p.decode(_signal(_DENSE, p.domain, full_range)), dtype=np.float64)
+    return _dense_tables[key]
+
+
+def _to_linear(rgb: np.ndarray, log_profile: str, full_range: bool = False) -> np.ndarray:
+    """Signal (0..1 as decoded) -> scene/display linear Rec.709."""
     if log_profile in LOG_PROFILES:
         p = LOG_PROFILES[log_profile]
-        sig = (rgb * 876.0 + 64.0) / 1023.0 if p.domain == "cv" else rgb
-        lin = p.decode(sig.astype(np.float64)).astype(np.float32)
+        if rgb.size > _DENSE.size:      # (a LUT's grid) the curve through a dense table: same values, far faster
+            table = _dense_table(log_profile, full_range)
+            pos = np.clip(rgb, 0.0, 1.0).astype(np.float32) * np.float32(_DENSE.size - 1)
+            i = np.minimum(pos.astype(np.int32), _DENSE.size - 2)
+            lin = table[i] + (table[i + 1] - table[i]) * (pos - i)
+        else:
+            lin = p.decode(_signal(rgb, p.domain, full_range).astype(np.float64)).astype(np.float32)
         m = gamut_to_709(p.gamut).astype(np.float32)
         return lin @ m.T
     if is_lut_profile(log_profile):
@@ -322,9 +348,58 @@ def _to_linear(rgb: np.ndarray, log_profile: str) -> np.ndarray:
     return np.power(np.clip(rgb, 0.0, 1.0), 2.4)
 
 
+WHITE_ROLLOFF = 0.75    # tone-mapped level where bright colours start to fade to white
+
+
+def _filmic(lin: np.ndarray) -> np.ndarray:
+    """Scene-linear Rec.709 -> display-linear 0..1 with the filmic curve (ACES fit), hue preserving: the curve
+    maps a colour's brightness (a smooth norm close to its brightest channel) and its channels keep their
+    ratios, so a bright red stays red instead of turning orange and skies don't go cyan (per-channel curves
+    shift hue by up to 40 degrees there). Near display white colours fade to white, as film and the eye do,
+    rather than clipping as flat patches. Neutral tones (middle grey, the grey scale) come out exactly as the
+    per-channel curve gives them. The norm, sum(c^3) / sum(c^2), is smooth (max(r, g, b) has a crease along
+    the grey axis that a LUT can't interpolate across cleanly)."""
+    lin = np.asarray(lin, dtype=np.float32)
+    pos = np.maximum(lin, 0.0)
+    sq = pos * pos
+    peak = np.sum(sq * pos, axis=-1, keepdims=True) / np.maximum(np.sum(sq, axis=-1, keepdims=True), 1e-20)
+    mapped = _aces_fit(peak * 0.6)
+    out = np.where(peak > 1e-9, lin * (mapped / np.maximum(peak, 1e-9)), 0.0)
+    fade = np.clip((mapped - WHITE_ROLLOFF) / (1.0 - WHITE_ROLLOFF), 0.0, 1.0) ** 2
+    out = out + (mapped - out) * fade
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+GAMUT_THRESHOLD, GAMUT_LIMIT = 0.9, 1.2
+
+
+def _compress_gamut(lin: np.ndarray) -> np.ndarray:
+    """Colours the camera saw outside Rec.709 (negative channels after the gamut conversion: neon, deep blue
+    lights, saturated flowers) pulled smoothly into it, as the ACES reference gamut compression does: each
+    channel's distance from the brightest one is compressed past GAMUT_THRESHOLD so that GAMUT_LIMIT lands on
+    the gamut edge. Colours well inside are untouched; instead of clipping to flat patches, the most saturated
+    ones keep their gradations (and a LUT of the transform stays smooth)."""
+    thr, lim, p = GAMUT_THRESHOLD, GAMUT_LIMIT, 1.2
+    lin = np.asarray(lin, dtype=np.float32)
+    ach = np.max(lin, axis=-1, keepdims=True)
+    dist = (ach - lin) / np.maximum(ach, np.float32(1e-9))
+    far = (dist > thr) & (ach > 1e-9)
+    if not far.any():
+        return lin
+    scale = (lim - thr) / (((1.0 - thr) / (lim - thr)) ** -p - 1.0) ** (1.0 / p)
+    x = (dist[far] - thr) / np.float32(scale)
+    dist[far] = thr + np.float32(scale) * x / (1.0 + x ** np.float32(p)) ** np.float32(1.0 / p)
+    out = lin.copy()
+    rows = np.broadcast_to(ach, lin.shape)[far]
+    out[far] = rows - dist[far] * rows
+    return out
+
+
 def _to_display(lin: np.ndarray, log_profile: str, tonemap: str) -> np.ndarray:
+    if log_profile in LOG_PROFILES:
+        lin = _compress_gamut(lin)
     if log_profile in LOG_PROFILES and tonemap == "filmic":
-        disp_lin = _aces_fit(lin * 0.6)
+        disp_lin = _filmic(lin)
     else:
         disp_lin = np.clip(lin, 0.0, 1.0)
     return np.power(disp_lin, 1.0 / 2.4)
@@ -347,27 +422,27 @@ def _to_display(lin: np.ndarray, log_profile: str, tonemap: str) -> np.ndarray:
 MID_GREY = 0.18
 LOG_STOP = 0.075     # log signal per stop for an unknown camera curve (S-Log3 0.074, V-Log 0.073, D-Log 0.08)
 _GRID = np.linspace(0.0, 1.0, 4096, dtype=np.float64)
-_curve_tables: dict[str, np.ndarray] = {}
+_curve_tables: dict[tuple, Optional[np.ndarray]] = {}
 
 
-def _decode_table(profile: str) -> Optional[np.ndarray]:
+def _decode_table(profile: str, full_range: bool = False) -> Optional[np.ndarray]:
     """Linear value of each _GRID signal level for a built-in log curve (camera gamut), or None when it
     doesn't rise steadily (then it can't be inverted)."""
-    if profile not in _curve_tables:
+    key = (profile, full_range)
+    if key not in _curve_tables:
         p = LOG_PROFILES[profile]
-        sig = (_GRID * 876.0 + 64.0) / 1023.0 if p.domain == "cv" else _GRID
-        lin = np.maximum.accumulate(np.asarray(p.decode(sig), dtype=np.float64))
-        _curve_tables[profile] = lin if lin[-1] > lin[0] else None
-    return _curve_tables[profile]
+        lin = np.maximum.accumulate(np.asarray(p.decode(_signal(_GRID, p.domain, full_range)), dtype=np.float64))
+        _curve_tables[key] = lin if lin[-1] > lin[0] else None
+    return _curve_tables[key]
 
 
-def _balance_log(x: np.ndarray, grade: Grade, base: str) -> np.ndarray:
+def _balance_log(x: np.ndarray, grade: Grade, base: str, full_range: bool = False) -> np.ndarray:
     """Exposure and white balance on a log signal, before a conversion LUT. With the camera's curve known,
     the signal is decoded, multiplied and encoded again (exact); otherwise each stop is LOG_STOP of signal."""
     if not grade.exposure and not grade.temperature and not grade.tint:
         return x
     gains = (2.0 ** grade.exposure) * wb_gains(grade.temperature, grade.tint).astype(np.float64)
-    table = _decode_table(base) if base in LOG_PROFILES else None
+    table = _decode_table(base, full_range) if base in LOG_PROFILES else None
     if table is None:
         return (x + np.float32(LOG_STOP) * np.log2(gains).astype(np.float32)).astype(np.float32)
     out = np.empty_like(x)
@@ -419,9 +494,10 @@ def _saturate(lin: np.ndarray, grade: Grade) -> np.ndarray:
     return luma + (lin - luma) * sat
 
 
-def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonemap: str = "filmic") -> np.ndarray:
-    """rgb: (..., 3) float in 0..1 (gamma-encoded signal). Returns graded display RGB 0..1 (see the order
-    above)."""
+def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonemap: str = "filmic",
+                full_range: bool = False) -> np.ndarray:
+    """rgb: (..., 3) float in 0..1 (gamma-encoded signal as decoded). Returns graded display RGB 0..1 (see the
+    order above). full_range: the file uses full-range code values (0..1023), which a log curve needs to know."""
     rgb = np.asarray(rgb, dtype=np.float32)
     shape = rgb.shape
     x = rgb.reshape(-1, 3)
@@ -430,7 +506,7 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
     profile = effective_profile(log_profile)
 
     if profile in LOG_PROFILES:                                  # scene-referred
-        lin = _to_linear(x, profile)
+        lin = _to_linear(x, profile, full_range)
         lin = lin * np.float32(2.0 ** grade.exposure)
         if grade.temperature or grade.tint:
             lin = lin * wb_gains(grade.temperature, grade.tint)
@@ -438,7 +514,7 @@ def apply_grade(rgb: np.ndarray, grade: Grade, log_profile: str = "none", tonema
         d = _to_display(lin, profile, tonemap).astype(np.float32)
     else:                                                        # display-referred
         if is_lut_profile(profile):
-            lin = _to_linear(_balance_log(x, grade, base), profile)
+            lin = _to_linear(_balance_log(x, grade, base, full_range), profile)
         else:
             lin = _to_linear(x, profile) * np.float32(2.0 ** grade.exposure)
             if grade.temperature or grade.tint:
@@ -542,47 +618,55 @@ def ffmpeg_sharpen(grade: Grade, height: int) -> str:
 
 
 class PreviewLut:
-    """96^3 uint8 LUT for fast per-frame grading of 8-bit RGB images."""
+    """The grade as a table for fast per-frame grading of 8-bit RGB images (the preview).
 
-    N = 96
-    _idx = (np.round(np.arange(256) * (N - 1) / 255.0)).astype(np.uint32)
-    _ir = _idx * N * N
-    _ig = _idx * N
-    _grid: Optional[np.ndarray] = None
-    # numpy releases the GIL for these gathers, so row bands run truly in parallel.
+    Blue is exact (all 256 levels: blue changes fastest from shadow to sky on a log picture, where a coarse
+    grid shows as banding) and red and green are a 64-level grid, interpolated (bilinear). The table is an
+    atlas image, a 64 x 64 red-green tile per blue level stacked vertically, so one cv2.remap call looks a
+    pixel up and interpolates it; the error is well under one 8-bit step even on steep log curves."""
+
+    N = 64
+    _x = np.arange(256, dtype=np.float32) * np.float32((N - 1) / 255.0)       # red -> atlas column
+    _y = (np.arange(256, dtype=np.float32)[:, None] * N + _x[None, :]).ravel()  # blue * 256 + green -> row
+    _grid: dict[int, np.ndarray] = {}
+    _MAX = 32000                    # cv2.remap needs image sides under 32767
+    # cv2 and numpy release the GIL, so row bands run truly in parallel.
     _threads = max(1, min(8, (os.cpu_count() or 2) - 1))
     _pool = ThreadPoolExecutor(_threads, thread_name_prefix="lut") if _threads > 1 else None
 
     @classmethod
     def grid(cls) -> np.ndarray:
-        if cls._grid is None:
+        """Input RGB of every atlas entry, in atlas order (blue, green, red)."""
+        if cls.N not in cls._grid:
             v = np.linspace(0.0, 1.0, cls.N, dtype=np.float32)
-            r, g, b = np.meshgrid(v, v, v, indexing="ij")
-            cls._grid = np.stack([r, g, b], axis=-1).reshape(-1, 3)
-        return cls._grid
+            b = np.arange(256, dtype=np.float32) / 255.0
+            bb, gg, rr = np.meshgrid(b, v, v, indexing="ij")
+            cls._grid[cls.N] = np.stack([rr, gg, bb], axis=-1).reshape(-1, 3)
+        return cls._grid[cls.N]
 
-    def __init__(self, grade: Grade, log_profile: str, tonemap: str):
-        out = apply_grade(self.grid(), grade, log_profile, tonemap)
-        packed = np.zeros((out.shape[0], 4), dtype=np.uint8)
-        packed[:, :3] = out * 255.0 + 0.5
-        self.table = packed.view(np.uint32).ravel()   # RGBX packed: one 4-byte gather per pixel
+    def __init__(self, grade: Grade, log_profile: str, tonemap: str, full_range: bool = False):
+        out = apply_grade(self.grid(), grade, log_profile, tonemap, full_range)
+        self.atlas = (out * 255.0 + 0.5).astype(np.uint8).reshape(256 * self.N, self.N, 3)
 
     def _band(self, img: np.ndarray, out: np.ndarray) -> None:
-        idx = self._ir[img[..., 0]]
-        idx += self._ig[img[..., 1]]
-        idx += self._idx[img[..., 2]]
-        np.take(self.table, idx, out=out)
+        import cv2
+        x = self._x[img[..., 0]]
+        y = self._y[(img[..., 2].astype(np.uint16) << 8) | img[..., 1]]
+        cv2.remap(self.atlas, x, y, cv2.INTER_LINEAR, dst=out)
 
     def apply(self, img: np.ndarray) -> np.ndarray:
         h, w = img.shape[:2]
-        rgbx = np.empty((h, w, 4), dtype=np.uint8)
-        out = rgbx.view(np.uint32).reshape(h, w)
+        if w >= self._MAX or h >= self._MAX:      # (not a picture: a long strip) graded in pieces
+            flat = img.reshape(-1, 3)
+            return np.concatenate([self.apply(flat[i:i + 4096][None])[0]
+                                   for i in range(0, len(flat), 4096)]).reshape(img.shape)
+        out = np.empty((h, w, 3), dtype=np.uint8)
         if self._pool is None or h < 64:
             self._band(img, out)
         else:
             step = -(-h // self._threads)
             list(self._pool.map(lambda y: self._band(img[y:y + step], out[y:y + step]), range(0, h, step)))
-        return np.ascontiguousarray(rgbx[..., :3])
+        return out
 
 
 class LutCache:
@@ -592,17 +676,17 @@ class LutCache:
         self._lock = threading.Lock()
 
     # Keyed by the effective profile, so a LUT-only profile's table is rebuilt once its official LUT arrives.
-    def peek(self, grade: Grade, log_profile: str, tonemap: str) -> Optional[PreviewLut]:
-        return self._items.get((grade.key(), effective_profile(log_profile), tonemap))
+    def peek(self, grade: Grade, log_profile: str, tonemap: str, full_range: bool = False) -> Optional[PreviewLut]:
+        return self._items.get((grade.key(), effective_profile(log_profile), tonemap, full_range))
 
-    def get(self, grade: Grade, log_profile: str, tonemap: str) -> Optional[PreviewLut]:
+    def get(self, grade: Grade, log_profile: str, tonemap: str, full_range: bool = False) -> Optional[PreviewLut]:
         if not needs_color(grade, log_profile):
             return None
         log_profile = effective_profile(log_profile)
-        key = (grade.key(), log_profile, tonemap)
+        key = (grade.key(), log_profile, tonemap, full_range)
         lut = self._items.get(key)
         if lut is None:
-            lut = PreviewLut(grade, log_profile, tonemap)   # built outside the lock (takes ~0.2 s)
+            lut = PreviewLut(grade, log_profile, tonemap, full_range)   # built outside the lock (~0.2 s)
             with self._lock:
                 if key not in self._items and len(self._items) >= self._max:
                     self._items.pop(next(iter(self._items)))
@@ -610,32 +694,34 @@ class LutCache:
         return lut
 
 
-def write_cube(path: str, grade: Grade, log_profile: str, tonemap: str, size: int = 33) -> None:
+def write_cube(path: str, grade: Grade, log_profile: str, tonemap: str, size: int = 65,
+               full_range: bool = False) -> None:
+    """The grade as a .cube 3D LUT for FFmpeg (lut3d, tetrahedral). 65 points: log curves are steep in the
+    shadows, where a 33-point grid errs by several 10-bit steps."""
     v = np.linspace(0.0, 1.0, size, dtype=np.float32)
     # .cube ordering: red changes fastest.
     b, g, r = np.meshgrid(v, v, v, indexing="ij")
     pts = np.stack([r, g, b], axis=-1).reshape(-1, 3)
-    out = apply_grade(pts, grade, log_profile, tonemap)
+    out = apply_grade(pts, grade, log_profile, tonemap, full_range)
     with open(path, "w", encoding="ascii") as fh:
         fh.write("TITLE \"KangEdit grade\"\n")
         fh.write(f"LUT_3D_SIZE {size}\n")
         fh.write("DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n")
-        fh.write("\n".join(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}" for p in out))
-        fh.write("\n")
+        np.savetxt(fh, out, fmt="%.6f")
 
 
 # ----------------------------------------------------------------------------- auto correction
 
 
 def auto_correct(frames: list[np.ndarray], log_profile: str, tonemap: str = "filmic",
-                 base: Optional[Grade] = None) -> Grade:
+                 base: Optional[Grade] = None, full_range: bool = False) -> Grade:
     """Estimate exposure, white balance and contrast from sample RGB uint8 frames."""
     g = Grade() if base is None else Grade.from_dict(base.to_dict())
     if not frames:
         return g
     log_profile = effective_profile(log_profile)
     px = np.concatenate([f.reshape(-1, 3)[:: max(1, f.size // 3 // 40000)] for f in frames]).astype(np.float32) / 255.0
-    lin = _to_linear(px, log_profile)
+    lin = _to_linear(px, log_profile, full_range)
     lin = np.maximum(lin, 1e-5)
     luma = lin @ _LUMA
 
@@ -666,7 +752,7 @@ def auto_correct(frames: list[np.ndarray], log_profile: str, tonemap: str = "fil
 
     # Contrast: add punch to flat images, soften harsh ones.
     tmp = Grade(exposure=g.exposure, temperature=g.temperature, tint=g.tint)
-    disp = apply_grade(px[::4], tmp, log_profile, tonemap) @ _LUMA
+    disp = apply_grade(px[::4], tmp, log_profile, tonemap, full_range) @ _LUMA
     p5, p95 = np.percentile(disp, [5, 95])
     spread = float(p95 - p5)
     g.contrast = float(np.clip((0.62 - spread) * 120.0, -25.0, 35.0))

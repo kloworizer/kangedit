@@ -255,10 +255,16 @@ class AutoEditDialog(QDialog):
         self._last_audio = last.get("audio", "main")
         self.chk_covered = QCheckBox("Only use moments every angle recorded")
         self.chk_covered.setChecked(last.get("covered", True))
+        self.chk_whole = QCheckBox("Use the whole recording (no best-moment cuts)")
+        self.chk_whole.setToolTip("Put the main angle's whole recording on the timeline instead of choosing its "
+                                  "best moments, like editing a full multicam event: with Switching, the angles "
+                                  "are cut all the way through.")
+        self.chk_whole.setChecked(bool(last.get("whole", False)))
         f.addRow("Layout", self.cb_layout)
         f.addRow(self.lbl_layout)
         f.addRow("Sound", self.cb_audio)
         f.addRow(self.chk_covered)
+        f.addRow(self.chk_whole)
         self._layout_changed()
         self.lbl_angles = QLabel("")
         self.lbl_angles.setWordWrap(True)
@@ -315,14 +321,15 @@ class AutoEditDialog(QDialog):
         self._suggest_target()
 
     def multicam(self):
-        """The multicam setup, or None when it is off: {"angles", "template", "audio", "covered"}."""
+        """The multicam setup, or None when it is off: {"angles", "template", "audio", "covered", "whole"}."""
         if not self.chk_multi.isChecked():
             return None
         angles = self._angles()
         if 1 not in angles.values() or len(set(angles.values())) < 2:
             return None
         return {"angles": angles, "template": self.cb_layout.currentData(),
-                "audio": self.cb_audio.currentData() or "main", "covered": self.chk_covered.isChecked()}
+                "audio": self.cb_audio.currentData() or "main", "covered": self.chk_covered.isChecked(),
+                "whole": self.chk_whole.isChecked()}
 
     def accept(self):
         if self.chk_multi.isChecked() and self.lbl_angles.text():

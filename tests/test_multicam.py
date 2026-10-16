@@ -422,3 +422,66 @@ def test_switching_from_the_layout_menu(window, qapp, monkeypatch):
     assert "switching" in window.lbl_status.text()
     window.undo()
     assert window.project.settings.multicam["template"] == "pip"
+
+
+def test_whole_recording_instead_of_best_moments(qapp):
+    p, main, cam2, angles, syncs = _project()                  # cam2 covers main 20-80 s
+    clips = multicam.whole_clips(p.footage, angles, syncs, [main.id])
+    assert [(c.src_in, c.src_out) for c in clips] == [(20.0, 80.0)]
+    clips = multicam.whole_clips(p.footage, angles, syncs, [main.id], covered=False)
+    assert [(c.src_in, c.src_out) for c in clips] == [(0.0, 120.0)]
+    assert multicam.whole_clips(p.footage, angles, syncs, []) != []   # main files missing from the order still go in
+    from kangedit.autoedit import AutoEditSettings
+    from kangedit.ui.dialogs import AutoEditDialog
+    d = AutoEditDialog(p, [], AutoEditSettings())
+    d.chk_multi.setChecked(True)
+    d.angle_rows[cam2.id].setCurrentIndex(1)
+    d.chk_whole.setChecked(True)
+    assert d.multicam()["whole"] is True
+
+
+def test_sync_through_the_longest_recording(monkeypatch):
+    from kangedit import sync
+    # a long take on angle 2; the main angle has two short clips of it; angle 3 only overlaps the second one
+    clips = {"long": A, "m1": _angle(A, 30.0, 40.0), "m2": _angle(A, 120.0, 50.0),
+             "cam3": _angle(A, 100.0, 60.0, drift=2e-5)}
+    monkeypatch.setattr(sync, "load_audio", lambda path, cancel=None: clips[path])
+    dur = {k: len(v) / RATE for k, v in clips.items()}
+    out = sync.sync_to_longest(["m1", "m2"], ["long", "cam3"], dur)
+    main, r = out["cam3"]
+    assert main == "m2" and r.offset == pytest.approx(-20.0, abs=0.003)   # cam3 starts 20 s before m2
+    assert r.a_time(30.0) == pytest.approx(10.0, abs=0.003)
+    main, r = out["long"]                                        # the long take: on the clip it overlaps most
+    assert main == "m2" and r.offset == pytest.approx(-120.0, abs=0.003)
+    assert r.overlap == pytest.approx(50.0, abs=0.1)
+
+
+def test_select_all_includes_the_layers(window, qapp):
+    p, main, cam2, angles, syncs = _project()
+    _store(p, angles, syncs, "pip")
+    window.set_project(p)
+    tl = window.tl
+    window.tl.setFocus()
+    window._select_all()                                        # Ctrl+A on the timeline
+    assert set(tl.selected_ids()) == {c.id for c in p.clips}
+    assert set(tl.selected_overlay_ids()) == {o.id for o in p.overlays} and len(p.overlays) == 2
+    window._on_select(tl.selected)
+    ins = window.inspector
+    assert len(ins.layer_others) == 2 and "5 clips selected" in ins.lbl_title.text()
+    ins.params["exposure"].set_value(0.5, emit=True)            # a grade reaches every selected clip
+    assert all(c.grade.exposure == 0.5 for c in p.clips + p.overlays)
+    tl.selected = p.clips[0].id                                 # a plain click: only that clip again
+    assert tl.selected_overlay_ids() == []
+    # Ctrl+click two layer clips, then delete them
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    tl.select_overlay("")
+    for o in p.overlays:
+        r = next(rr for cc, rr in tl._overlay_rects() if cc.id == o.id)
+        ev = QMouseEvent(QEvent.MouseButtonPress, r.center(), QPointF(tl.mapToGlobal(r.center().toPoint())),
+                         Qt.LeftButton, Qt.LeftButton, Qt.ControlModifier)
+        tl._overlay_press(ev, r.center())
+    tl.selected = ""
+    tl._ov_selection = {o.id for o in p.overlays}
+    window._delete_selected()
+    assert window.project.overlays == [] and len(window.project.clips) == 3

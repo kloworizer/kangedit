@@ -157,6 +157,8 @@ class Inspector(QScrollArea):
         self.clip: Optional[TimelineClip] = None
         self.others: list[TimelineClip] = []          # the rest of the selection: edits apply to them too
         self.selection: Callable[[], list[str]] = list  # ids of the selected clips (set by the main window)
+        self.layer_selection: Callable[[], list[str]] = list   # and of the selected clips on the video layers
+        self.layer_others: list = []                  # those (but the shown one): color, speed, volume apply
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # fit the panel's width, never cut off
         body = QWidget()
@@ -382,6 +384,12 @@ class Inspector(QScrollArea):
         self.set_clip(None)
 
     @property
+    def graded(self) -> list:
+        """The clips a color, LUT, log, speed or volume change applies to: the targets and the selected clips on
+        the video layers."""
+        return self.targets + self.layer_others
+
+    @property
     def targets(self) -> list[TimelineClip]:
         """The clips an edit applies to: the shown clip and the rest of the selection."""
         return ([self.clip] if self.clip is not None else []) + self.others
@@ -392,6 +400,8 @@ class Inspector(QScrollArea):
         layer = isinstance(clip, OverlayClip)
         sel = set(self.selection()) if clip is not None and not layer else set()
         self.others = [c for c in self.project.clips if c.id in sel and c is not clip] if clip and clip.id in sel else []
+        lsel = set(self.layer_selection()) if clip is not None else set()
+        self.layer_others = [o for o in self.project.overlays if o.id in lsel and o is not clip]
         self.widget().setEnabled(clip is not None)
         self.b_layer.setVisible(layer)
         self.grp_edit.setVisible(not layer)          # transitions and J / L cuts: between main-track clips
@@ -401,7 +411,8 @@ class Inspector(QScrollArea):
             return
         f = self.project.footage[clip.footage_id]
         score = f"  ·  score {clip.score * 100:.0f}" if getattr(clip, "score", None) is not None else ""
-        many = f"\n{len(self.others) + 1} clips selected: changes apply to all of them" if self.others else ""
+        n = len(self.others) + len(self.layer_others) + 1
+        many = f"\n{n} clips selected: changes apply to all of them" if n > 1 else ""
         where = f"  ·  layer V{clip.track + 2}" if layer else ""
         self.lbl_title.setText(f"{f.name}{where}{score}{many}")
         for w in (self.sp_in, self.sp_out, self.cb_log, self.cb_tone, self.cb_look, self.cb_trans, self.sp_tdur,
@@ -461,7 +472,7 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit("trim:speed")
-        for c in self.targets:
+        for c in self.graded:
             if not self.project.footage[c.footage_id].is_image:
                 c.speed = clamp_speed(v)
         self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
@@ -471,7 +482,7 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit("trim:ramp")
-        for c in self.targets:
+        for c in self.graded:
             if not self.project.footage[c.footage_id].is_image:
                 c.ramp = self.cb_ramp.currentData() or ""
         self.lbl_dur.setText(f"{self.clip.duration:.2f} s")
@@ -481,7 +492,7 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit("trim:audio_mode")
-        for c in self.targets:
+        for c in self.graded:
             if not self.project.footage[c.footage_id].is_image:
                 c.audio_mode = self.cb_sound.currentData() or "sync"
         self.changed.emit("trim")
@@ -506,7 +517,7 @@ class Inspector(QScrollArea):
             self.request.emit("import_lut_log")
             return
         self.before_change.emit("footage_color")
-        for fid in dict.fromkeys(x.footage_id for x in self.targets):
+        for fid in dict.fromkeys(x.footage_id for x in self.graded):
             f = self.project.footage[fid]
             if which == "log" and f.log_profile != self.cb_log.currentData():
                 f.log_profile = self.cb_log.currentData()
@@ -530,7 +541,7 @@ class Inspector(QScrollArea):
             self.request.emit("import_lut_look")
             return
         self.before_change.emit("grade:look")
-        for x in self.targets:
+        for x in self.graded:
             x.grade.look = self.cb_look.currentData() or ""
         self.look_mix.setEnabled(bool(c.grade.look))
         self.changed.emit("grade")
@@ -539,7 +550,7 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit("grade:" + key)
-        for c in self.targets:
+        for c in self.graded:
             setattr(c.grade, key, float(val))
         self.changed.emit("grade")
 
@@ -557,6 +568,6 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit(kind + ":" + key)
-        for c in self.targets:
+        for c in (self.graded if key == "volume" else self.targets):
             setattr(c, key, float(val))
         self.changed.emit(kind)

@@ -6,6 +6,71 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-16
+
+### Added
+- **Edit from a script**: ✨ Auto Edit → **📜 Script** (or *Tools → Auto Edit from script…*). Paste the script;
+  each line is found in the footage's transcripts by text similarity and the clips are laid out in the script's
+  order. An adjustable **similarity threshold** decides how close a line must be (recognition slips such as
+  "their" / "there" or a dropped word still match), a line said in several takes uses the best match or the last
+  good take, clips are cut on word boundaries with adjustable padding (never into the next words), and lines said
+  one after the other in the same take become one clip. A live preview lists each line with its score, file and
+  time, and lines that weren't found are listed in red and reported afterwards. Footage without a transcript is
+  transcribed first. Replaces the timeline or adds after it; undoable.
+- Media panel **bins**: a *Bin* list above the media (all media, not in a bin, each bin with its count), a *Bin*
+  column, and right-click → *Bins*: new bin, move the selected media to a bin (or out of it), rename or delete a
+  bin (its media stays), and **Bins by date**, which sorts the media into a bin per recording day (from the
+  file's creation time, else its date). Bins are saved with the project and undoable.
+- Media panel **filters**: show videos or photos / images only, and only one picture shape: landscape, portrait,
+  square, 16:9, 9:16, 4:3, 3:4 or 21:9 (as shown: a phone clip filmed upright is portrait).
+- Multicam: *Use the whole recording (no best-moment cuts)* in ✨ Auto Edit → Multicam puts the main angle's
+  whole recording on the timeline, so Switching cuts between the cameras all the way through, like editing a
+  full multicam event.
+- Multicam sync uses the longest recording as the reference: every file is synced to it and each angle's offset
+  to the main angle is worked out through it (files that don't match it are synced directly, as before).
+- Ctrl+A selects the clips on the video layers too (multicam angles, picture in picture...), and Ctrl+click adds
+  a layer clip to the selection: color, LUT, log, speed and volume changes and Delete apply to them as well.
+- DaVinci Resolve LUTs with a 1D shaper before the 3D LUT (LUT_1D_SIZE + LUT_3D_SIZE in one .cube) import and
+  apply correctly.
+
+### Changed
+- Log → Rec.709 conversion is more accurate and looks better:
+  - The filmic tone map keeps hues: it maps each colour's brightness and keeps its channel ratios, so bright
+    saturated colours no longer drift (red to orange, blue sky to cyan; hue shifts in bright colours went from
+    about 16° on average, up to 41°, to about 6°), and the brightest colours fade to white like film instead of
+    clipping as flat patches. Middle grey and the grey scale are unchanged.
+  - Colours the camera recorded outside Rec.709 (neon, LED lights, deep blues, flowers) are compressed smoothly
+    into it, as the ACES reference gamut compression does, instead of clipping, so they keep their gradations.
+  - Files recorded in full range (0–1023 code values) are read with the camera's curve correctly; they came out
+    flat before (raised blacks, dull highlights).
+  - The export LUT is 65 points per side instead of 33, and follows the exact grade 7 times more closely (mean
+    error under half a 10-bit level); clips with the same grade share one LUT file.
+  - The preview grades with every blue level exact and smooth (interpolated) red and green, which removes the
+    banding the old table showed in gradients (error about one 8-bit level on a grey ramp, before up to 3 with
+    steps of 6), and is a little faster.
+- Export: grading runs at 16 bits per channel in planar RGB, and the colour conversion is done in the same pass
+  as the resize, which exports faster (about 6 % in a test project) and more precisely.
+- Proxies are encoded to decode about 1.8× faster (smoother scrubbing on slow computers), and big downscales
+  (4K → 540p) average the pixels, so fine detail doesn't shimmer.
+
+### Fixed
+- The preview could show a different frame from the export (up to half a second off) for recordings whose video
+  starts after the audio: the preview now counts time from the file's start, as the export does.
+- Export: HD clips without colour tags and picture-in-picture / multicam layer clips were converted with the
+  wrong colour matrix (slightly off colours, mostly in greens and skin tones).
+- The update check at startup only ran once every 20 hours (and a manual check reset that), so a new release
+  often showed no popup. It now runs at every start (not again within 15 minutes).
+- Windows: after *Update now*, a console window with `find "<number>"` appeared and the update could hang:
+  the restart helper ran without a console, so each of its commands opened a window of its own and its pause
+  failed. It now runs hidden, waits with a command that works there, and gives up waiting after two minutes.
+- Ctrl+A in the Media panel selects all the media shown there (it selected the timeline's clips instead); in a
+  text field it selects the text.
+- A proxy that hangs on one file no longer turns GPU proxies off for every file: a GPU way that hung is skipped
+  for that file (and for all only after it hung on two). GPU attempts give up after 30 s without progress, and
+  a CPU attempt after 5 minutes with an error instead of staying at 0 %.
+- Camera RAW files FFmpeg can't decode (Sony X-OCN in MXF, Blackmagic RAW, REDCODE, ARRIRAW...) now say so and
+  what to do (convert to ProRes, DNxHR or H.264 / H.265 first) instead of "Could not decode frames".
+
 ## [0.4.0] - 2026-10-13
 
 ### Added

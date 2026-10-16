@@ -32,15 +32,45 @@ class LutError(ValueError):
     pass
 
 
+def _interp_1d(table: np.ndarray, dmin: np.ndarray, span: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    n = len(table) - 1
+    x = np.clip((np.asarray(rgb, np.float32) - dmin) / span, 0.0, 1.0) * n
+    i0 = np.minimum(x.astype(np.int32), n - 1)
+    f = x - i0
+    out = np.empty_like(x)
+    for c in range(3):
+        col = table[:, c]
+        out[:, c] = col[i0[:, c]] * (1.0 - f[:, c]) + col[i0[:, c] + 1] * f[:, c]
+    return out
+
+
+def _interp_3d(t: np.ndarray, dmin: np.ndarray, span: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    n = t.shape[0] - 1
+    x = np.clip((np.asarray(rgb, np.float32) - dmin) / span, 0.0, 1.0) * n
+    i0 = np.minimum(x.astype(np.int32), n - 1)
+    f = x - i0
+    r0, g0, b0 = i0[:, 0], i0[:, 1], i0[:, 2]
+    fr, fg, fb = f[:, 0:1], f[:, 1:2], f[:, 2:3]
+    c00 = t[b0, g0, r0] * (1 - fr) + t[b0, g0, r0 + 1] * fr
+    c01 = t[b0, g0 + 1, r0] * (1 - fr) + t[b0, g0 + 1, r0 + 1] * fr
+    c10 = t[b0 + 1, g0, r0] * (1 - fr) + t[b0 + 1, g0, r0 + 1] * fr
+    c11 = t[b0 + 1, g0 + 1, r0] * (1 - fr) + t[b0 + 1, g0 + 1, r0 + 1] * fr
+    c0 = c00 * (1 - fg) + c01 * fg
+    c1 = c10 * (1 - fg) + c11 * fg
+    return (c0 * (1 - fb) + c1 * fb).astype(np.float32)
+
+
 class CubeLut:
-    """A 1D or 3D LUT from a .cube file (Adobe/Resolve format)."""
+    """A 1D or 3D LUT from a .cube file (Adobe/Resolve format). A Resolve-style file with both LUT_1D_SIZE and
+    LUT_3D_SIZE is a 1D shaper (its rows come first, read through LUT_1D_INPUT_RANGE) followed by the 3D LUT
+    (LUT_3D_INPUT_RANGE)."""
 
     def __init__(self, path: str):
         self.path = path
         self.title = ""
         size_1d = size_3d = 0
-        dmin = np.zeros(3, np.float32)
-        dmax = np.ones(3, np.float32)
+        rng1 = [np.zeros(3, np.float32), np.ones(3, np.float32)]      # 1D (shaper) input range
+        rng3 = [np.zeros(3, np.float32), np.ones(3, np.float32)]      # 3D input range (DOMAIN_* sets both)
         rows: list[list[float]] = []
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -60,15 +90,14 @@ class CubeLut:
                         size_3d = int(line.split()[1])
                     elif head == "LUT_1D_SIZE":
                         size_1d = int(line.split()[1])
-                    elif head in ("DOMAIN_MIN", "LUT_3D_INPUT_RANGE", "LUT_1D_INPUT_RANGE"):
-                        vals = [float(v) for v in line.split()[1:]]
-                        if len(vals) == 2:  # *_INPUT_RANGE lo hi
-                            dmin[:] = vals[0]
-                            dmax[:] = vals[1]
-                        else:
-                            dmin[:] = vals[:3]
+                    elif head in ("LUT_1D_INPUT_RANGE", "LUT_3D_INPUT_RANGE"):
+                        lo, hi = (float(v) for v in line.split()[1:3])
+                        target = rng1 if head.startswith("LUT_1D") else rng3
+                        target[0][:], target[1][:] = lo, hi
+                    elif head == "DOMAIN_MIN":
+                        rng1[0][:] = rng3[0][:] = [float(v) for v in line.split()[1:4]]
                     elif head == "DOMAIN_MAX":
-                        dmax[:] = [float(v) for v in line.split()[1:4]]
+                        rng1[1][:] = rng3[1][:] = [float(v) for v in line.split()[1:4]]
                     # Other keywords (LUT_IN_VIDEO_RANGE, vendor tags...) are ignored.
         except OSError as e:
             raise LutError(str(e)) from e
@@ -76,52 +105,49 @@ class CubeLut:
             raise LutError(f"not a valid .cube file ({e})") from e
 
         data = np.asarray(rows, np.float32)
+        self.shaper = None
         if size_3d:
-            if len(data) != size_3d ** 3:
-                raise LutError(f"expected {size_3d ** 3} entries for a {size_3d}³ LUT, found {len(data)}")
+            n3 = size_3d ** 3
+            extra = len(data) - n3
+            if size_1d and extra >= 2:
+                # Resolve: the 1D shaper first, the 3D LUT after it (the 3D part is always the last n3 rows).
+                self.shaper = data[:extra]
+                data = data[extra:]
+            elif len(data) != n3:
+                raise LutError(f"expected {n3} entries for a {size_3d}³ LUT, found {len(data)}")
             # .cube order: red changes fastest -> index as [b, g, r].
             self.table = data.reshape(size_3d, size_3d, size_3d, 3)
             self.kind = "3d"
             self.size = size_3d
+            rng = rng3
         elif size_1d:
             if len(data) != size_1d:
                 raise LutError(f"expected {size_1d} entries for a 1D LUT, found {len(data)}")
             self.table = data
             self.kind = "1d"
             self.size = size_1d
+            rng = rng1
         else:
             raise LutError("missing LUT_3D_SIZE / LUT_1D_SIZE")
         if self.size < 2:
             raise LutError("LUT size must be at least 2")
-        self.dmin = dmin
-        self.span = np.maximum(dmax - dmin, 1e-6)
+        self.dmin = rng[0]
+        self.span = np.maximum(rng[1] - rng[0], 1e-6)
+        self.shaper_dmin = rng1[0]
+        self.shaper_span = np.maximum(rng1[1] - rng1[0], 1e-6)
 
     @property
     def name(self) -> str:
         return lut_name(self.path)
 
     def apply(self, rgb: np.ndarray) -> np.ndarray:
-        """rgb: (N, 3) float -> (N, 3) float32, trilinear (3D) or linear (1D) interpolation."""
-        n = self.size - 1
-        x = np.clip((np.asarray(rgb, np.float32) - self.dmin) / self.span, 0.0, 1.0) * n
-        i0 = np.minimum(x.astype(np.int32), n - 1)
-        f = x - i0
+        """rgb: (N, 3) float -> (N, 3) float32, trilinear (3D) or linear (1D) interpolation; through the shaper
+        first when the file has one."""
+        if self.shaper is not None:
+            rgb = _interp_1d(self.shaper, self.shaper_dmin, self.shaper_span, rgb)
         if self.kind == "1d":
-            out = np.empty_like(x)
-            for c in range(3):
-                col = self.table[:, c]
-                out[:, c] = col[i0[:, c]] * (1.0 - f[:, c]) + col[i0[:, c] + 1] * f[:, c]
-            return out
-        t = self.table
-        r0, g0, b0 = i0[:, 0], i0[:, 1], i0[:, 2]
-        fr, fg, fb = f[:, 0:1], f[:, 1:2], f[:, 2:3]
-        c00 = t[b0, g0, r0] * (1 - fr) + t[b0, g0, r0 + 1] * fr
-        c01 = t[b0, g0 + 1, r0] * (1 - fr) + t[b0, g0 + 1, r0 + 1] * fr
-        c10 = t[b0 + 1, g0, r0] * (1 - fr) + t[b0 + 1, g0, r0 + 1] * fr
-        c11 = t[b0 + 1, g0 + 1, r0] * (1 - fr) + t[b0 + 1, g0 + 1, r0 + 1] * fr
-        c0 = c00 * (1 - fg) + c01 * fg
-        c1 = c10 * (1 - fg) + c11 * fg
-        return (c0 * (1 - fb) + c1 * fb).astype(np.float32)
+            return _interp_1d(self.table, self.dmin, self.span, rgb)
+        return _interp_3d(self.table, self.dmin, self.span, rgb)
 
 
 _cache: dict[str, tuple[float, CubeLut]] = {}

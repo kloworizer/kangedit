@@ -540,6 +540,45 @@ def relayout(project: Project, template: str) -> int:
     return len(multi)
 
 
+def covered_spans(project_footage: dict[str, Footage], angles: dict[str, int],
+                  syncs: dict[str, tuple[str, SyncResult]]) -> dict[str, list[tuple[float, float]]]:
+    """For each main-angle file, the parts of it every other (synced) angle recorded too: {id: [(a, b)]}."""
+    out = {}
+    n = max(angles.values(), default=1)
+    for fid, k in angles.items():
+        if k != 1 or fid not in project_footage:
+            continue
+        dur = project_footage[fid].duration
+        covered = [(0.0, dur)]
+        for other in range(2, n + 1):
+            spans = []
+            for sid, (ref, r) in syncs.items():
+                if angles.get(sid) == other and ref == fid and sid in project_footage:
+                    spans.append((max(0.0, r.a_time(0.0)), min(dur, r.a_time(project_footage[sid].duration))))
+            if not spans:          # this angle didn't sync at all: it doesn't limit the edit
+                continue
+            covered = [(max(a, s0), min(b, s1)) for a, b in covered for s0, s1 in spans if min(b, s1) > max(a, s0)]
+        out[fid] = sorted(covered)
+    return out
+
+
+def whole_clips(project_footage: dict[str, Footage], angles: dict[str, int],
+                syncs: dict[str, tuple[str, SyncResult]], order: list[str], covered: bool = True) -> list[TimelineClip]:
+    """The whole recording instead of its best moments: each main-angle file from start to end (in `order`),
+    or only the parts every angle recorded."""
+    spans = covered_spans(project_footage, angles, syncs) if covered else {}
+    out = []
+    order = list(order) + sorted((f for f, k in angles.items() if k == 1 and f not in order),
+                                 key=lambda f: project_footage[f].path if f in project_footage else f)
+    for fid in order:
+        if angles.get(fid) != 1 or fid not in project_footage:
+            continue
+        for a, b in spans.get(fid, [(0.0, project_footage[fid].duration)]):
+            if b - a >= MIN_PIECE:
+                out.append(TimelineClip(fid, round(a, 3), round(b, 3)))
+    return out
+
+
 def coverage_blockers(project_footage: dict[str, Footage], angles: dict[str, int],
                       syncs: dict[str, tuple[str, SyncResult]]) -> list[TimelineClip]:
     """Stand-in clips over the parts of the main-angle footage no other angle recorded, so an auto edit

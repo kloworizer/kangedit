@@ -50,6 +50,7 @@ class Footage:
     transcript: Optional[list] = None
     transcript_lang: str = ""
     kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
+    bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
     id: str = field(default_factory=new_id)
 
     @property
@@ -373,6 +374,8 @@ class ProjectSettings:
     overlay_tracks: int = 1        # video layers shown above the main track
     # Multicam (see multicam.py): {"angles": {footage id: angle number}, "template": key, "audio": choice}
     multicam: dict = field(default_factory=dict)
+    bins: list = field(default_factory=list)   # Media panel bins made by hand (kept even when empty)
+    script: dict = field(default_factory=dict)  # the last auto edit from a script (see ScriptEditDialog.settings)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -470,7 +473,8 @@ class Project:
             "overlays": [x.to_dict() for x in self.overlays],
             "overlay_tracks": self.settings.overlay_tracks,
             "multicam": copy.deepcopy(self.settings.multicam),   # its layout follows the angles' clips
-            "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap,
+            "bins": list(self.settings.bins),
+            "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap, "bin": f.bin,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
         }
@@ -483,11 +487,14 @@ class Project:
         self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
         if "multicam" in snap:
             self.settings.multicam = copy.deepcopy(snap["multicam"])
+        if "bins" in snap:
+            self.settings.bins = list(snap["bins"])
         for fid, d in snap["footage"].items():
             f = self.footage.get(fid)
             if f:
                 f.log_profile = d["log_profile"]
                 f.tonemap = d["tonemap"]
+                f.bin = d.get("bin", f.bin)
                 f.transcript = d["transcript"]
 
     def set_detected_profile(self, footage_id: str, profile: str, note: str) -> None:

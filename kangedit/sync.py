@@ -219,3 +219,57 @@ def sync_files(reference: list[str], others: list[str], progress: Optional[Progr
         if best is not None:
             out[other] = best
     return out
+
+
+def compose(x_on_hub: SyncResult, m_on_hub: SyncResult) -> SyncResult:
+    """Recording X against recording M, from both synced to a third one (the hub): X's time on M's clock."""
+    k = 1.0 + m_on_hub.drift
+    return SyncResult((x_on_hub.offset - m_on_hub.offset) / k, (1.0 + x_on_hub.drift) / k - 1.0,
+                      min(x_on_hub.confidence, m_on_hub.confidence))
+
+
+def sync_to_longest(mains: list[str], others: list[str], durations: dict[str, float],
+                    progress: Optional[ProgressCb] = None,
+                    cancel: Optional[threading.Event] = None) -> dict[str, tuple[str, SyncResult]]:
+    """Like sync_files, but every recording is synced to the longest one (which usually spans all the others)
+    and each other angle's offset to a main-angle file is worked out through it: {other path: (main path,
+    SyncResult)}. Files that don't match the longest recording are left out (the caller can sync them
+    directly)."""
+    paths = list(dict.fromkeys(mains + others))
+    if not paths:
+        return {}
+    hub = max(paths, key=lambda p: durations.get(p, 0.0))
+    audio: dict[str, np.ndarray] = {}
+    for k, path in enumerate(paths):
+        if progress:
+            progress(0.6 * k / len(paths), "Reading the sound of each angle…")
+        audio[path] = load_audio(path, cancel)
+    on_hub: dict[str, SyncResult] = {hub: SyncResult(0.0, 0.0, 1.0, durations.get(hub, 0.0))}
+    rest = [p for p in paths if p != hub]
+    for k, path in enumerate(rest):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        if progress:
+            progress(0.6 + 0.4 * k / max(1, len(rest)), "Syncing the angles to the longest recording…")
+        if len(audio[hub]) < RATE or len(audio[path]) < RATE:
+            continue
+        r = sync_audio(audio[hub], audio[path], RATE, cancel)
+        if r.reliable:
+            on_hub[path] = r
+    out = {}
+    for other in others:
+        if other not in on_hub:
+            continue
+        best = None
+        for main in mains:
+            if main not in on_hub or main == other:
+                continue
+            r = compose(on_hub[other], on_hub[main])
+            lo = max(0.0, r.offset)
+            hi = min(durations.get(main, 0.0), r.a_time(durations.get(other, 0.0)))
+            r.overlap = max(0.0, hi - lo)
+            if r.overlap > 1.0 and (best is None or r.overlap * r.confidence > best[1].overlap * best[1].confidence):
+                best = (main, r)
+        if best is not None:
+            out[other] = best
+    return out

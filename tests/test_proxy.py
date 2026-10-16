@@ -43,6 +43,7 @@ def attempts(monkeypatch, tmp_path):
     fail_first = [0]
     monkeypatch.setattr(proxy, "run_ffmpeg", run)
     monkeypatch.setattr(proxy, "_stalled", set())
+    monkeypatch.setattr(proxy, "_stalled_on", {})
     return seen, fail_first
 
 
@@ -79,6 +80,7 @@ def test_a_hanging_gpu_attempt_falls_back_to_the_cpu(tmp_path, monkeypatch):
     f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
     monkeypatch.setattr(proxy, "STALL", 1.5)
     monkeypatch.setattr(proxy, "_stalled", set())
+    monkeypatch.setattr(proxy, "_stalled_on", {})
     monkeypatch.setattr(proxy, "hw_decoder", lambda: "fakegpu")
     monkeypatch.setattr(proxy, "hw_encoder", lambda codec: None)
     monkeypatch.setattr(proxy, "cache_dir", lambda kind: tmp_path)
@@ -93,12 +95,18 @@ def test_a_hanging_gpu_attempt_falls_back_to_the_cpu(tmp_path, monkeypatch):
     t0 = time.monotonic()
     out = proxy.generate_proxy(f, 120, lambda p, m: labels.append(m))
     assert os.path.getsize(out) > 0 and time.monotonic() - t0 < 30
-    assert tried == ["fakegpu", None] and ("fakegpu", None) in proxy._stalled
+    assert tried == ["fakegpu", None] and f.path in proxy._stalled_on[("fakegpu", None)]
+    assert ("fakegpu", None) not in proxy._stalled             # one file: only that file skips it
     assert any("GPU" in m for m in labels) and any("(CPU)" in m for m in labels)   # the status shows each try
     os.remove(out)
     tried.clear()
-    proxy.generate_proxy(f, 120)                     # the hanging way isn't tried again this session
+    proxy.generate_proxy(f, 120)                     # the hanging way isn't tried again for this file
     assert tried == [None]
+    other = Footage(src.replace("clip", "other"), i.duration, i.width, i.height, i.fps, i.has_audio)
+    os.link(src, other.path)
+    tried.clear()
+    proxy.generate_proxy(other, 120)                 # another file still tries the GPU first; it hangs again,
+    assert tried == ["fakegpu", None] and ("fakegpu", None) in proxy._stalled     # so it's off for every file
 
 
 @pytest.mark.skipif(sys.platform == "win32" or not ffmpeg_bin(), reason="needs FFmpeg and a POSIX fifo")

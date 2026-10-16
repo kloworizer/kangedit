@@ -73,6 +73,7 @@ class TimelineView(QWidget):
         self.scroll_x = 0.0
         self._selected: str = ""          # primary selection (shown in the inspector)
         self._selection: set[str] = set()  # every selected clip, including the primary one
+        self._ov_selection: set[str] = set()   # selected clips on the video layers (Ctrl+A, Ctrl+click)
         self.mode = "move"       # move | slip
         self.min_gap = 0.0
         self._conflicts: set[str] = set()
@@ -104,13 +105,21 @@ class TimelineView(QWidget):
         """Select one clip only (or none with "")."""
         self._selected = clip_id
         self._selection = {clip_id} if clip_id else set()
+        self._ov_selection = set()
 
     def selected_ids(self) -> list[str]:
         """Selected clips in timeline order."""
         return [c.id for c in self.project.clips if c.id in self._selection]
 
+    def selected_overlay_ids(self) -> list[str]:
+        """Selected clips on the video layers (the one shown in the Layer tab and the rest of the selection)."""
+        sel = self._ov_selection | ({self.selected_overlay} if self.selected_overlay else set())
+        return [c.id for c in self.project.overlays if c.id in sel]
+
     def select_all(self):
+        """Every clip on the main track and on the video layers."""
         self._selection = {c.id for c in self.project.clips}
+        self._ov_selection = {c.id for c in self.project.overlays}
         if self._selected not in self._selection:
             self._selected = self.project.clips[0].id if self.project.clips else ""
         self.selection_changed.emit(self._selected)
@@ -667,6 +676,10 @@ class TimelineView(QWidget):
                 p.drawText(QRectF(r.left() + 4, r.top(), r.width() - 8, head), Qt.AlignVCenter | Qt.AlignLeft,
                            p.fontMetrics().elidedText(label, Qt.ElideRight, int(r.width() - 8)))
             p.restore()
+            if c.id in self._ov_selection and c.id != self.selected_overlay:
+                p.setPen(QPen(QColor(255, 255, 255, 170), 2))
+                p.setBrush(QColor(255, 255, 255, 28))
+                p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 3, 3)
             if c.id == self.selected_overlay:
                 p.setPen(QPen(QColor("#ffffff"), 2))
                 p.setBrush(Qt.NoBrush)
@@ -681,6 +694,7 @@ class TimelineView(QWidget):
 
     def select_overlay(self, oid: str):
         self.selected_overlay = oid
+        self._ov_selection = {oid} if oid else set()
         if oid:
             if self._selected:
                 self.selected = ""
@@ -706,6 +720,15 @@ class TimelineView(QWidget):
             self.select_overlay("")
             self.seek.emit(t)
             self._drag = {"kind": "scrub"}
+            return True
+        if e.button() == Qt.LeftButton and e.modifiers() & Qt.ControlModifier:
+            # Ctrl+click: add the layer clip to the selection (or take it out), keeping the rest of it.
+            if c.id in self._ov_selection:
+                self._ov_selection.discard(c.id)
+            else:
+                self._ov_selection.add(c.id)
+            self.selection_changed.emit(self._selected)
+            self.update()
             return True
         self.select_overlay(c.id)
         if e.button() == Qt.RightButton:
@@ -1125,6 +1148,7 @@ class TimelineView(QWidget):
         m.exec(gpos)
 
     def _clear_overlay(self):
+        self._ov_selection = set()
         if self.selected_overlay:
             self.selected_overlay = ""
             self.overlay_selected.emit("")

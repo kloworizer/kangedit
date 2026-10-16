@@ -259,6 +259,28 @@ def _scan(u: _Unit, hw: Optional[str], threads: int, cancel: threading.Event,
     return out
 
 
+# Camera RAW video FFmpeg can't decode (extension or codec name -> what it is).
+_RAW_FORMATS = {".braw": "Blackmagic RAW", ".r3d": "REDCODE RAW", ".ari": "ARRIRAW", ".crm": "Canon Cinema RAW Light",
+                ".nev": "Nikon N-RAW"}
+
+
+def undecodable_message(footage) -> str:
+    """Why no frames came out of a file, and what to do about it. Camera RAW codecs (Sony X-OCN in MXF,
+    Blackmagic RAW, REDCODE, ARRIRAW...) are proprietary: FFmpeg, and so KangEdit, can't decode them."""
+    codec = (getattr(footage, "codec", "") or "").lower()
+    ext = os.path.splitext(footage.path)[1].lower()
+    raw = _RAW_FORMATS.get(ext)
+    if raw is None and ext == ".mxf" and codec in ("", "none", "unknown"):
+        raw = "Sony X-OCN (or another camera RAW codec)"
+    if raw is None and codec in ("", "none", "unknown"):
+        raw = "a codec FFmpeg doesn't know"
+    if raw is None:
+        return f"Could not decode frames from {footage.name}"
+    return (f"{footage.name} is {raw}, which FFmpeg (and so KangEdit) can't decode. Convert it to ProRes, "
+            f"DNxHR or H.264 / H.265 first (DaVinci Resolve, or the camera maker's app such as Sony Catalyst "
+            f"Browse / RAW Viewer), then import the converted file.")
+
+
 def _finish(j: _Job) -> Analysis:
     """Join the segments of a job, then add scene cuts and audio."""
     data = {k: [] for k in _SERIES + ("thumbs", "thumb_t")}
@@ -268,7 +290,7 @@ def _finish(j: _Job) -> Analysis:
     footage = j.footage
     n = len(data["sharp"])
     if n == 0:
-        raise RuntimeError(f"Could not decode frames from {footage.name}")
+        raise RuntimeError(undecodable_message(footage))
     times = np.arange(n, dtype=np.float32) / SAMPLE_RATE
 
     # Scene cuts: big jumps in colour histogram.
