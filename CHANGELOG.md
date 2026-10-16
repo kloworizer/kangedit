@@ -6,6 +6,27 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-16
+
+### Fixed
+- Captions: the speech model is loaded once (downloaded on first use), then every file is transcribed in one
+  task with file-by-file progress; it no longer showed "Loading speech model" for each file. The auto edit's
+  quick listening model no longer pushes out the captions model (they reloaded each other), a file that fails
+  doesn't stop the others, and cancelling keeps the files already done.
+- Auto edit: footage shorter than about 2 s made every auto edit fail; *Remove fillers* failed when a clip ended
+  on a filler word.
+- Finishing steps (pacing, shot variety, cuts between words / on the beat) could move clips onto moments the
+  edit must not show (the rest of the timeline, parts not every camera recorded, what a highlight reel's edit
+  left out) and ignored the gap between reuses; shot variety could swap a clip to before the one it follows.
+- B-roll footage could split a scene in two or shorten the edit for a scene opener that never came: scenes now
+  come from the edited footage, and B-roll joins the scene it was recorded in.
+- Windows updates: an accented user name, or %, & or parentheses in a path, could make the update helper copy
+  nothing (it now takes every path from its environment).
+- Script edit: a speaker label on a line of its own ("ANNA:") was treated as a line to find.
+- The quick listening used to find the opening and closing kept transcribing after giving up; a model download
+  could hold up other transcriptions.
+- The preview's grading crashed on empty, RGBA or very wide pictures.
+
 ## [0.6.0] - 2026-10-16
 
 ### Added

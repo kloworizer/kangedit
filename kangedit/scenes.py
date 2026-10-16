@@ -119,6 +119,27 @@ def time_groups(footage: dict[str, Footage], order: list[str], gap: float = SCEN
     return groups
 
 
+def join_scenes(groups: dict[str, int], footage: dict[str, Footage], extra: dict[str, Footage]) -> dict[str, int]:
+    """Scenes (time_groups of the edit's footage) with `extra` files (the B-roll bin) added to them: each joins
+    the scene of the edit's file recorded closest in time (within SCENE_GAP), without starting or splitting a
+    scene. Extra files without a recording time, or far from every scene, are left out."""
+    spans = []
+    for fid, g in groups.items():
+        t = recorded_time(footage[fid]) if fid in footage else None
+        if t is not None:
+            spans.append((t, t + footage[fid].duration, g))
+    out = dict(groups)
+    for fid, f in extra.items():
+        t = recorded_time(f)
+        if t is None or not spans:
+            continue
+        a, b = t, t + f.duration
+        dist, g = min((max(0.0, s0 - b, a - s1), g) for s0, s1, g in spans)
+        if dist <= SCENE_GAP:
+            out[fid] = g
+    return out
+
+
 def _rank(x: np.ndarray) -> np.ndarray:
     """0..1 rank of each value (equal values share their rank)."""
     if x.size == 0:

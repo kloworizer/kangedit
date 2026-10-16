@@ -27,7 +27,7 @@ from .models import Footage, TimelineClip
 DEFAULT_THRESHOLD = 0.6
 LAST_TAKE_MARGIN = 0.05      # "last good take": a later take within this of the best score
 MERGE_GAP = 0.6              # seconds: consecutive lines in the same take closer than this become one clip
-_LABEL = re.compile(r"^\s*[A-Z][A-Z0-9 .'\-]{0,30}:\s+")      # "ANNA:" speaker labels
+_LABEL = re.compile(r"^\s*[A-Z][A-Z0-9 .'\-]{0,30}:(\s+|$)")  # "ANNA:" speaker labels (also on a line alone)
 _DIRECTIONS = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")    # [stage directions] (asides)
 
 

@@ -27,7 +27,7 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from . import __version__
 from .config import APP_DIR
@@ -212,8 +212,9 @@ class Prepared:
     kind: str
     version: str
     staging: str                  # unpacked new version
-    command: list[str]            # starts the installer helper (frozen) or the restarted app (source)
+    command: Union[list, str]     # starts the installer helper (frozen) or the restarted app (source)
     message: str = ""
+    env: dict = field(default_factory=dict)   # environment for the command (the helper's paths)
 
 
 def app_bundle() -> Path:
@@ -229,11 +230,12 @@ def update_log() -> Path:
     return log_dir() / "update.log"
 
 
-def _helper_frozen(staging_app: Path, target: Path, workdir: str, log: Optional[Path] = None) -> list[str]:
-    """A script that waits for this process to end, copies the new build over the old one and restarts it."""
+def _helper_frozen(staging_app: Path, target: Path, workdir: str,
+                   log: Optional[Path] = None) -> tuple[Union[list, str], dict]:
+    """A script that waits for this process to end, copies the new build over the old one and restarts it:
+    (command, environment for it)."""
     pid = os.getpid()
     if sys.platform == "win32":
-        exe = target / "KangEdit.exe"
         script = Path(workdir) / "install_update.bat"
         log = log or update_log()
         try:
@@ -244,9 +246,11 @@ def _helper_frozen(staging_app: Path, target: Path, workdir: str, log: Optional[
         # an interactive console, so the one-second pause is a ping; after ~2 minutes it goes on regardless.
         # robocopy copies every file (/IS /IT): by default it skips files of the same size and time stamp,
         # which a new build can have although they changed. What it did goes to the update log.
+        # The script itself is plain ASCII and takes every path from the environment: cmd reads a .bat in the
+        # console's code page (an accented user name would garble the paths) and would expand a % in them.
         script.write_text(
             "@echo off\r\n"
-            f'echo KangEdit update to "{target}" >"{log}" 2>NUL\r\n'
+            'echo KangEdit update to "%KE_DST%" >"%KE_LOG%" 2>NUL\r\n'
             "set n=0\r\n"
             ":wait\r\n"
             f'tasklist /FI "PID eq {pid}" /NH 2>NUL | find "{pid}" >NUL || goto copy\r\n'
@@ -255,11 +259,13 @@ def _helper_frozen(staging_app: Path, target: Path, workdir: str, log: Optional[
             "ping -n 2 127.0.0.1 >NUL\r\n"
             "goto wait\r\n"
             ":copy\r\n"
-            f'robocopy "{staging_app}" "{target}" /E /IS /IT /R:10 /W:1 /NP /NFL /NDL >>"{log}" 2>&1\r\n'
-            f'echo robocopy result %ERRORLEVEL% (0-7: copied, 8 or more: failed) >>"{log}" 2>NUL\r\n'
-            f'start "" "{exe}"\r\n'
-            f'rmdir /S /Q "{workdir}"\r\n', encoding="utf-8")
-        return ["cmd", "/c", str(script)]
+            'robocopy "%KE_SRC%" "%KE_DST%" /E /IS /IT /R:10 /W:1 /NP /NFL /NDL >>"%KE_LOG%" 2>&1\r\n'
+            'echo robocopy result %ERRORLEVEL% (0-7: copied, 8 or more: failed) >>"%KE_LOG%" 2>NUL\r\n'
+            'start "" "%KE_DST%\\KangEdit.exe"\r\n'
+            'rmdir /S /Q "%KE_WORK%"\r\n', encoding="ascii")
+        env = {"KE_SRC": str(staging_app), "KE_DST": str(target), "KE_LOG": str(log), "KE_WORK": str(workdir),
+               "KE_BAT": str(script)}
+        return 'cmd /d /c call "%KE_BAT%"', env
     script = Path(workdir) / "install_update.sh"
     if sys.platform == "darwin":
         copy = f'rsync -a --delete "{staging_app}/" "{target}/"'
@@ -272,7 +278,7 @@ def _helper_frozen(staging_app: Path, target: Path, workdir: str, log: Optional[
                       f"{copy}\n{start}\n"
                       f'rm -rf "{workdir}"\n', encoding="utf-8")
     os.chmod(script, 0o755)
-    return ["/bin/sh", str(script)]
+    return ["/bin/sh", str(script)], {}
 
 
 def prepare(release: Release, progress: Optional[ProgressCb] = None,
@@ -305,7 +311,8 @@ def prepare(release: Release, progress: Optional[ProgressCb] = None,
             raise UpdateError(f"The archive has no {name} folder")
         if progress:
             progress(1.0, "Update ready")
-        return Prepared(kind, release.version, str(staging_app), _helper_frozen(staging_app, target, work))
+        command, env = _helper_frozen(staging_app, target, work)
+        return Prepared(kind, release.version, str(staging_app), command, env=env)
     # source
     if not _writable(APP_DIR):
         raise UpdateError(f"KangEdit's folder can't be written to ({APP_DIR})")
@@ -353,9 +360,12 @@ WIN_NO_WINDOW = 0x08000000           # CREATE_NO_WINDOW
 WIN_NEW_PROCESS_GROUP = 0x00000200   # CREATE_NEW_PROCESS_GROUP
 
 
-def launch(command: list[str]) -> None:
-    """Start the helper / the new app detached from this process (it must outlive it)."""
+def launch(command: Union[list, str], env: Optional[dict] = None) -> None:
+    """Start the helper / the new app detached from this process (it must outlive it), with `env` added to
+    its environment."""
     kw: dict = {"cwd": str(APP_DIR), "close_fds": True}
+    if env:
+        kw["env"] = {**os.environ, **env}
     if sys.platform == "win32":
         # A hidden console of its own (CREATE_NO_WINDOW), not none at all (DETACHED_PROCESS): without one,
         # every console command in the helper script opened a window of its own.

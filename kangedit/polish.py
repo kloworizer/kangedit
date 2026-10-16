@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -47,10 +47,13 @@ def _word(w: dict) -> str:
     return re.sub(r"[^\w\s]", "", t).strip()
 
 
-def _free(clips: list[TimelineClip], c: TimelineClip, a: float, b: float, gap: float = 0.05) -> bool:
-    """Whether [a, b] of c's footage is clear of the other clips showing that footage."""
+def _free(clips: list[TimelineClip], c: TimelineClip, a: float, b: float, gap: float = 0.05,
+          avoid: Sequence[TimelineClip] = ()) -> bool:
+    """Whether [a, b] of c's footage is clear, by `gap` seconds, of the other clips showing that footage and of
+    the `avoid` clips (moments an edit must not show: the rest of the timeline, parts not every camera
+    recorded, what a highlight reel's edit left out)."""
     return not any(o is not c and o.footage_id == c.footage_id and a < o.src_out + gap and b > o.src_in - gap
-                   for o in clips)
+                   for o in list(clips) + list(avoid))
 
 
 def _word_at(words: list[dict], t: float) -> Optional[int]:
@@ -65,7 +68,7 @@ def _word_at(words: list[dict], t: float) -> Optional[int]:
 # ----------------------------------------------------------------------------- cuts between words
 
 def snap_to_pauses(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict,
-                   max_shift: float = PAUSE_SHIFT) -> int:
+                   max_shift: float = PAUSE_SHIFT, gap: float = 0.05, avoid: Sequence[TimelineClip] = ()) -> int:
     """Move cuts that fall inside a word to the pause next to it (the whole word kept when that's close,
     else left out), using the transcript's word timings; without a transcript, to a clearly quieter moment
     within max_shift. In place; returns how many cuts moved."""
@@ -98,7 +101,7 @@ def snap_to_pauses(clips: list[TimelineClip], footage: dict[str, Footage], analy
             if an is not None and f.has_audio:
                 a = _quiet_near(an, a, max_shift, lo=0.0, hi=b - MIN_LEN)
                 b = _quiet_near(an, b, max_shift, lo=a + MIN_LEN, hi=f.duration)
-        if (abs(a - c.src_in) > 1e-3 or abs(b - c.src_out) > 1e-3) and b - a >= MIN_LEN and _free(clips, c, a, b):
+        if (abs(a - c.src_in) > 1e-3 or abs(b - c.src_out) > 1e-3) and b - a >= MIN_LEN and _free(clips, c, a, b, gap, avoid):
             c.src_in, c.src_out = round(a, 3), round(b, 3)
             moved += 1
     return moved
@@ -128,9 +131,8 @@ def _cut_ranges(words: list[dict], a: float, b: float, max_pause: float) -> list
     out: list[tuple[float, float]] = []
     k = 0
     while k < len(inside):
-        two = " ".join(toks[k:k + 2])
-        if two in FILLERS:
-            out.append((inside[k]["s"], inside[k + 1]["e"]))
+        if k + 1 < len(toks) and " ".join(toks[k:k + 2]) in FILLERS:
+            out.append((inside[k]["s"], inside[k + 1]["e"]))      # a two-word filler ("you know")
             k += 2
             continue
         if toks[k] in FILLERS or not toks[k]:
@@ -214,7 +216,7 @@ def pace_factors(n: int, pacing: str) -> np.ndarray:
 
 
 def apply_pacing(clips: list[TimelineClip], footage: dict[str, Footage], pacing: str, clip_min: float,
-                 clip_max: float) -> int:
+                 clip_max: float, gap: float = 0.05, avoid: Sequence[TimelineClip] = ()) -> int:
     """Lengthen or shorten the body clips (not hooks, the opening / closing or scene openers) along the edit
     for the pacing, keeping the total and each clip within clip_min..clip_max, around its middle. In place;
     returns how many changed."""
@@ -231,7 +233,7 @@ def apply_pacing(clips: list[TimelineClip], footage: dict[str, Footage], pacing:
         mid = (c.src_in + c.src_out) / 2
         a = min(max(0.0, mid - L / 2), max(0.0, dur - L))
         b = min(dur, a + L)
-        if abs((b - a) - (c.src_out - c.src_in)) > 0.05 and _free(clips, c, a, b):
+        if abs((b - a) - (c.src_out - c.src_in)) > 0.05 and _free(clips, c, a, b, gap, avoid):
             c.src_in, c.src_out = round(a, 3), round(b, 3)
             changed += 1
     return changed
@@ -250,7 +252,8 @@ def shot_size(an, a: float, b: float) -> str:
 
 
 def vary_shots(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict,
-               scores: dict[str, np.ndarray], min_gap: float = 0.0, reach: float = 45.0) -> int:
+               scores: dict[str, np.ndarray], min_gap: float = 0.0, reach: float = 45.0,
+               avoid: Sequence[TimelineClip] = ()) -> int:
     """Where three or more shots of the same size follow each other, swap the middle ones for a nearby moment
     of the same file (story order kept) in another size, when one scores nearly as well. In place; returns
     how many were swapped."""
@@ -268,6 +271,10 @@ def vary_shots(clips: list[TimelineClip], footage: dict[str, Footage], analyses:
         n = max(1, int(round(L * len(t) / max(f.duration, 1e-6))))
         mean = np.convolve(sc, np.ones(n) / n, mode="valid")
         here = float(np.interp(c.src_in, t[:len(mean)], mean)) if len(mean) else -np.inf
+        # Between the neighbouring clips of the same file (the story order), or within reach.
+        prev, nxt = clips[k - 1], clips[k + 1]
+        lo = prev.src_out + min_gap if prev.footage_id == c.footage_id and prev.src_out <= c.src_in else 0.0
+        hi = nxt.src_in - min_gap if nxt.footage_id == c.footage_id and nxt.src_in >= c.src_out else f.duration
         best = None
         for i in np.argsort(-mean):
             a = float(t[i])
@@ -275,7 +282,9 @@ def vary_shots(clips: list[TimelineClip], footage: dict[str, Footage], analyses:
                 continue
             if mean[i] < here - 0.15:
                 break
-            if shot_size(an, a, a + L) == sizes[k] or not _free(clips, c, a, a + L, min_gap):
+            if not (lo <= a and a + L <= hi):          # keeps the story order with the neighbours
+                continue
+            if shot_size(an, a, a + L) == sizes[k] or not _free(clips, c, a, a + L, min_gap, avoid):
                 continue
             best = a
             break
@@ -367,7 +376,8 @@ def detect_beats(audio: np.ndarray, rate: int, lo_bpm: float = 70.0, hi_bpm: flo
 
 
 def snap_to_beats(clips: list[TimelineClip], footage: dict[str, Footage], beats: np.ndarray,
-                  start: float = 0.0, max_shift: float = 0.5) -> int:
+                  start: float = 0.0, max_shift: float = 0.5, gap: float = 0.05,
+                  avoid: Sequence[TimelineClip] = ()) -> int:
     """Move each cut (the end of a clip, so the edit's later clips shift with it) to the nearest beat (timeline
     times) within max_shift, by lengthening or shortening the clip before it; a beat that would cut into a word
     or onto a moment another clip shows is passed over for the next nearest. In place; returns how many cuts
@@ -394,7 +404,7 @@ def snap_to_beats(clips: list[TimelineClip], footage: dict[str, Footage], beats:
                 continue
             if words and _word_at(words, out) is not None:
                 continue
-            if d > 0 and not _free(clips, c, c.src_in, out):
+            if d > 0 and not _free(clips, c, c.src_in, out, gap, avoid):
                 continue
             c.src_out = round(out, 3)
             hit += 1
@@ -426,29 +436,32 @@ def timeline_beats(sound, file_beats: np.ndarray) -> np.ndarray:
 
 
 def finish(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dict, s,
-           beats: Optional[np.ndarray] = None, start: float = 0.0) -> tuple[list[TimelineClip], list[str]]:
+           beats: Optional[np.ndarray] = None, start: float = 0.0,
+           avoid: Sequence[TimelineClip] = ()) -> tuple[list[TimelineClip], list[str]]:
     """The finishing steps an auto edit's settings `s` (AutoEditSettings) ask for, in order: pacing, varied
     shot sizes, cuts between words, fillers / pauses / false starts out, cuts on the beat (`beats`: timeline
-    times; the clips start at `start`), even loudness. Returns the clips (filler removal makes new ones) and
-    notes for the status bar."""
+    times; the clips start at `start`), even loudness. No step moves a clip onto the `avoid` clips or nearer
+    than the edit's gap (s.min_gap) to another moment of the same footage. Returns the clips (filler removal
+    makes new ones) and notes for the status bar."""
+    gap = max(0.05, float(getattr(s, "min_gap", 0.0)))
     from .autoedit import score_samples
     notes: list[str] = []
     if getattr(s, "pacing", "steady") != "steady":
-        apply_pacing(clips, footage, s.pacing, s.clip_min, s.clip_max)
+        apply_pacing(clips, footage, s.pacing, s.clip_min, s.clip_max, gap, avoid)
     if getattr(s, "shot_variety", False):
         used = {c.footage_id for c in clips if c.footage_id in analyses}
         scores = score_samples({i: analyses[i] for i in used}, footage, s.style)
-        n = vary_shots(clips, footage, analyses, scores, s.min_gap)
+        n = vary_shots(clips, footage, analyses, scores, gap, avoid=avoid)
         if n:
             notes.append(f"{n} shot(s) swapped for another size")
     if getattr(s, "cut_on_pauses", False):
-        snap_to_pauses(clips, footage, analyses)
+        snap_to_pauses(clips, footage, analyses, gap=gap, avoid=avoid)
     if getattr(s, "remove_fillers", False):
         clips, gone = remove_fillers(clips, footage)
         if gone > 0.05:
             notes.append(f"{gone:.1f} s of fillers and pauses taken out")
     if beats is not None and len(beats) and getattr(s, "beat_sync", False):
-        n = snap_to_beats(clips, footage, beats, start)
+        n = snap_to_beats(clips, footage, beats, start, gap=gap, avoid=avoid)
         if n:
             notes.append(f"{n} cut(s) on the beat")
     if getattr(s, "even_loudness", False):

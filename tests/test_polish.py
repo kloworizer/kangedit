@@ -303,3 +303,27 @@ def test_broll_bin_opens_scenes(window, monkeypatch, tmp_path):
     assert any(c.footage_id == view.id and c.label == "scene" for c in clips)
     k = next(i for i, c in enumerate(clips) if c.footage_id == view.id)
     assert clips[k].transition and clips[k + 1].footage_id == b.id
+
+
+def test_filler_at_the_end_of_a_clip_and_very_short_footage():
+    f = Footage("t.mp4", 10.0, 1920, 1080, 30.0, True)
+    f.transcript = _words("hello um", 1.0)
+    out, gone = polish.remove_fillers([TimelineClip(f.id, 0.9, 2.0)], {f.id: f})   # ended on "um": no crash
+    assert out and gone > 0.2 and out[-1].src_out <= f.transcript[1]["s"] + 1e-6
+    for n in range(0, 9):                                        # under 2 s of footage: no penalty, no crash
+        an = _an(n / RATE) if n else _an(0.0)
+        assert len(bad_frames(an)) == n
+
+
+def test_finishing_keeps_off_avoided_moments_and_the_story_order():
+    f = Footage("a.mp4", 200.0, 1920, 1080, 30.0, True)
+    # pacing would grow the clips around their middle into the blocked part (only 20-30 s may be shown)
+    clips = [TimelineClip(f.id, 20.5, 22.0), TimelineClip(f.id, 24.0, 25.0), TimelineClip(f.id, 27.0, 29.5)]
+    blocked = [TimelineClip(f.id, 0.0, 20.0), TimelineClip(f.id, 30.0, 200.0)]
+    polish.apply_pacing(clips, {f.id: f}, "build", 1.0, 6.0, gap=0.0, avoid=blocked)
+    assert all(20.0 <= c.src_in and c.src_out <= 30.0 for c in clips)
+    # shot variety never swaps a clip to before the one it follows
+    an = _an(200, faces=lambda t: np.where(t < 95, 0.0, 0.08))     # the only wide shots are before 95 s
+    clips = [TimelineClip(f.id, 100, 103), TimelineClip(f.id, 110, 113), TimelineClip(f.id, 120, 123)]
+    assert polish.vary_shots(clips, {f.id: f}, {f.id: an}, {f.id: np.zeros(800, np.float32)}) == 0
+    assert clips[1].src_in == 110

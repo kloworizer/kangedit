@@ -266,8 +266,8 @@ def bad_frames(a: Analysis) -> np.ndarray:
     pocket: dark, blurred and colourless), blown out (most of the picture clipped, a flare or the sun), and the
     focus hunting (sharpness swinging back and forth while the camera holds still)."""
     n = len(a.times)
-    if n == 0:
-        return np.zeros(0, np.float32)
+    if n < 7:                              # under 2 s: too short to judge (and to filter)
+        return np.zeros(n, np.float32)
     bright = np.asarray(a.brightness, np.float32)
     sharp = np.asarray(a.sharp, np.float32)
     color = np.asarray(a.colorful, np.float32)

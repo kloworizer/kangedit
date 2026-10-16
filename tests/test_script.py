@@ -40,6 +40,7 @@ def test_split_and_normalize():
     assert lines[0] == "Welcome to the channel!" and lines[1] == "Today we're looking at their new camera."
     assert "[beat]" not in lines[2] and len(lines) == 6
     assert S.normalize("Héllo, WORLD!  It's") == "hello world its"
+    assert S.split_script("ANNA:\nHello there friend.") == ["Hello there friend."]     # a label on its own line
     assert S.similarity("their new camera", "there new camera") > 0.85
 
 
@@ -113,6 +114,7 @@ def test_script_dialog_preview_and_app_flow(window, footage, monkeypatch, tmp_pa
         f.transcript = _take("nothing from the script here", 1.0)
         return f.transcript
     monkeypatch.setattr("kangedit.ui.main_window.transcribe", fake_transcribe)
+    monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None: None)
     monkeypatch.setattr(window.tasks, "submit",
                         lambda name, job, done, err=None: done(job(lambda *x: None, threading.Event())))
     st = {"script": SCRIPT, "footage": [a.id, b.id, c.id], "threshold": 0.6, "prefer": "last", "pad_in": 0.15,

@@ -31,7 +31,8 @@ from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import polish, scenes
-from ..captions import Caption, build_captions, delete_captions, edit_caption, listen, project_layout, transcribe, write_srt
+from ..captions import (Caption, build_captions, delete_captions, edit_caption, listen, load_model, project_layout,
+                        transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -1377,7 +1378,7 @@ class MainWindow(QMainWindow):
             body = sorted((c for c in clips if c.label != "hook"), key=where)
             clips = hooks + body
             beats = self._music_beats(sound, cancel) if sound is not None else None
-            clips, notes = polish.finish(clips, footage, analyses, s, beats, 0.0)
+            clips, notes = polish.finish(clips, footage, analyses, s, beats, 0.0, avoid=blockers)
             apply_edit_style(clips, footage, analyses, s)
             return analyses, clips, notes
 
@@ -1567,13 +1568,14 @@ class MainWindow(QMainWindow):
             for fid, f in broll.items():
                 if fid not in analyses:
                     analyses[fid] = load_or_analyze(f, cancel=cancel, use_gpu=use_gpu)
-            groups = scenes.time_groups(everything, story_order(everything, list(ids) + list(broll)))
+            # The scenes come from the edited footage alone; B-roll joins the scene it was recorded in.
+            groups = scenes.join_scenes(scenes.time_groups(footage, order), footage, broll)
+            n_scenes = len({groups[f] for f in footage if f in groups})
             openers = (s.video_format == "long" or s.order == "chronological") and s.order != "best_first"
             opener_len = round((s.clip_min + s.clip_max) / 2, 2)
-            if openers and len(set(groups.values())) > 1:
+            if openers and n_scenes > 1:
                 sel = copy.copy(sel)
-                sel.target_duration = max(s.clip_min, sel.target_duration
-                                          - opener_len * (len(set(groups.values())) - 1))
+                sel.target_duration = max(s.clip_min, sel.target_duration - opener_len * (n_scenes - 1))
             progress(0.8, "Choosing the best moments…")
             used = existing + blockers + [c for c in (intro, outro) if c]
             body = select(footage, analyses, sel, order, existing=used, avoid=avoid, seed=seed)
@@ -1581,7 +1583,7 @@ class MainWindow(QMainWindow):
             body = body[len(hooks):]
             # The hook grabs attention first, then the opening greets.
             clips = hooks + ([intro] if intro else []) + body + ([outro] if outro else [])
-            if openers and len(set(groups.values())) > 1:
+            if openers and n_scenes > 1:
                 prefer = set(broll) | {f for f in footage if footage[f].bin == binlib.BROLL}
                 n = scenes.add_scene_openers(clips, groups, analyses, everything, opener_len, s.min_gap, used,
                                              prefer=prefer)
@@ -1589,7 +1591,7 @@ class MainWindow(QMainWindow):
                     notes.append(f"{n} scene(s) open with a scenic shot")
             progress(0.9, "Finishing the edit…")
             beats = self._music_beats(music_clip, cancel) if music_clip is not None else None
-            clips, more = polish.finish(clips, everything, analyses, s, beats, t_start)
+            clips, more = polish.finish(clips, everything, analyses, s, beats, t_start, avoid=used)
             notes += more
             apply_edit_style(clips, everything, analyses, s, groups=groups)
             plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
@@ -3424,23 +3426,54 @@ class MainWindow(QMainWindow):
         self.caps_panel.set_captions(self.captions)
 
     def queue_transcription(self, ids: list[str], force: bool = False):
+        """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
+        then the files are transcribed one after the other. A file that fails doesn't stop the others."""
         s = self.project.settings
-        for fid in ids:
-            f = self.project.footage.get(fid)
-            if f is None or f.is_image or (f.transcript is not None and not force):
-                continue
+        todo = [self.project.footage[fid] for fid in dict.fromkeys(ids) if fid in self.project.footage
+                and not self.project.footage[fid].is_image
+                and (force or self.project.footage[fid].transcript is None)]
+        if not todo:
+            return
+        model, lang = s.whisper_model, s.whisper_language
 
-            def done(words, fid=fid):
+        def job(progress, cancel):
+            if any(f.has_audio for f in todo):
+                load_model(model, progress)
+            done, errors = [], []
+            for k, f in enumerate(todo):
+                if cancel.is_set():
+                    return done, errors, True
+                tag = f" ({k + 1}/{len(todo)})" if len(todo) > 1 else ""
+
+                def step(p, msg="", k=k, tag=tag):
+                    progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
+                try:
+                    words = transcribe(f, model, lang, step, cancel)
+                except Cancelled:          # the files finished before the cancel are kept
+                    return done, errors, True
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{f.name}: {e}")
+                    continue
+                done.append((f.id, words))
+            return done, errors, False
+
+        def finished(res):
+            done, errors, cancelled = res
+            if cancelled:
+                self.lbl_status.setText(f"Transcription cancelled: {len(done)} of {len(todo)} file(s) done")
+            for fid, words in done:
                 ff = self.project.footage.get(fid)
                 if ff is not None:
                     ff.transcript = words
-                    self.project.dirty = True
-                    self.update_captions()
-                    self.bin.refresh()
+            if done:
+                self.project.dirty = True
+                self.update_captions()
+                self.bin.refresh()
+            if errors:
+                QMessageBox.warning(self, APP_NAME, "Some files could not be transcribed:\n\n" + "\n".join(errors))
 
-            self.tasks.submit(f"Transcribing {f.name}",
-                              lambda p, c, f=f: transcribe(f, s.whisper_model, s.whisper_language, p, c),
-                              done, self._task_error(f"Transcription of {f.name}"))
+        name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
+        self.tasks.submit(name, job, finished, self._task_error("Transcription"))
 
     def generate_captions(self):
         used = list(dict.fromkeys(c.footage_id for c in self.project.clips))
@@ -3676,7 +3709,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, f"{APP_NAME} {prepared.version} is ready: {APP_NAME} restarts "
                                                     "now to finish the update.")
             self.project.dirty = False
-            updater.launch(prepared.command)
+            updater.launch(prepared.command, prepared.env)
             self.close()
             QApplication.instance().quit()
 

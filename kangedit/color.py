@@ -623,7 +623,9 @@ class PreviewLut:
     Blue is exact (all 256 levels: blue changes fastest from shadow to sky on a log picture, where a coarse
     grid shows as banding) and red and green are a 64-level grid, interpolated (bilinear). The table is an
     atlas image, a 64 x 64 red-green tile per blue level stacked vertically, so one cv2.remap call looks a
-    pixel up and interpolates it; the error is well under one 8-bit step even on steep log curves."""
+    pixel up and interpolates it. The error is about one 8-bit step on steep log curves; on extreme colours far
+    outside Rec.709 (where the gamut compression bends sharply) it can reach a few percent, in the preview only:
+    the export grades exactly through a 65-point LUT."""
 
     N = 64
     _x = np.arange(256, dtype=np.float32) * np.float32((N - 1) / 255.0)       # red -> atlas column
@@ -655,11 +657,18 @@ class PreviewLut:
         cv2.remap(self.atlas, x, y, cv2.INTER_LINEAR, dst=out)
 
     def apply(self, img: np.ndarray) -> np.ndarray:
+        """Grade an RGB(A) image (8-bit values; extra channels dropped) to a new RGB uint8 image."""
+        img = np.asarray(img)
+        if img.dtype != np.uint8:
+            img = np.clip(np.rint(img), 0, 255).astype(np.uint8)
+        img = img[..., :3]
         h, w = img.shape[:2]
+        if img.size == 0:
+            return np.empty((h, w, 3), np.uint8)
         if w >= self._MAX or h >= self._MAX:      # (not a picture: a long strip) graded in pieces
             flat = img.reshape(-1, 3)
             return np.concatenate([self.apply(flat[i:i + 4096][None])[0]
-                                   for i in range(0, len(flat), 4096)]).reshape(img.shape)
+                                   for i in range(0, len(flat), 4096)]).reshape(h, w, 3)
         out = np.empty((h, w, 3), dtype=np.uint8)
         if self._pool is None or h < 64:
             self._band(img, out)

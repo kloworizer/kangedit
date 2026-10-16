@@ -72,6 +72,12 @@ def test_preview_table_follows_the_exact_grade():
     ramp = np.repeat(np.arange(30, 200, dtype=np.uint8)[:, None], 3, 1)[None]       # a smooth grey ramp
     steps = np.diff(lut.apply(ramp)[0, :, 1].astype(int))
     assert steps.min() >= -1 and steps.max() <= 3                         # no banding (8-bit rounding only)
+    assert lut.apply(np.zeros((0, 5, 3), np.uint8)).shape == (0, 5, 3)  # empty, RGBA, float: no crash
+    rgba = np.concatenate([img, np.full(img.shape[:2] + (1,), 255, np.uint8)], axis=2)
+    assert np.array_equal(lut.apply(rgba), lut.apply(img))
+    assert np.array_equal(lut.apply(img.astype(np.float32)), lut.apply(img))
+    wide = np.concatenate([rgba.reshape(1, -1, 4)] * 2, axis=1)                  # RGBA wider than cv2.remap takes
+    assert lut.apply(wide).shape == (1, wide.shape[1], 3)
     strip = img.reshape(1, -1, 3)[:, :40000]                              # wider than cv2.remap takes
     assert np.array_equal(lut.apply(strip)[0, :19200], lut.apply(img).reshape(-1, 3))
 

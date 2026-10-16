@@ -141,3 +141,16 @@ def test_long_form_auto_edit_opens_scenes(qapp, tmp_path, monkeypatch):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_broll_joins_a_scene_without_splitting_it(tmp_path):
+    a = _file(tmp_path, "a.mp4", tag=_iso(2026, 5, 1, 1, 0), dur=300)
+    b = _file(tmp_path, "b.mp4", tag=_iso(2026, 5, 1, 1, 20), dur=300)
+    r = _file(tmp_path, "r.mp4", tag=_iso(2026, 5, 1, 1, 10), dur=60)      # a view 2 km away, in between
+    other_day = _file(tmp_path, "o.mp4", tag=_iso(2026, 5, 9, 1, 0), dur=60)
+    for f in (a, b, r, other_day):
+        os.utime(f.path, (time.time(), time.time()))
+    a.gps, b.gps, r.gps, other_day.gps = [-8.65, 115.13], [-8.65, 115.13], [-8.65, 115.15], []
+    body = {a.id: a, b.id: b}
+    groups = scenes.join_scenes(scenes.time_groups(body, [a.id, b.id]), body, {r.id: r, other_day.id: other_day})
+    assert groups == {a.id: 0, b.id: 0, r.id: 0}                  # one scene; the far-off day is left out
