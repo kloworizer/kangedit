@@ -336,6 +336,9 @@ def _candidates(fid: str, a: Analysis, sc: np.ndarray, dur: float, s: AutoEditSe
     return _Cands(fid, best, best_len, e, np.isfinite(best))
 
 
+EVERY_SHARE = 0.9       # "use every footage": at least this share of the usable files, even past the target
+
+
 def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
            s: AutoEditSettings, order_ids: Optional[list[str]] = None,
            existing: Optional[list[TimelineClip]] = None, avoid: Optional[list[TimelineClip]] = None,
@@ -387,14 +390,15 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
             sc = sc - FAR_REPEAT_PENALTY * (alike & ~near).any(axis=1)
         return sc - OVER_SHARE_PENALTY * max(0.0, uses[fid] + 1 - share[fid])
 
-    def take(fid: str, eff: np.ndarray) -> bool:
+    def take(fid: str, eff: np.ndarray, cap: Optional[float] = None, over: bool = False) -> bool:
+        """Add footage fid's best moment (at most `cap` seconds; `over`: even past the target)."""
         nonlocal total
         k = int(np.argmax(eff))
         if not np.isfinite(eff[k]):
             return False
         c = cands[fid]
         remaining = s.target_duration - total
-        length = float(min(c.length[k], remaining))
+        length = float(min(c.length[k], cap if cap else np.inf, np.inf if over else remaining))
         if length < min(s.clip_min, 1.0) - 1e-6:
             return False
         a_in = float(analyses[fid].times[k])
@@ -412,15 +416,25 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
             block(ex.footage_id, ex.src_in, ex.src_out, cands[ex.footage_id].embed[k])
 
     if s.use_every_footage:
+        # Every footage once, the best first: each gets a shorter clip when that lets more of them fit in the
+        # target (down to the shortest clip length), and the pass goes on past the target until at least
+        # EVERY_SHARE of the usable files are in.
         firsts = []
         for fid in ids:
             eff = effective(fid)
             if np.isfinite(eff).any():
                 firsts.append((float(np.max(eff)), fid))
-        for _, fid in sorted(firsts, reverse=True):
-            if total >= s.target_duration - 0.05:
+        firsts.sort(reverse=True)
+        room = max(0.0, s.target_duration - total)
+        cap = float(np.clip(room / max(1, len(firsts)), s.clip_min, s.clip_max))
+        need = int(np.ceil(EVERY_SHARE * len(firsts)))
+        done = 0
+        for _, fid in firsts:
+            past = total >= s.target_duration - 0.05
+            if past and done >= need:
                 break
-            take(fid, effective(fid))
+            if take(fid, effective(fid), cap if not past else s.clip_min, over=past):
+                done += 1
 
     while total < s.target_duration - 0.05:
         best_fid, best_val, best_eff = None, -np.inf, None

@@ -59,7 +59,7 @@ class LayerPanel(QScrollArea):
         self.project = project
         self.clip: Optional[OverlayClip] = None
         self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)    # dragged narrower than it: scroll sideways
         body = QWidget()
         self.setWidget(body)
         lay = QVBoxLayout(body)

@@ -6,6 +6,22 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-16
+
+### Changed
+- Auto edit: the target length shows minutes (and hours) once it passes two minutes, e.g. "12 min 30 s"; you can
+  type "12:30", "12 min", "1h 5m" or plain seconds.
+- Auto edit: on a screen wide enough (1360 px or more) the window opens in two columns, so it needs no scrolling.
+- *Use every footage at least once*: about 90% of the usable files now get in, not a minority of them. Clips
+  are shortened to share the target length between files, and the edit may run a little past the target to
+  fit more of them in.
+
+### Fixed
+- Media panel in thumbnail view: widening the panel made thumbnails smaller, with the same number per row.
+  They now grow with the panel, keeping the same margins.
+- The refine panel could not be made narrower than its widest tab, too wide on a Full HD screen. It can now be
+  narrowed to 300 px (wide tabs scroll sideways), and its width is remembered.
+
 ## [0.6.2] - 2026-10-16
 
 ### Fixed

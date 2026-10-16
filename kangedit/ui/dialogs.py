@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
+from typing import Optional
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
@@ -36,6 +38,71 @@ def _combo(items: dict, current) -> QComboBox:
     return cb
 
 
+TWO_COLUMNS_WIDTH = 1360    # screen width (px) from which the Auto Edit options sit in two columns
+
+
+class DurationSpinBox(QDoubleSpinBox):
+    """Seconds, shown as minutes from two minutes on ("12 min 30 s"); typing "12:30", "12 min", "750" or
+    "750 s" all work."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(0)
+        self.setSingleStep(5)
+        self.setAccelerated(True)
+
+    def textFromValue(self, value: float) -> str:
+        v = int(round(value))
+        if v < 120:
+            return f"{v} s"
+        m, sec = divmod(v, 60)
+        if m >= 60:
+            h, m = divmod(m, 60)
+            return f"{h} h {m} min" + (f" {sec} s" if sec else "")
+        return f"{m} min" + (f" {sec} s" if sec else "")
+
+    def valueFromText(self, text: str) -> float:
+        v = parse_duration(text)
+        return self.value() if v is None else v
+
+    def validate(self, text: str, pos: int):
+        from PySide6.QtGui import QValidator
+        if parse_duration(text) is not None:
+            return QValidator.Acceptable, text, pos
+        return QValidator.Intermediate, text, pos
+
+    def stepBy(self, steps: int):
+        # bigger steps once the length is in minutes
+        v = self.value()
+        step = 5 if v < 120 else 30 if v < 1200 else 60
+        self.setValue(v + steps * step)
+
+
+def parse_duration(text: str) -> Optional[float]:
+    """Seconds from "750", "750 s", "12:30", "1:02:30", "12 min", "12 min 30 s", "1 h 5 min" (None if not)."""
+    t = text.strip().lower().replace(",", ".")
+    if not t:
+        return None
+    if ":" in t:
+        try:
+            parts = [float(x) for x in t.split(":")]
+        except ValueError:
+            return None
+        total = 0.0
+        for x in parts:
+            total = total * 60 + x
+        return total
+    m = re.fullmatch(r"(?:(\d+(?:\.\d+)?)\s*h(?:ours?)?)?\s*(?:(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?)?\s*"
+                     r"(?:(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?)?", t)
+    if m and any(m.groups()):
+        h, mi, sec = (float(g) if g else 0.0 for g in m.groups())
+        return h * 3600 + mi * 60 + sec
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
 class AutoEditDialog(QDialog):
     def __init__(self, project: Project, selected_ids: list[str], last: AutoEditSettings, parent=None):
         super().__init__(parent)
@@ -45,8 +112,17 @@ class AutoEditDialog(QDialog):
         # The options scroll when the dialog is taller than the screen (the buttons stay in view).
         outer = QVBoxLayout(self)
         body = QWidget()
-        lay = QVBoxLayout(body)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # Two columns where the screen is wide enough (full HD and up), else one column that scrolls.
+        screen = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        self.two_columns = screen.width() >= TWO_COLUMNS_WIDTH
+        cols = QHBoxLayout(body)
+        cols.setContentsMargins(0, 0, 0, 0)
+        lay = QVBoxLayout()
+        lay2 = QVBoxLayout() if self.two_columns else lay
+        cols.addLayout(lay, 1)
+        if self.two_columns:
+            cols.addSpacing(10)
+            cols.addLayout(lay2, 1)
         self._scroll = QScrollArea()
         self._scroll.setWidget(body)
         self._scroll.setWidgetResizable(True)
@@ -79,7 +155,7 @@ class AutoEditDialog(QDialog):
         # --- Timing
         g = QGroupBox("Timing")
         f = QFormLayout(g)
-        self.sp_target = QDoubleSpinBox(decimals=0, suffix=" s")
+        self.sp_target = DurationSpinBox()
         self.sp_target.setRange(5, 6 * 3600)
         self.sp_min = QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" s")
         self.sp_min.setRange(0.5, 60)
@@ -181,7 +257,7 @@ class AutoEditDialog(QDialog):
         f.addRow("Pacing", self.cb_pacing)
         for w in (self.chk_pauses, self.chk_beats, self.chk_fillers, self.chk_variety, self.chk_loud):
             f.addRow(w)
-        lay.addWidget(g)
+        lay2.addWidget(g)
 
         # --- Footage
         g = QGroupBox("Footage to use")
@@ -200,8 +276,11 @@ class AutoEditDialog(QDialog):
         self.list.itemChanged.connect(lambda _: self._suggest_target())
         v.addWidget(self.list)
         self.grp_footage = g
-        lay.addWidget(g)
-        lay.addWidget(self._multicam_box(project))
+        lay2.addWidget(g)
+        lay2.addWidget(self._multicam_box(project))
+        lay.addStretch(1)
+        if self.two_columns:
+            lay2.addStretch(1)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Create edit")

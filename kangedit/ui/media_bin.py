@@ -14,7 +14,7 @@ import os
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QListView, QListWidget,
                                QListWidgetItem, QMenu, QPushButton, QStackedWidget, QToolButton, QTreeWidget,
@@ -158,6 +158,8 @@ class MediaBin(QWidget):
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._menu)
         self.grid.itemDoubleClicked.connect(lambda *_: self.action.emit("append_best", self.selected_ids()))
+        self._icons_timer = QTimer(self, singleShot=True, interval=120)
+        self._icons_timer.timeout.connect(self._refresh_grid_icons)
         self.grid.resized.connect(self._apply_thumb_size)
         self.grid.hover.connect(self._scrub)
         self.grid.setDragEnabled(True)
@@ -237,6 +239,7 @@ class MediaBin(QWidget):
         if g.iconSize() != QSize(w, h):
             g.setIconSize(QSize(w, h))
             g.setGridSize(QSize(cell, h + 2 * g.spacing() + 4))
+            self._icons_timer.start()          # redraw the thumbnails at the new size once resizing settles
 
     def _thumb(self, fid: str, index=None) -> Optional[QPixmap]:
         """The footage's thumbnail (index None: the middle one), without the used badge."""
@@ -263,11 +266,21 @@ class MediaBin(QWidget):
         self._set_grid_icon(item, min(len(a.thumbs) - 1, max(0, int(x * len(a.thumbs)))))
 
     def _set_grid_icon(self, item, index):
-        """index None: the clip's representative (middle) thumbnail."""
+        """index None: the clip's representative (middle) thumbnail. Scaled to the grid's icon size: Qt never
+        enlarges an icon past its own pixels, so a small thumbnail would stay small in a wide cell."""
         fid = item.data(Qt.UserRole)
         pm = self._thumb(fid, index)
-        used = self._usage.get(fid, 0)
-        item.setIcon(QIcon(_badge(pm if pm is not None else self._placeholder(), used)))
+        pm = pm if pm is not None else self._placeholder()
+        size = self.grid.iconSize()
+        if pm.width() != size.width() and size.width() > 0:
+            pm = pm.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        item.setIcon(QIcon(_badge(pm, self._usage.get(fid, 0))))
+
+    def _refresh_grid_icons(self):
+        for i in range(self.grid.count()):
+            it = self.grid.item(i)
+            if it is not self._scrubbing:
+                self._set_grid_icon(it, None)
 
     def _placeholder(self) -> QPixmap:
         pm = QPixmap(128, 72)

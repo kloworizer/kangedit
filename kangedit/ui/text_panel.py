@@ -34,7 +34,7 @@ class TextPanel(QScrollArea):
         self.text: Optional[TextClip] = None
         self.playhead: Callable[[], float] = lambda: 0.0   # timeline time (set by the main window)
         self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # fit the panel's width, never cut off
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)    # dragged narrower than it: scroll sideways
         body = QWidget()
         self.setWidget(body)
         lay = QVBoxLayout(body)

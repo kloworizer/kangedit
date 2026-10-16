@@ -160,7 +160,7 @@ class Inspector(QScrollArea):
         self.layer_selection: Callable[[], list[str]] = list   # and of the selected clips on the video layers
         self.layer_others: list = []                  # those (but the shown one): color, speed, volume apply
         self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # fit the panel's width, never cut off
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)    # dragged narrower than it: scroll sideways
         body = QWidget()
         self.setWidget(body)
         lay = QVBoxLayout(body)

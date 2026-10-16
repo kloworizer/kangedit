@@ -66,6 +66,7 @@ from .viewer import ADJUST_MODES, Viewer
 
 log = logging.getLogger(__name__)
 
+REFINE_MIN_WIDTH = 300     # the Refine panel can be dragged this narrow (its tabs then scroll sideways)
 FACE_SAMPLES = 9           # frames of a clip searched for its main face (Zoom to face)
 PROJECT_FILTER = f"{APP_NAME} project (*{Project.FILE_EXT})"
 
@@ -85,7 +86,9 @@ class RefineTabs(QTabWidget):
             page.setWidget(panel)
             page.setWidgetResizable(True)
             page.setFrameShape(QFrame.NoFrame)
-            page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Narrower than a tab's content (the panel dragged small), the tab scrolls sideways instead of
+        # holding the panel wide.
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._pages[panel] = page
         self.addTab(page, label)
 
@@ -169,13 +172,16 @@ class MainWindow(QMainWindow):
         d_right.setWidget(tabs)
         d_right.setFeatures(QDockWidget.NoDockWidgetFeatures)
         self.addDockWidget(Qt.RightDockWidgetArea, d_right)
-        # Wide enough for the widest tab (plus its scroll bar): nothing on the right gets cut off.
+        # It starts wide enough for the widest tab (plus its scroll bar), and can be dragged narrower (to
+        # REFINE_MIN_WIDTH): the tabs then scroll sideways. The width chosen is remembered.
         need = max(p.minimumSizeHint().width() for p in (self.inspector.widget(), self.text_panel.widget(),
                                                           self.layer_panel.widget(), self.caps_panel,
                                                           self.sfx_panel)) + 24
-        d_right.setMinimumWidth(need)
+        d_right.setMinimumWidth(REFINE_MIN_WIDTH)
         self._right_width = max(370, need)
-        self.resizeDocks([d_bin, d_right], [430, self._right_width], Qt.Horizontal)
+        saved = self.qs.value("refine_width", 0, type=int)
+        self.resizeDocks([d_bin, d_right], [430, saved if saved >= REFINE_MIN_WIDTH else self._right_width],
+                         Qt.Horizontal)
         self.d_bin, self.d_right = d_bin, d_right
 
         self._build_actions()
@@ -731,6 +737,7 @@ class MainWindow(QMainWindow):
 
     def reset_layout(self):
         """Panels, the viewer / timeline split, lane heights, tabs and list view back to how they start."""
+        self.qs.remove("refine_width")
         from .timeline import DEFAULT_HEIGHTS
         if self.viewer.is_fullscreen():
             self.viewer.toggle_fullscreen()
@@ -3775,6 +3782,8 @@ class MainWindow(QMainWindow):
         if self.viewer.is_fullscreen():
             self.viewer.toggle_fullscreen()
         autosave.clear_recovery()
+        if self.d_right.isVisible():
+            self.qs.setValue("refine_width", self.d_right.width())
         self.viewer.stop()
         self.tasks.shutdown()
         self._audio_cancel.set()
