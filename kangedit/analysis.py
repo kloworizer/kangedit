@@ -7,6 +7,7 @@ lanes plus one GPU lane (hardware decoding on NVIDIA, AMD or Intel) when one is 
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
@@ -23,6 +24,8 @@ from .faces import detect as face_detect
 from .config import cache_dir, file_key
 from .ffmpeg import HW_OUTPUT_FORMAT, Cancelled, ProgressCb, ffmpeg_bin, ffmpeg_matrix, hw_decoder, popen
 from .models import Footage
+
+log = logging.getLogger("kangedit.analysis")
 
 SAMPLE_RATE = 4.0       # analysis samples per second
 THUMB_EVERY = 4         # keep one thumbnail per second
@@ -41,6 +44,25 @@ _HW_FORMATS = {"yuv420p": "nv12", "yuvj420p": "nv12", "nv12": "nv12", "yuv420p10
 _ROTATE = {90: ",transpose=cclock", 180: ",hflip,vflip", 270: ",transpose=clock"}
 
 _hw_failed: set[tuple[str, str]] = set()   # (codec, pix_fmt) the GPU could not decode this session
+_hw_misses: dict[tuple[str, str], int] = {}   # files of a format that failed on the GPU (none of them worked)
+_hw_worked: set[tuple[str, str]] = set()     # formats that decoded on the GPU this session
+HW_GIVE_UP = 3          # failed files (and no success) before a format stops being tried on the GPU
+
+
+def _gpu_failed(j) -> None:
+    """A file failed to decode on the GPU: it goes to the CPU, and its format too after a few such files (one
+    damaged file doesn't take the GPU away from all the others)."""
+    key = (j.footage.codec, j.footage.pix_fmt)
+    j.hw_format = None
+    _hw_misses[key] = _hw_misses.get(key, 0) + 1
+    log.info("analysis: GPU decoding failed for %s (%s %s)", j.footage.path, *key)
+    if key not in _hw_worked and _hw_misses[key] >= HW_GIVE_UP:
+        _hw_failed.add(key)
+        log.info("analysis: %s %s is decoded on the CPU from now on", *key)
+
+
+def _gpu_worked(j) -> None:
+    _hw_worked.add((j.footage.codec, j.footage.pix_fmt))
 
 
 @dataclass
@@ -614,7 +636,16 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
     state = {"done": 0, "finished": 0, "cpu_busy": 0}
     results: dict[str, Analysis] = {}
     audio_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis-audio")
-    lanes_label = f"{n_gpu} GPU + {cpu_lanes} CPU" if hw else f"{cpu_lanes} CPU"
+    on_gpu = sum(1 for j in jobs if j.gpu_ok())
+    if not hw:
+        lanes_label = f"{cpu_lanes} CPU"
+    elif on_gpu == 0:       # e.g. 4:2:2 or 4:4:4 footage: no graphics card decodes it, every lane uses the CPU
+        lanes_label = f"{lanes} CPU, the GPU can't decode this footage"
+    elif on_gpu < len(jobs):
+        lanes_label = f"{n_gpu} GPU + {cpu_lanes} CPU, {len(jobs) - on_gpu} file(s) on the CPU only"
+    else:
+        lanes_label = f"{n_gpu} GPU + {cpu_lanes} CPU"
+    log.info("analysis: %d file(s), %d GPU-decodable, %s", len(jobs), on_gpu, lanes_label)
 
     def label() -> str:
         if len(jobs) == 1:
@@ -628,20 +659,23 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
         if progress and done % 8 == 0:
             progress(min(0.99, done / total), label())
 
-    def take(gpu_lane: bool) -> Optional[tuple[_Unit, int]]:
+    def take(gpu_lane: bool) -> Optional[tuple[_Unit, bool, int]]:
+        """The next segment for a lane: (unit, decode it on the GPU, CPU decoding threads). A GPU lane takes what
+        the GPU can decode first, a CPU lane what it can't; then either takes anything left, so no lane sits idle
+        while work waits (footage the GPU can't decode, such as 4:2:2, keeps every lane busy on the CPU)."""
         with lock:
-            for k, u in enumerate(pending):
-                if gpu_lane and not u.job.gpu_ok():
-                    continue
-                pending.pop(k)
-                threads = 0
-                if not gpu_lane:
-                    state["cpu_busy"] += 1
-                    threads = max(2, cores // max(1, min(cpu_lanes, state["cpu_busy"] + len(pending))))
-                if u.job.audio is None and u.job.footage.has_audio:
-                    u.job.audio = audio_pool.submit(_read_audio, u.job.src, cancel)
-                return u, threads
-            return None
+            if not pending:
+                return None
+            k = next((k for k, u in enumerate(pending) if u.job.gpu_ok() == gpu_lane), 0) if n_gpu else 0
+            u = pending.pop(k)
+            on_gpu = gpu_lane and u.job.gpu_ok()
+            threads = 0
+            if not on_gpu:
+                state["cpu_busy"] += 1
+                threads = max(2, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
+            if u.job.audio is None and u.job.footage.has_audio:
+                u.job.audio = audio_pool.submit(_read_audio, u.job.src, cancel)
+            return u, on_gpu, threads
 
     def fail(j: _Job, msg: str):
         with lock:
@@ -657,15 +691,20 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
             got = take(gpu_lane)
             if got is None:
                 return
-            u, threads = got
+            u, on_gpu, threads = got
             j = u.job
             try:
                 data = None
-                if gpu_lane and j.gpu_ok():
+                if on_gpu:
                     data = _scan(u, hw, 0, cancel, tick)
-                    if data is None:   # unsupported by this GPU: decode on the CPU from now on
-                        _hw_failed.add((j.footage.codec, j.footage.pix_fmt))
-                        j.hw_format = None
+                    if data is None:   # this file won't decode on the GPU: the CPU decodes it
+                        _gpu_failed(j)
+                        with lock:
+                            state["cpu_busy"] += 1
+                            on_gpu = False
+                            threads = max(2, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
+                    else:
+                        _gpu_worked(j)
                 if data is None:
                     data = _scan(u, None, threads, cancel, tick)
                 if j.put(u.index, data) and not j.failed:
@@ -688,7 +727,7 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
                 traceback.print_exc()
                 fail(j, str(e))
             finally:
-                if not gpu_lane:
+                if not on_gpu:
                     with lock:
                         state["cpu_busy"] -= 1
 

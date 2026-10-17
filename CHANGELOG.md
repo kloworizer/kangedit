@@ -6,6 +6,19 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-10-17
+
+### Fixed
+- The full analysis left much of the computer idle. Its GPU lanes only took footage the graphics card can
+  decode and stopped when none was left, so with footage it can't (10-bit 4:2:2 from many cameras' log and
+  high-quality modes, or 4:4:4) only the CPU lanes worked: 3 of 5 on a 12-thread CPU. Every lane now takes
+  whatever is waiting (GPU lanes the footage the GPU decodes first, CPU lanes the rest first), and the status
+  says when the GPU can't decode the footage.
+- One file that failed to decode on the GPU sent every file of its format to the CPU for the rest of the
+  session; now only that file is, and the format only after several files fail with none working.
+- Adding the smarter analysis to analyses from an older version ran one file at a time; it now runs several
+  at once.
+
 ## [0.6.7] - 2026-10-17
 
 ### Fixed

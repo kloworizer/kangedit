@@ -1282,26 +1282,17 @@ class MainWindow(QMainWindow):
             if not batch:
                 break
             failed: list[str] = []
-            # Files with a full analysis only need the smarter analysis added (no decoding): those first.
-            rest = []
-            for k, f in enumerate(batch):
-                if cancel.is_set():
-                    return
+            # Files with a full analysis only need the smarter analysis added (no decoding): those first, several
+            # at once (each model run uses two threads).
+            rest, upgrade = [], []
+            for f in batch:
                 a = self.analyses.get(f.id)
                 if a is None or a.quick:
                     rest.append(f)
-                    continue
-                if not needs_smart(f, a):
-                    continue
-                self.refine_status.emit(f"Smarter analysis in the background: {k + 1}/{len(batch)} {f.name}")
-                try:
-                    if make_smart(f, a, cancel):
-                        a.save(f.analysis_path or analysis_path_for(f))
-                        self.analysis_ready.emit(f.id, a)
-                except Cancelled:
-                    return
-                except Exception:  # noqa: BLE001 - the plain analysis still works
-                    traceback.print_exc()
+                elif needs_smart(f, a):
+                    upgrade.append((f, a))
+            if upgrade and not self._upgrade_smart(upgrade, cancel):
+                return
             batch = rest
             if not batch:
                 continue
@@ -1318,6 +1309,33 @@ class MainWindow(QMainWindow):
                 self.refine_status.emit("Full analysis failed for: " + "; ".join(failed)[:300])
         if not cancel.is_set():
             self.refine_status.emit("Full analysis done")
+
+    def _upgrade_smart(self, items: list, cancel: threading.Event) -> bool:
+        """Add the smarter analysis to full analyses made without it, in parallel. False when cancelled."""
+        done = [0]
+        lock = threading.Lock()
+
+        def one(item):
+            f, a = item
+            if cancel.is_set():
+                return
+            try:
+                if make_smart(f, a, cancel):
+                    a.save(f.analysis_path or analysis_path_for(f))
+                    self.analysis_ready.emit(f.id, a)
+            except Cancelled:
+                return
+            except Exception:  # noqa: BLE001 - the plain analysis still works
+                traceback.print_exc()
+            with lock:
+                done[0] += 1
+                n = done[0]
+            self.refine_status.emit(f"Smarter analysis in the background: {n}/{len(items)} {f.name}")
+
+        workers = max(1, min(len(items), (os.cpu_count() or 4) // 2))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="smart-upgrade") as pool:
+            list(pool.map(one, items))
+        return not cancel.is_set()
 
     def _stop_refining(self):
         with self._refine_lock:
