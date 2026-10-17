@@ -33,6 +33,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-latest, macos-14]
         python: ["3.10", "3.12"]
+    timeout-minutes: 30         # a hung test fails the job (with its stacks) instead of running for hours
     runs-on: ${{ matrix.os }}
     env:
       QT_QPA_PLATFORM: offscreen

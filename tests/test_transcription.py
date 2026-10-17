@@ -47,7 +47,7 @@ def test_files_transcribed_in_one_task(qapp, monkeypatch):
         loads, seen, said = [], [], []
         monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None: loads.append(name))
 
-        def fake_transcribe(f, model, lang, progress, cancel):
+        def fake_transcribe(f, model, lang, progress, cancel, use_cache=True):
             seen.append(f.name)
             progress(0.5, f"Transcribing {f.name}")
             if f.name == "clip1.mp4":
@@ -86,7 +86,7 @@ def test_cancelled_batch_keeps_the_finished_files(qapp, monkeypatch):
         p.dirty = False
         monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None: None)
 
-        def fake_transcribe(f, model, lang, progress, cancel):
+        def fake_transcribe(f, model, lang, progress, cancel, use_cache=True):
             if f.name == "c1.mp4":
                 raise Cancelled()                           # the user pressed Cancel during the second file
             return [{"s": 0.0, "e": 0.5, "w": "hi"}]

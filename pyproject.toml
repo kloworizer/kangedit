@@ -5,6 +5,7 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
+faulthandler_timeout = 300   # a test running this long dumps every thread's stack (a hang shows where it is)
 
 [tool.ruff]
 line-length = 120

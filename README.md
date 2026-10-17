@@ -31,7 +31,9 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 | | |
 |---|---|
-| **Best moments** | Each clip is analyzed at 4 fps for sharpness, motion and shake, exposure, colorfulness, faces, audio loudness and scene cuts. Candidate windows are scored and picked greedily. Analysis runs on several CPU lanes plus the GPU video decoder (NVIDIA, AMD or Intel). |
+| **Best moments** | Each clip is analyzed at 4 fps for sharpness, motion and shake, exposure, colorfulness, faces, audio loudness and scene cuts. Candidate windows are scored and picked greedily. Analysis runs on several CPU lanes plus the GPU video decoder (NVIDIA, AMD or Intel; two GPU lanes on CPUs with 8 threads or more). |
+| **Quick first look** | New footage is first looked at from its keyframes only, all files at once, many times faster than the full analysis: thumbnails, scrubbing, bins and even an auto edit work at once. The full analysis then runs in the background and replaces each quick look as it finishes (an auto edit made meanwhile says how many files it took from a quick look; regenerate it afterwards for the best edit). |
+| **Smarter analysis** | *Tools → Smarter analysis (AI)* (on by default): two small neural networks run offline on the CPU. **MobileNetV2** describes what each second of a shot shows, so the same view filmed again, a little to the side, zoomed or darker, is recognised even across files (a phone and a camera filming the same thing), where the plain method can't tell it from a different view. **YAMNet** hears speech, laughter, cheering and applause, crowds, music, wind, nature and vehicles: moments people enjoyed score higher (more so for the hook), wind on the microphone lower, and scenic shots are found by "nobody speaking" rather than by loudness (loud waves are a view). Turn it off on a slow computer for the lighter analysis; turning it on adds it to existing analyses without decoding the video again. |
 | **Short / Long format** | *Short-form*: 9:16, about 30 s, 1.2–3 s cuts, strongest moment first as the hook. *Long-form*: 16:9, 4–10 s shots in story order. Its default length follows the footage, at about a quarter of it, between 1 and 20 minutes. *Custom*: set everything yourself. |
 | **Story order** | Clips are ordered by recording time, then by file name (C0002 before C0013). The recording time is the oldest date the file carries (its creation time tag, its file creation date, its modification date or a date in its file name such as `VID_20260501_091005`), as copying renews the creation date and an unset camera clock gives a wrong tag. The same date decides where the opening and closing are looked for and how *Bins by date* sorts. |
 | **Scenes** | Footage recorded close together is one scene: a gap of more than 30 minutes between recordings (another day) or, when the files carry a location (phones, action cameras, drones), more than 1 km between them (another place) starts a new one. In a long-form edit each scene after the first opens with a scenic / travel shot from that scene (a view with nobody's face in it and no one talking, sharp, colourful, steady or gently panning), taken first from the **B-roll bin** (right-click media → *Add to B-roll bin*), and its natural sound fades in over the end of the scene before. *Transitions between scenes* play between these scenes. |
@@ -81,7 +83,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 
 | | |
 |---|---|
-| **Automatic captions** | Offline speech recognition with faster-whisper. The default `large-v3` model is the most accurate; `large-v3-turbo` is almost as accurate and much faster. Captions follow every trim and reorder, and manual fixes are kept. |
+| **Automatic captions** | Offline speech recognition with faster-whisper. The default model, **Auto**, is `large-v3` (the most accurate) on an NVIDIA GPU and `large-v3-turbo` (almost as accurate, several times faster) on the CPU, which is where it runs on AMD and Intel graphics. On the CPU it uses one thread per physical core and decodes several stretches of speech at once. Each word's start and end are then set on the sound (Whisper's own times are often 0.1-0.3 s off), so cuts between words, on whole sentences and around fillers land in the pauses. Footage with no speech (views, B-roll) is skipped in seconds. Transcripts are kept in the cache by file, so the same footage in another project is never transcribed again. Captions follow every trim and reorder, and manual fixes are kept. |
 | **Word animations** | Karaoke highlight, highlight box, pop, reveal, or one word at a time, timed to the speech. They look the same in the viewer and in the burned-in export. |
 | **Automatic placement** | Size and position follow the frame ratio and format. 9:16: lower middle, clear of the app buttons. 1:1 / 4:5: lower third. 16:9: subtitles at the bottom. |
 | **Output** | Burn in, save as `.srt`, or both. |
@@ -409,7 +411,8 @@ Earlier versions kept the cache in the user data folder. On the first start afte
 | Choppy playback on a slow computer | Set the viewer to *Color: off while playing* (Ctrl+Shift+B toggles color), and turn on proxies (toolbar → *Use proxies*), then **Generate proxies**. |
 | Proxies aren't faster with the GPU | Older cards (e.g. AMD RX 400/500) decode 4K H.265 no faster than a many-core CPU, and can't decode high-bitrate files at all (KangEdit then uses the CPU). Untick *Use the graphics card* in the Proxies dialog. |
 | Export uses the CPU | Your GPU has no H.264/H.265 encoder, its driver is too old, or ProRes is selected. Untick *Encode on the graphics card* to force the CPU. |
-| Captions are slow | Choose `large-v3-turbo` (or `small`) under *Captions → Style…*. |
+| Captions are slow | Choose *Auto* or `large-v3-turbo` (or `small`) under *Captions → Style…*: without an NVIDIA GPU, `large-v3` runs on the CPU and is several times slower. |
+| Analysis is slow on an older computer | Turn off *Tools → Smarter analysis (AI)*. |
 | Sound search fails | MyInstants is unreachable from your network. Import audio files instead. |
 | Reporting a problem | *Help → Copy system info* copies your app version, system, library versions, graphics card support and folders. Paste it into your report, along with the log file it names. |
 
@@ -465,7 +468,8 @@ kangedit/
   config.py             paths (app folder, cache, user data), constants, open_path()
   ffmpeg.py             FFmpeg discovery, probing, progress runner, GPU encoder/decoder detection
   ffmpeg_setup.py       FFmpeg download and unpacking (standard library only)
-  analysis.py           per-footage signal extraction (OpenCV + FFmpeg, parallel CPU/GPU decode)
+  analysis.py           per-footage signal extraction (OpenCV + FFmpeg, parallel CPU/GPU decode), quick first look
+  smart.py              smarter analysis: MobileNetV2 (what shots show) and YAMNet (what is heard), ONNX on the CPU
   autoedit.py           scoring, best-moment selection, presets, transition / J-L placement
   scenes.py             recording dates, scenes (time groups) and their scenic openers
   polish.py             finishing an edit: cuts between words / on the beat, pacing, fillers, shot sizes, loudness

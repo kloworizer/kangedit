@@ -8,6 +8,7 @@ words, so manual fixes survive later edits too.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections import OrderedDict
@@ -21,6 +22,7 @@ from .ffmpeg import Cancelled, ProgressCb, ffmpeg_bin, run
 from .models import CaptionStyle, Footage, Project
 
 WHISPER_MODELS = {
+    "auto": "Auto — large-v3 on an NVIDIA GPU, large-v3-turbo otherwise (several times faster on the CPU)",
     "large-v3": "large-v3 — most accurate (slowest)",
     "large-v3-turbo": "large-v3-turbo — nearly as accurate, much faster",
     "medium": "medium",
@@ -58,16 +60,48 @@ MAX_MODELS = 2           # the captions model and the small one used to listen f
 
 def model_ready(name: str) -> bool:
     """Whether the speech model is loaded already (using it starts at once)."""
-    return name in _models
+    return resolve_model(name) in _models
 
 
 _loading: dict[str, threading.Event] = {}
+
+
+_cuda: Optional[bool] = None
+
+
+def _device() -> str:
+    """"cuda" with an NVIDIA GPU CTranslate2 can use (the speech recognition runs there), else "cpu"."""
+    global _cuda
+    if _cuda is None:
+        try:
+            import ctranslate2
+            _cuda = ctranslate2.get_cuda_device_count() > 0
+        except Exception:  # noqa: BLE001
+            _cuda = False
+    return "cuda" if _cuda else "cpu"
+
+
+def resolve_model(name: str) -> str:
+    """The speech model to use for a setting: "auto" is large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU
+    (CTranslate2 has no AMD or Intel GPU support: there, turbo's 4 decoder layers instead of 32 make it several
+    times faster at nearly the same accuracy)."""
+    if name in ("", "auto"):
+        return "large-v3" if _device() == "cuda" else "large-v3-turbo"
+    return name
+
+
+def cpu_threads() -> int:
+    """Threads for speech recognition on the CPU: one per physical core (a 6-core / 12-thread Ryzen: 6), as
+    hyper-threads only slow its matrix work down."""
+    n = os.cpu_count() or 4
+    return max(1, n // 2 if n >= 8 else n)
 
 
 def _get_model(name: str):
     """The speech model, loaded (and on first use downloaded) once: it stays loaded for every later file, next
     to one other model (the auto edit's quick listening model doesn't push out the captions one). The loading
     itself runs outside the lock, so a slow download of one model doesn't hold up another."""
+    name = resolve_model(name)
     while True:
         with _model_lock:
             if name in _models:
@@ -80,14 +114,9 @@ def _get_model(name: str):
         busy.wait()                       # someone else is loading it: use theirs (or try again if it failed)
     try:
         from faster_whisper import WhisperModel
-        device, compute = "cpu", "int8"
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                device, compute = "cuda", "float16"
-        except Exception:
-            pass
-        model = WhisperModel(name, device=device, compute_type=compute)
+        device = _device()
+        model = WhisperModel(name, device=device, compute_type="float16" if device == "cuda" else "int8",
+                             cpu_threads=0 if device == "cuda" else cpu_threads())
         with _model_lock:
             _models[name] = model
             while len(_models) > MAX_MODELS:
@@ -97,6 +126,17 @@ def _get_model(name: str):
         with _model_lock:
             _loading.pop(name, None)
         busy.set()
+
+
+_batch_pipes: dict[int, object] = {}
+
+
+def _batched(model):
+    pipe = _batch_pipes.get(id(model))
+    if pipe is None:
+        from faster_whisper import BatchedInferencePipeline
+        pipe = _batch_pipes[id(model)] = BatchedInferencePipeline(model)
+    return pipe
 
 
 def load_model(name: str, progress: Optional[ProgressCb] = None) -> None:
@@ -124,8 +164,7 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
     beam search with temperature fallback, voice-activity filtering, and hallucination guards.
     quick decodes greedily without fallback, enough to spot a phrase."""
     model = _get_model(model_name)
-    segments, info = model.transcribe(
-        audio,
+    opts = dict(
         language=language or None,
         word_timestamps=True,
         vad_filter=True,
@@ -139,6 +178,16 @@ def transcribe_audio(audio: np.ndarray, model_name: str, language: str = "",
         condition_on_previous_text=False,       # no runaway repetition from earlier mistakes
         hallucination_silence_threshold=2.0,    # drop invented text over long silences
     )
+    segments = info = None
+    if not quick:
+        # Batched: the stretches of speech are decoded several at a time, much faster on a GPU and still
+        # quicker on a multi-core CPU. The plain decoder is the fallback.
+        try:
+            segments, info = _batched(model).transcribe(audio, batch_size=16 if _device() == "cuda" else 8, **opts)
+        except Exception:  # noqa: BLE001
+            segments = None
+    if segments is None:
+        segments, info = model.transcribe(audio, **opts)
     words: list[dict] = []
     dur = info.duration or 1.0
     for seg in segments:
@@ -197,21 +246,117 @@ def listen(footage: Footage, start: float, duration: float, model_name: str = "s
     return out.get("words", [])
 
 
-def transcribe(footage: Footage, model_name: str = "large-v3", language: str = "",
-               progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None) -> list[dict]:
+MIN_SPEECH = 0.8         # seconds of speech below which a file isn't worth transcribing (views, B-roll)
+TRANSCRIPT_VERSION = 1
+
+
+def speech_seconds(audio: np.ndarray) -> float:
+    """How much speech 16 kHz audio holds (Silero voice activity detection, as Whisper's own filter uses)."""
+    try:
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        spans = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=100))
+    except Exception:  # noqa: BLE001 - can't tell: transcribe it
+        return float("inf")
+    return sum(sp["end"] - sp["start"] for sp in spans) / 16000.0
+
+
+def refine_word_times(words: list[dict], audio: np.ndarray, offset: float = 0.0, rate: int = 16000) -> list[dict]:
+    """Words with their start and end moved onto the sound: Whisper's word times are often 0.1-0.3 s early or
+    late, and cuts between words, on whole sentences and around fillers land where these say. A start moves to
+    where the voice rises out of a pause from 0.15 s before to 0.3 s after it; an end to where it falls silent
+    from 0.3 s before to 0.25 s after. A word whose edge has no clear pause next to it (wind, music,
+    words run together) keeps its time; no word crosses its neighbours."""
+    if not words or audio.size < rate // 10:
+        return words
+    hop = rate // 100                                         # 10 ms frames
+    n = audio.size // hop
+    rms = np.sqrt(np.mean(audio[: n * hop].reshape(n, hop).astype(np.float32) ** 2, axis=1) + 1e-10)
+    db = 20 * np.log10(rms)
+    floor = float(np.percentile(db, 10))
+    on = max(floor + 10.0, -50.0)                              # voice: this far above the quietest tenth
+    loud = db >= on
+    fr = lambda t: int(round((t - offset) * 100))  # noqa: E731
+    out = [dict(w) for w in words]
+    for i, w in enumerate(out):
+        lo_lim = out[i - 1]["e"] + 0.01 if i else offset
+        hi_lim = words[i + 1]["s"] - 0.01 if i + 1 < len(words) else offset + n / 100
+        a, b = fr(w["s"] - 0.15), fr(min(w["s"] + 0.30, w["e"] - 0.05))
+        if 0 <= a < b < n and not loud[a] and loud[a:b + 1].any():
+            s_new = offset + (a + int(np.argmax(loud[a:b + 1]))) / 100 - 0.02
+            w["s"] = round(max(lo_lim, s_new), 3)
+        a, b = fr(max(w["e"] - 0.30, w["s"] + 0.05)), fr(w["e"] + 0.25)
+        if 0 <= a < b < n and not loud[b] and loud[a:b + 1].any():
+            last = a + int(np.flatnonzero(loud[a:b + 1])[-1])
+            w["e"] = round(min(hi_lim, offset + (last + 1) / 100 + 0.03), 3)
+        if w["e"] - w["s"] < 0.05:                            # something went wrong: keep Whisper's
+            w["s"], w["e"] = words[i]["s"], words[i]["e"]
+    return out
+
+
+def transcript_path(footage: Footage, model_name: str, language: str) -> str:
+    """Where a file's transcript is kept for every project (by the file, the model and the language)."""
+    from .config import cache_dir, file_key
+    return str(cache_dir("transcripts") / f"{file_key(footage.path)}_{resolve_model(model_name)}_"
+                                          f"{language or 'auto'}.json")
+
+
+def cached_transcript(footage: Footage, model_name: str, language: str,
+                      any_model: bool = False) -> Optional[tuple[list[dict], str]]:
+    """(words, language) of this file transcribed before (in any project), or None. `any_model`: another
+    model's transcript will do when there is none from this one (the most accurate first)."""
+    import json
+    paths = [transcript_path(footage, model_name, language)]
+    if any_model:
+        paths += [transcript_path(footage, m, language) for m in WHISPER_MODELS if m != "auto"]
+    for p in dict.fromkeys(paths):
+        try:
+            with open(p, encoding="utf-8") as fh:
+                d = json.load(fh)
+            if d.get("version") == TRANSCRIPT_VERSION:
+                return d["words"], d.get("language", language)
+        except (OSError, ValueError, KeyError):
+            continue
+    return None
+
+
+def save_transcript(footage: Footage, model_name: str, language: str, words: list[dict], lang: str) -> None:
+    import json
+    path = transcript_path(footage, model_name, language)
+    try:
+        tmp = path + ".part"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": TRANSCRIPT_VERSION, "language": lang, "words": words}, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass                          # the project keeps its transcript anyway
+
+
+def transcribe(footage: Footage, model_name: str = "auto", language: str = "",
+               progress: Optional[ProgressCb] = None, cancel: Optional[threading.Event] = None,
+               use_cache: bool = True) -> list[dict]:
+    """Transcribe a file (words with times in source seconds): from the transcript cache when it was
+    transcribed before (unless not `use_cache`), as nothing when it holds no speech (a view, B-roll), else
+    with Whisper, its word times then set on the sound (refine_word_times)."""
     if not footage.has_audio:
         footage.transcript = []
         return []
-    load_model(model_name, progress)
+    if use_cache:
+        hit = cached_transcript(footage, model_name, language)
+        if hit is not None:
+            footage.transcript, footage.transcript_lang = hit[0], hit[1]
+            return hit[0]
     if progress:
         progress(0.0, f"Reading the sound of {footage.name}…")
     audio = _load_audio_16k(footage.path)   # the original's audio: proxies may be re-encoded
-    if audio.size == 0:
-        footage.transcript = []
-        return []
-    words, lang = transcribe_audio(audio, model_name, language,
-                                   (lambda p: progress(p, f"Transcribing {footage.name}")) if progress else None,
-                                   cancel)
+    if audio.size == 0 or speech_seconds(audio) < MIN_SPEECH:
+        words, lang = [], language
+    else:
+        load_model(model_name, progress)
+        words, lang = transcribe_audio(audio, model_name, language,
+                                       (lambda p: progress(p, f"Transcribing {footage.name}")) if progress else None,
+                                       cancel)
+        words = refine_word_times(words, audio)
+    save_transcript(footage, model_name, language, words, lang)
     footage.transcript = words
     footage.transcript_lang = lang
     return words

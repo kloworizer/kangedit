@@ -6,6 +6,32 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-10-17
+
+### Added
+- **Quick first look**: new footage is first analysed from its keyframes only, every file at once, many times
+  faster than the full analysis, so it can be browsed and edited (auto edit included) at once. The full
+  analysis then runs in the background and replaces each quick look as it finishes; an auto edit made from
+  quick looks says so.
+- **Smarter analysis** (*Tools → Smarter analysis (AI)*, on by default; off for the lighter analysis on slow
+  computers): MobileNetV2 describes what each second shows, so the same view filmed again (moved, zoomed,
+  darker) is recognised, also across files, and an edit doesn't show it twice from two cameras; YAMNet hears
+  speech, laughter, cheering, applause, music, wind and more: moments people enjoyed score higher (most for
+  the hook), wind on the microphone lower, and scenic openers are found by nobody speaking rather than by
+  loudness. Both run offline on the CPU (models bundled, about 14 MB); existing analyses get it without
+  decoding the video again.
+- Transcripts are kept in the cache by file: the same footage in another project is never transcribed again
+  (*Transcribe again* still redoes it).
+
+### Changed
+- Captions' word times are set on the sound after transcribing (Whisper's are often 0.1-0.3 s off), so cuts
+  between words, on whole sentences and around fillers land in the pauses.
+- Footage without speech (views, B-roll) is skipped in seconds instead of going through the speech model.
+- New projects use the **Auto** speech model: `large-v3` on an NVIDIA GPU, `large-v3-turbo` on the CPU (AMD
+  and Intel graphics included), several times faster there at nearly the same accuracy. On the CPU the model
+  uses one thread per physical core and decodes several stretches of speech at once.
+- Analysis uses two GPU decode lanes on CPUs with 8 threads or more.
+
 ## [0.6.5] - 2026-10-17
 
 ### Fixed

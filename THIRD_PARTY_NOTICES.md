@@ -5,6 +5,21 @@ own license; the Commons Clause in `LICENSE` does not apply to them.
 
 ## Included in this repository
 
+### MobileNetV2 image model
+
+`kangedit/assets/mobilenetv2_embed.onnx`: MobileNetV2 trained on ImageNet, from the
+[ONNX Model Zoo](https://github.com/onnx/models/tree/main/validated/vision/classification/mobilenet)
+(`mobilenetv2-12.onnx`), cut before its classifier so it outputs the 1280 pooled features. Licensed under the
+Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+
+### YAMNet sound classification model
+
+`kangedit/assets/yamnet.onnx`: YAMNet (AudioSet sound classes) by Google, from
+[MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/audio/audio_classifier) (`yamnet.tflite`, from
+[TensorFlow Models](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet)), converted to
+ONNX with tf2onnx. Copyright Google LLC. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
 ### YuNet face detection model
 
 `kangedit/assets/face_detection_yunet_2023mar.onnx`, from [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet).

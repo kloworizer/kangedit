@@ -9,7 +9,9 @@ import os
 import shutil
 import threading
 import time
+import traceback
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +25,9 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
 
 from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
-from ..analysis import Analysis, analysis_path_for, analyze_many, load_or_analyze
+from .. import smart
+from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analyze, load_plain, make_smart,
+                        needs_smart, quick_look, quick_path_for)
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
                         natural_length, score_samples, select)
 from .. import images, multicam, music, reframe, scriptedit, sfx, updater
@@ -31,8 +35,8 @@ from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import polish, scenes
-from ..captions import (Caption, build_captions, delete_captions, edit_caption, listen, load_model, project_layout,
-                        transcribe, write_srt)
+from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
+                        load_model, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -101,11 +105,16 @@ class MainWindow(QMainWindow):
     audio_failed = Signal(int, str)        # the preview sound couldn't be made: the reason
     update_checked = Signal(object, str, bool)   # updater.Release or None, error, asked by the user
     analysis_ready = Signal(str, object)   # footage id, Analysis (from worker threads)
+    refine_status = Signal(str)            # the full analysis running in the background (from its thread)
 
     def __init__(self):
         super().__init__()
         self.project = Project()
         self.analyses: dict[str, Analysis] = {}
+        self._refine_lock = threading.Lock()
+        self._refine_queue: list = []
+        self._refine_cancel = threading.Event()
+        self._refine_thread: Optional[threading.Thread] = None
         self.captions: list[Caption] = []
         self.qs = settings()
         lutlib.set_official_choices(self._official_luts())
@@ -308,6 +317,16 @@ class MainWindow(QMainWindow):
         self.a_gpu_analysis.setChecked(self.qs.value("gpu_analysis", True, type=bool))
         self.a_gpu_analysis.toggled.connect(lambda v: self.qs.setValue("gpu_analysis", v))
         m.addAction(self.a_gpu_analysis)
+        self.a_smart = QAction("Smarter analysis (AI: what shots show, what is heard)", self, checkable=True)
+        self.a_smart.setToolTip("Two small neural networks describe what each shot shows (repeated views are found "
+                                "across files) and what is heard (speech, laughter, cheering, music, wind…), "
+                                "for better moments, scenic shots and hooks.\nTurn off on a slow computer: the "
+                                "lighter analysis is used.")
+        self.a_smart.setChecked(self.qs.value("smart_analysis", True, type=bool) and smart.available())
+        self.a_smart.setEnabled(smart.available())
+        smart.set_enabled(self.a_smart.isChecked())
+        self.a_smart.toggled.connect(self._set_smart)
+        m.addAction(self.a_smart)
         self.a_auto_log = QAction("Detect camera log profile on import", self, checkable=True)
         self.a_auto_log.setToolTip("Identify the camera of imported footage and choose its log → Rec.709 "
                                    "conversion automatically")
@@ -629,6 +648,7 @@ class MainWindow(QMainWindow):
         self.audio_failed.connect(self._on_audio_failed)
         self.update_checked.connect(self._on_update_checked)
         self.analysis_ready.connect(self._on_analysis_ready)
+        self.refine_status.connect(self._on_refine_status)
 
     # ================================================================== project state
     def _sync_project_controls(self):
@@ -877,16 +897,17 @@ class MainWindow(QMainWindow):
         self._exported = False
         self._sync_project_controls()
         missing = []
+        self._stop_refining()
+        self._fill_transcripts(list(project.footage))
         for fid, f in project.footage.items():
             if f.is_image:
                 continue
-            path = analysis_path_for(f)
-            a = Analysis.load(path) if os.path.exists(path) else None
+            a = load_plain(f)
             if a is not None:
                 self.analyses[fid] = a
                 if f.log_pending:
                     self._log_from_picture(f, list(a.thumbs))
-            elif os.path.exists(f.path):
+            if os.path.exists(f.path) and (a is None or a.quick or needs_smart(f, a)):
                 missing.append(fid)
         if missing:
             self.queue_analysis(missing)
@@ -1127,6 +1148,8 @@ class MainWindow(QMainWindow):
                                 + (". Analyzing in the background…" if videos else ". Drag them onto the timeline "
                                    "or onto a video layer above it."))
         if videos:
+            if self._fill_transcripts(videos):
+                self.update_captions()
             self.offer_transcription()
 
     def _image_footage(self, path: str) -> Footage:
@@ -1165,40 +1188,135 @@ class MainWindow(QMainWindow):
         return handler
 
     def queue_analysis(self, ids: list[str], force: bool = False):
-        """Analyze footage as one background task; clips run in parallel and appear as each one finishes."""
+        """Analyze footage in two passes: a quick first look from the keyframes (all files at once, in a few
+        seconds each), then the full analysis in the background, replacing each quick look as it finishes.
+        Analyses made without the smarter analysis get it added (when it's on). `force` (Re-analyze) runs the
+        full analysis at once."""
         todo = [self.project.footage[fid] for fid in ids if fid in self.project.footage
-                and not self.project.footage[fid].is_image and (force or fid not in self.analyses)]
+                and not self.project.footage[fid].is_image]
+        if not force:
+            todo = [f for f in todo if f.id not in self.analyses or self.analyses[f.id].quick
+                    or needs_smart(f, self.analyses[f.id])]
         if not todo:
             return
         use_gpu = self.a_gpu_analysis.isChecked()
 
         def job(progress, cancel):
-            pending = []
-            for f in todo:
-                path = analysis_path_for(f)
-                if force:
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                a = Analysis.load(path) if os.path.exists(path) else None
-                if a is not None:
-                    f.analysis_path = path
-                    self.analysis_ready.emit(f.id, a)
-                else:
-                    pending.append(f)
             failed: list[str] = []
-            analyze_many(pending, progress, cancel,
-                         on_result=lambda f, a: self.analysis_ready.emit(f.id, a),
-                         on_error=lambda f, msg: failed.append(f"{f.name}: {msg}"), use_gpu=use_gpu)
-            return failed
+            if force:
+                for f in todo:
+                    for path in (analysis_path_for(f), quick_path_for(f)):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                analyze_many(todo, progress, cancel,
+                             on_result=lambda f, a: self.analysis_ready.emit(f.id, a),
+                             on_error=lambda f, msg: failed.append(f"{f.name}: {msg}"), use_gpu=use_gpu)
+                return [], failed
+            full, first, upgrade = [], [], []
+            for f in todo:
+                a = load_plain(f)
+                if a is None:
+                    first.append(f)
+                    full.append(f)
+                    continue
+                self.analysis_ready.emit(f.id, a)
+                if a.quick:
+                    full.append(f)
+                if needs_smart(f, a):
+                    upgrade.append((f, a))
+            if first:
+                done = [0]
 
-        def done(failed):
+                def look(f):
+                    if cancel.is_set():
+                        return
+                    try:
+                        q = quick_look(f, cancel)
+                        q.save(quick_path_for(f))
+                        f.analysis_path = quick_path_for(f)
+                        self.analysis_ready.emit(f.id, q)
+                    except Exception:  # noqa: BLE001 - the full analysis tries again (and says why)
+                        traceback.print_exc()
+                    done[0] += 1
+                    progress(done[0] / len(first), f"Quick first look {done[0]}/{len(first)}")
+                workers = max(1, min(len(first), (os.cpu_count() or 4) // 2))
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quick-look") as ex:
+                    list(ex.map(look, first))
+            for k, (f, a) in enumerate(upgrade):
+                if cancel.is_set():
+                    break
+                progress(k / len(upgrade), f"Smarter analysis {k + 1}/{len(upgrade)}: {f.name}")
+                try:
+                    if make_smart(f, a, cancel):
+                        a.save(f.analysis_path or analysis_path_for(f))
+                        self.analysis_ready.emit(f.id, a)
+                except Exception:  # noqa: BLE001 - the plain analysis still works
+                    traceback.print_exc()
+            return full, failed
+
+        def done(res):
+            full, failed = res
             if failed:
                 QMessageBox.warning(self, APP_NAME, "Analysis failed:\n\n" + "\n".join(failed)[-1500:])
+            if full:
+                self._refine(full)
 
         name = f"Analyzing {todo[0].name}" if len(todo) == 1 else f"Analyzing {len(todo)} clips"
         self.tasks.submit(name, job, done, self._task_error("Analysis"))
+
+    # The full analysis after the quick first look, in the background (not in the task queue: an auto edit
+    # started meanwhile runs at once, on the quick looks of the files not done yet).
+    def _refine(self, footage: list):
+        with self._refine_lock:
+            have = {f.id for f in self._refine_queue}
+            self._refine_queue += [f for f in footage if f.id not in have]
+            if self._refine_thread is not None and self._refine_thread.is_alive():
+                return
+            cancel = self._refine_cancel
+            self._refine_thread = threading.Thread(target=self._refine_loop, args=(cancel,), daemon=True,
+                                                   name="analysis-refine")
+            self._refine_thread.start()
+
+    def _refine_loop(self, cancel: threading.Event):
+        use_gpu = self.a_gpu_analysis.isChecked()
+        while not cancel.is_set():
+            with self._refine_lock:
+                batch, self._refine_queue = self._refine_queue, []
+            if not batch:
+                break
+            failed: list[str] = []
+            try:
+                analyze_many(batch, lambda p, m="": self.refine_status.emit(f"Full analysis in the background: {m} "
+                                                                             f"({p:.0%})"),
+                             cancel, on_result=lambda f, a: self.analysis_ready.emit(f.id, a),
+                             on_error=lambda f, msg: failed.append(f"{f.name}: {msg}"), use_gpu=use_gpu)
+            except Cancelled:
+                return
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+            if failed:
+                self.refine_status.emit("Full analysis failed for: " + "; ".join(failed)[:300])
+        if not cancel.is_set():
+            self.refine_status.emit("Full analysis done")
+
+    def _stop_refining(self):
+        with self._refine_lock:
+            self._refine_cancel.set()
+            self._refine_cancel = threading.Event()
+            self._refine_queue = []
+
+    def _on_refine_status(self, msg: str):
+        if not self.tasks.busy:
+            self.lbl_status.setText(msg)
+
+    def _set_smart(self, on: bool):
+        self.qs.setValue("smart_analysis", on)
+        smart.set_enabled(on)
+        if on:      # add it to the analyses made without it
+            self.queue_analysis([fid for fid, a in self.analyses.items()
+                                 if fid in self.project.footage and needs_smart(self.project.footage[fid], a)])
 
     def _on_analysis_ready(self, fid: str, a: Analysis):
         if fid in self.project.footage:
@@ -1546,6 +1664,7 @@ class MainWindow(QMainWindow):
                     blockers = multicam.coverage_blockers(mc_footage, mc_angles, syncs)
             progress(0.3, "Analyzing footage…")
             analyses = {fid: load_or_analyze(f, cancel=cancel, use_gpu=use_gpu) for fid, f in footage.items()}
+            quick = sum(1 for a in analyses.values() if getattr(a, "quick", False))
             if multi and multi.get("template") == "switch":       # switching scores every angle's picture
                 progress(0.45, "Analyzing the camera angles…")
                 for fid, f in mc_footage.items():
@@ -1570,6 +1689,9 @@ class MainWindow(QMainWindow):
                 return analyses, clips, [note], syncs, faces, plan
             intro = outro = None
             notes: list[str] = []
+            if quick:
+                notes.append(f"{quick} file(s) from the quick first look: regenerate when the full analysis is done "
+                             "for the best edit")
             sel = s
             if s.bookends:
                 progress(0.5, "Finding the opening and closing…")
@@ -3469,7 +3591,8 @@ class MainWindow(QMainWindow):
         model, lang = s.whisper_model, s.whisper_language
 
         def job(progress, cancel):
-            if any(f.has_audio for f in todo):
+            # The speech model is loaded once for the batch, and only when a file isn't transcribed already.
+            if any(f.has_audio and (force or cached_transcript(f, model, lang) is None) for f in todo):
                 load_model(model, progress)
             done, errors = [], []
             for k, f in enumerate(todo):
@@ -3480,7 +3603,7 @@ class MainWindow(QMainWindow):
                 def step(p, msg="", k=k, tag=tag):
                     progress((k + max(0.0, min(1.0, p))) / len(todo), (msg or "Transcribing") + tag)
                 try:
-                    words = transcribe(f, model, lang, step, cancel)
+                    words = transcribe(f, model, lang, step, cancel, use_cache=not force)
                 except Cancelled:          # the files finished before the cancel are kept
                     return done, errors, True
                 except Exception as e:  # noqa: BLE001
@@ -3506,6 +3629,21 @@ class MainWindow(QMainWindow):
 
         name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
         self.tasks.submit(name, job, finished, self._task_error("Transcription"))
+
+    def _fill_transcripts(self, ids) -> int:
+        """Transcripts of these files made before (in any project, see captions.cached_transcript), without
+        transcribing anything. Returns how many were filled in."""
+        st = self.project.settings
+        n = 0
+        for fid in ids:
+            f = self.project.footage.get(fid)
+            if f is None or f.is_image or not f.has_audio or f.transcript is not None:
+                continue
+            hit = cached_transcript(f, st.whisper_model, st.whisper_language, any_model=True)
+            if hit is not None:
+                f.transcript, f.transcript_lang = hit
+                n += 1
+        return n
 
     def _ask_transcribe(self, n: int) -> tuple[bool, bool]:
         """Ask whether to transcribe n files now: (yes, don't ask again)."""
@@ -3856,6 +3994,7 @@ class MainWindow(QMainWindow):
             self.qs.setValue("refine_width", self.d_right.width())
         self.viewer.stop()
         self.tasks.shutdown()
+        self._stop_refining()
         self._audio_cancel.set()
         self.viewer.shutdown()
         if self.tray:

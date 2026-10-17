@@ -88,8 +88,15 @@ def self_test() -> int:
         import kangedit
         for mod in pkgutil.walk_packages(kangedit.__path__, "kangedit."):
             importlib.import_module(mod.name)
-        for lib in ("av", "cv2", "numpy", "ctranslate2", "faster_whisper"):
+        for lib in ("av", "cv2", "numpy", "ctranslate2", "faster_whisper", "onnxruntime"):
             importlib.import_module(lib)
+        # The smarter analysis' models are bundled and run (a build that left them out fails here).
+        import numpy as np
+        from . import smart
+        if not smart.available():
+            raise RuntimeError("smarter analysis models missing: " + smart.EMBED_MODEL + ", " + smart.SOUND_MODEL)
+        smart.describe([np.zeros((90, 160, 3), np.uint8)])
+        smart.hear(np.zeros(16000, np.float32))
         app = QApplication.instance() or QApplication([sys.argv[0]])
         from .ui.main_window import MainWindow
         win = MainWindow()

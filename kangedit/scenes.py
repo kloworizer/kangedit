@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 
+from . import smart
 from .models import Footage, TimelineClip
 
 SCENE_GAP = 30 * 60.0          # seconds between two recordings that start a new scene
@@ -192,6 +193,12 @@ def scenic_scores(analyses: dict, footage: dict[str, Footage]) -> dict[str, np.n
     sharp, color, jerk = _rank(cat("sharp")), _rank(cat("colorful")), _rank(cat("jerk"))
     no_face = 1.0 - np.clip(cat("faces") * 40.0, 0.0, 1.0)
     quiet = np.clip((-22.0 - cat("audio")) / 16.0, 0.0, 1.0)          # -38 dBFS and below: no one talking
+    # With the smarter analysis, "no one talking" is heard as such: loud waves, wind or traffic are a view.
+    speech = [smart.at_samples(getattr(analyses[i], "sound", None), "speech", analyses[i].times) for i in ids]
+    if any(x is not None for x in speech):
+        heard = np.concatenate([np.clip(1.0 - 1.6 * x, 0.0, 1.0) if x is not None else np.full(n, np.nan, np.float32)
+                                for x, n in zip(speech, sizes)])
+        quiet = np.where(np.isnan(heard), quiet, heard)
     has_audio = np.concatenate([np.full(n, footage[i].has_audio, bool) for i, n in zip(ids, sizes)])
     quiet = np.where(has_audio, quiet, 0.7)
     bright, clipped, motion = cat("brightness"), cat("clipped"), cat("motion")

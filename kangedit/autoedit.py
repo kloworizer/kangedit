@@ -18,6 +18,7 @@ from typing import Optional
 
 import numpy as np
 
+from . import smart
 from .analysis import SAMPLE_RATE, WAVE_RATE, Analysis
 from .edits import TRANSITIONS
 from .models import Footage, TimelineClip
@@ -53,6 +54,12 @@ OVER_SHARE_PENALTY = 0.12   # per use beyond the footage's share
 AVOID_PENALTY = 0.35        # per earlier edit that used a moment: a new edit prefers moments not seen yet
 SILENCE_DB = (-52.0, -38.0)  # dBFS: dead silent at the first, normal room sound from the second
 SILENCE_PENALTY = 0.45      # score taken off dead-silent moments (less for quiet ones)
+# Smarter analysis (smart.py): what is heard, and the same view across files.
+HIGHLIGHT_BONUS = {"hook": 0.30}           # laughter, cheering, applause, whoops: a moment people enjoyed
+HIGHLIGHT_DEFAULT = 0.15
+WIND_PENALTY = 0.15                         # wind on the microphone spoils the sound
+CROSS_REPEAT = (0.80, 0.92)                 # alike to a moment picked from another file: penalty from..to full
+CROSS_REPEAT_PENALTY = 0.25
 VARIETY = 0.06              # random spread between moments of about the same score (new edits differ)
 
 ORDERS = {
@@ -257,9 +264,22 @@ def score_samples(analyses: dict[str, Analysis], footage: dict[str, Footage], st
         if footage[i].has_audio:           # dead / silent sound makes a weak moment
             lo, hi = SILENCE_DB
             sc -= SILENCE_PENALTY * np.clip((hi - analyses[i].audio) / (hi - lo), 0.0, 1.0)
+            sc += _heard(analyses[i], t, style)
         sc -= bad_frames(analyses[i])
         out[i] = sc
     return out
+
+
+def _heard(a: Analysis, t: np.ndarray, style: str) -> np.ndarray:
+    """What the smarter analysis heard, as a score change per sample: people laughing, cheering, applauding or
+    whooping lift a moment; wind on the microphone lowers it. Zero without it."""
+    sound = getattr(a, "sound", None)
+    if sound is None or not len(sound):
+        return np.zeros(len(t), np.float32)
+    get = lambda name: smart.at_samples(sound, name, t)  # noqa: E731
+    joy = np.maximum.reduce([get("laughter"), get("applause"), 0.8 * get("excited")])
+    bonus = HIGHLIGHT_BONUS.get(style, HIGHLIGHT_DEFAULT)
+    return (bonus * np.clip(joy * 1.5, 0, 1) - WIND_PENALTY * np.clip(get("wind") * 1.5, 0, 1)).astype(np.float32)
 
 
 def bad_frames(a: Analysis) -> np.ndarray:
@@ -298,6 +318,7 @@ class _Cands:
     length: np.ndarray     # chosen window length (seconds) per start sample
     embed: np.ndarray      # normalised embedding per start sample (window middle)
     valid: np.ndarray      # bool mask
+    sem: bool = False      # embed says what the picture shows (smarter analysis), else a tiny grey picture
 
 
 def _candidates(fid: str, a: Analysis, sc: np.ndarray, dur: float, s: AutoEditSettings) -> _Cands:
@@ -331,6 +352,9 @@ def _candidates(fid: str, a: Analysis, sc: np.ndarray, dur: float, s: AutoEditSe
         best[0] = float(np.mean(sc))
         best_len[0] = min(dur, s.clip_max)
     mid = np.clip((np.arange(n) + (best_len * SAMPLE_RATE / 2).astype(int)), 0, n - 1)
+    sem = a.sem_at(a.times[mid]) if hasattr(a, "sem_at") else None
+    if sem is not None:                    # what the picture shows (smarter analysis)
+        return _Cands(fid, best, best_len, sem.astype(np.float32), np.isfinite(best), True)
     e = a.embed[mid].astype(np.float32)
     e = e - e.mean(axis=1, keepdims=True)
     e /= np.linalg.norm(e, axis=1, keepdims=True) + 1e-6
@@ -368,12 +392,34 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     n_clips = s.target_duration / max(0.1, (s.clip_min + s.clip_max) / 2)
     share = {i: n_clips * durs[i] / max(1e-6, sum(durs.values())) for i in ids}
 
+    # The same view in other files (smarter analysis): every file's descriptions, one a second, in one matrix;
+    # cross[row] is how alike that second is to the most alike moment picked from another file.
+    sem_ids = [i for i in ids if cands[i].sem]
+    rows: dict[str, tuple[int, int]] = {}
+    mats = []
+    for i in sem_ids:
+        m = np.asarray(analyses[i].sem, np.float32)
+        rows[i] = (sum(len(x) for x in mats), sum(len(x) for x in mats) + len(m))
+        mats.append(m)
+    every = np.concatenate(mats) if mats else np.zeros((0, smart.EMBED_DIM), np.float32)
+    cross = np.full(len(every), -1.0, np.float32)
+    thumb_of = {}
+    for i in sem_ids:                      # each candidate's second (its window middle)
+        tt = np.asarray(analyses[i].thumb_times, np.float32)
+        mid = analyses[i].times + cands[i].length / 2
+        thumb_of[i] = np.clip(np.round(mid).astype(int), 0, len(tt) - 1) if len(tt) else np.zeros(len(mid), int)
+
     def block(fid: str, a_in: float, a_out: float, emb: np.ndarray):
         c = cands[fid]
         t = analyses[fid].times
         c.valid &= ~((t < a_out + s.min_gap) & (t + c.length > a_in - s.min_gap))
         picked_embed[fid].append(emb)
         picked_mid[fid].append((a_in + a_out) / 2)
+        if c.sem and len(every):
+            sims = every @ emb
+            a0, a1 = rows[fid]
+            sims[a0:a1] = -1.0                 # the same file: the near / far repeat rules below
+            np.maximum(cross, sims, out=cross)
 
     def effective(fid: str) -> np.ndarray:
         c = cands[fid]
@@ -383,9 +429,14 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
             mid = analyses[fid].times + c.length / 2
             window = max(REPEAT_WINDOW, 2 * s.min_gap)
             near = np.abs(mid[:, None] - np.asarray(picked_mid[fid])[None, :]) < window
-            alike = sims > s.similarity
+            thr = s.similarity if s.similarity > 1.0 or not c.sem else smart.SAME_VIEW
+            alike = sims > thr
             sc = np.where((alike & near).any(axis=1), -np.inf, sc)
             sc = sc - FAR_REPEAT_PENALTY * (alike & ~near).any(axis=1)
+        if c.sem and s.similarity <= 1.0 and len(every):
+            a0, _ = rows[fid]
+            lo, hi = CROSS_REPEAT
+            sc = sc - CROSS_REPEAT_PENALTY * np.clip((cross[a0 + thumb_of[fid]] - lo) / (hi - lo), 0.0, 1.0)
         return sc - OVER_SHARE_PENALTY * max(0.0, uses[fid] + 1 - share[fid])
 
     def take(fid: str, eff: np.ndarray, cap: Optional[float] = None, over: bool = False) -> bool:

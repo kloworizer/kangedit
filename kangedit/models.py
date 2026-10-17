@@ -361,7 +361,7 @@ class ProjectSettings:
     fit_mode: str = "fill"         # fill | fit | blur
     use_proxies: bool = True
     proxy_height: int = 540
-    whisper_model: str = "large-v3"
+    whisper_model: str = "auto"         # captions.resolve_model: large-v3 on an NVIDIA GPU, else turbo
     whisper_language: str = ""     # "" = auto detect
     captions: CaptionStyle = field(default_factory=CaptionStyle)
     video_format: str = "short"    # short | long | custom (auto-edit preset)
