@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QMenu, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
+from .. import spherical
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import OverlayClip, Project, TimelineClip
@@ -363,6 +364,30 @@ class Inspector(QScrollArea):
         self.grp_reframe = g
         lay.addWidget(g)
 
+        # --- 360° footage: which way the clip looks
+        g = QGroupBox("360° view")
+        g.setToolTip("360° footage (Insta360, DJI Osmo 360, GoPro Max...): the clip shows a flat view of the sphere, "
+                     "looking where you point it, or the whole sphere as a tiny planet")
+        f = QFormLayout(g)
+        self.vw_yaw = ParamSlider(-180.0, 180.0, 0.0, 1.0, 0, "°")
+        self.vw_pitch = ParamSlider(-90.0, 90.0, 0.0, 1.0, 0, "°")
+        self.vw_roll = ParamSlider(-180.0, 180.0, 0.0, 1.0, 0, "°")
+        self.vw_fov = ParamSlider(30.0, 160.0, spherical.DEFAULT_FOV, 1.0, 0, "°")
+        self.vw_fov.setToolTip("How wide the view is (horizontal). Wider shows more, with stronger stretching "
+                               "at the edges. A tiny planet uses this as how much of the sphere it shows.")
+        for ps, key in ((self.vw_yaw, "view_yaw"), (self.vw_pitch, "view_pitch"), (self.vw_roll, "view_roll"),
+                        (self.vw_fov, "view_fov")):
+            ps.changed.connect(lambda val, k=key: self._set_view(k, val))
+        self.chk_tiny = QCheckBox("Tiny planet (the whole sphere, looking down)")
+        self.chk_tiny.toggled.connect(self._set_tiny)
+        f.addRow("Look left / right", self.vw_yaw)
+        f.addRow("Look up / down", self.vw_pitch)
+        f.addRow("Tilt", self.vw_roll)
+        f.addRow("Field of view", self.vw_fov)
+        f.addRow(self.chk_tiny)
+        self.grp_view = g
+        lay.addWidget(g)
+
         # --- Audio
         g = QGroupBox("Audio")
         f = QFormLayout(g)
@@ -406,6 +431,7 @@ class Inspector(QScrollArea):
         self.b_layer.setVisible(layer)
         self.grp_edit.setVisible(not layer)          # transitions and J / L cuts: between main-track clips
         self.grp_reframe.setVisible(not layer)       # a layer clip is placed and sized in the Layer tab
+        self.grp_view.setVisible(clip is not None and spherical.is_360(self.project.footage.get(clip.footage_id)))
         if clip is None:
             self.lbl_title.setText("Select a clip on the timeline (main track or a video layer)")
             return
@@ -454,6 +480,41 @@ class Inspector(QScrollArea):
             self.rf_y.set_value(clip.offset_y)
             self.rf_rot.set_value(clip.rotation)
         self.vol.set_value(clip.volume * 100.0)
+        self._show_view(clip)
+
+    def _show_view(self, clip):
+        tiny = clip.view_tiny
+        for ps, val in ((self.vw_yaw, clip.view_yaw), (self.vw_pitch, clip.view_pitch),
+                        (self.vw_roll, clip.view_roll)):
+            ps.set_value(val)
+        # A tiny planet shows far more of the sphere: its field of view goes up to 359°.
+        self.vw_fov.spin.setMaximum(359.0 if tiny else 160.0)
+        self.vw_fov.slider.setMaximum(359 if tiny else 160)
+        self.vw_fov.default = spherical.TINY_FOV if tiny else spherical.DEFAULT_FOV
+        self.vw_fov.set_value(clip.view_fov)
+        self.chk_tiny.blockSignals(True)
+        self.chk_tiny.setChecked(tiny)
+        self.chk_tiny.blockSignals(False)
+
+    def _set_view(self, key: str, val: float):
+        if self.clip is None:
+            return
+        self.before_change.emit("view:" + key)
+        for c in self.targets:
+            if spherical.is_360(self.project.footage.get(c.footage_id)):
+                setattr(c, key, float(val))
+        self.changed.emit("view")
+
+    def _set_tiny(self, on: bool):
+        if self.clip is None:
+            return
+        self.before_change.emit("view:tiny")
+        for c in self.targets:
+            if spherical.is_360(self.project.footage.get(c.footage_id)):
+                c.view_tiny = bool(on)
+                c.view_fov = spherical.TINY_FOV if on else spherical.DEFAULT_FOV
+        self._show_view(self.clip)
+        self.changed.emit("view")
 
     def _set_trim(self, which: str, v: float):
         c = self.clip

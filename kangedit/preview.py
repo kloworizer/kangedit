@@ -21,7 +21,7 @@ from typing import Callable, Optional
 import cv2
 import numpy as np
 
-from . import reframe
+from . import keying, reframe, spherical
 from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, needs_color, profile_short
 from .decoder import DecoderPool
 from .edits import blend
@@ -71,6 +71,7 @@ class Shot:
     speed: float = 1.0           # clip speed and ramp template (see speed.py)
     ramp: str = ""
     src_len: float = 0.0         # length of its source range
+    view: Optional[spherical.View] = None   # 360° footage: the view of the sphere it shows
 
     def src_at(self, off: float) -> float:
         """Source time shown `off` seconds after the shot's start (also before / after it: handles)."""
@@ -429,9 +430,16 @@ class PreviewEngine:
     def _composite(self, out: np.ndarray, rgba: np.ndarray, ov: OverlayShot, look: Look, playing: bool,
                    t: float) -> None:
         c = ov.clip
+        if spherical.is_360(ov.footage):     # its view of the sphere, about as big as it shows
+            vw, vh = spherical.overlay_dims(c)
+            k = min(1.0, look.height / vh * max(1.0, c.scale))
+            rgba = spherical.reproject(rgba, ov.footage.projection, spherical.view_of(c), max(2, round(vw * k)),
+                                       max(2, round(vh * k)), ov.footage.lens_fov)
         fn = self._grader(ov, playing) if look.color else None
         if fn is not None:
             rgba = np.dstack([fn(np.ascontiguousarray(rgba[..., :3])), rgba[..., 3]])
+        if c.key_color:
+            rgba = keying.apply(rgba, c.key_color, c.key_similarity, c.key_blend, c.key_despill)
         layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
                                       c.pan_x, c.pan_y)
         layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
@@ -440,6 +448,9 @@ class PreviewEngine:
     def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
         fn = self._grader(shot, playing) if look.color else None
         quarters, tilt = reframe.split_rotation(shot.rot)
+        if shot.view is not None:   # 360°: the clip's view of the sphere, as big as the frame (or its box)
+            vw, vh = reframe.box_rect(look.width, look.height, shot.box)[2:] if shot.box else (look.width, look.height)
+            img = spherical.reproject(img, shot.footage.projection, shot.view, vw, vh, shot.footage.lens_fov)
         img = reframe.rotate_quarters(img, quarters)
         if shot.box:   # a box of the frame, cropped to fill it, black around it
             bx, by, bw, bh = reframe.box_rect(look.width, look.height, shot.box)

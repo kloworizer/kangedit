@@ -70,6 +70,7 @@ class ProbeInfo:
     creation_time: str
     # Container + stream metadata tags (lower-case keys), used to identify the camera.
     tags: dict = field(default_factory=dict)
+    projection: str = ""  # spherical metadata (360° video): "equirectangular", "fisheye"... ("" = none)
 
 
 def _parse_rate(rate: str) -> float:
@@ -98,9 +99,12 @@ def probe(path: str) -> ProbeInfo:
     a = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     rotation = 0
+    projection = ""
     for sd in v.get("side_data_list", []) or []:
         if "rotation" in sd:
             rotation = int(round(float(sd["rotation"])))
+        if "spherical" in str(sd.get("side_data_type", "")).lower():
+            projection = str(sd.get("projection", "") or "equirectangular")
     if not rotation and "rotate" in (v.get("tags") or {}):
         rotation = -int(v["tags"]["rotate"])  # legacy tag is clockwise
     rotation %= 360
@@ -141,6 +145,7 @@ def probe(path: str) -> ProbeInfo:
         audio_channels=int(a.get("channels", 0)) if a else 0,
         creation_time=tags.get("creation_time", ""),
         tags=all_tags,
+        projection=projection,
     )
 
 

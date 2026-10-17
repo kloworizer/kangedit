@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import reframe
+from . import reframe, spherical
 from .edits import edits
 from .config import frame_size
 from .models import Footage, OverlayClip, Project, TimelineClip
@@ -141,12 +141,12 @@ def place(c: OverlayClip, f: Footage, slot: Slot, template: str, tw: int, th: in
     """Put overlay c (showing footage f) in a template slot, cropping a box around the footage's face."""
     c.scale, c.box_w, c.box_h, c.rotation = slot.scale, slot.box_w, slot.box_h, 0.0
     c.pan_x = c.pan_y = 0.0
-    w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h)
+    w, h = reframe.overlay_size(*spherical.dims(f, c), tw, th, c.scale, c.box_w, c.box_h)
     if template in ("pip", "talking") and (slot.x, slot.y) != (0.5, 0.5) and slot.box_w < 0.9:
         c.x, c.y = _corner_centre(slot, w / tw, h / th)
     else:
         c.x, c.y = slot.x, slot.y
-    if c.box_w > 0 and f.face:
+    if c.box_w > 0 and f.face and not spherical.is_360(f):
         c.pan_x, c.pan_y = reframe.pan_for_point(f.face[0], f.face[1], f.width, f.height, tw, th, c.box_w, c.box_h,
                                                  c.scale)
 

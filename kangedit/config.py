@@ -166,7 +166,7 @@ def file_key(path: str) -> str:
 
 VIDEO_EXTENSIONS = (
     ".mp4", ".mov", ".mxf", ".mkv", ".avi", ".m4v", ".mts", ".m2ts",
-    ".webm", ".wmv", ".3gp", ".insv", ".lrv", ".ts", ".mpg", ".mpeg",
+    ".webm", ".wmv", ".3gp", ".insv", ".osv", ".lrv", ".ts", ".mpg", ".mpeg",
 )
 
 ASPECT_RATIOS = {

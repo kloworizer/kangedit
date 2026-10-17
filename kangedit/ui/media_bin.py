@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QHBoxLayout, QInput
 from .. import bins as binlib
 from .. import images
 from .. import lut as lutlib
+from .. import spherical
 from ..analysis import Analysis
 from ..color import LOG_CHOICES, lut_profile, profile_label
 from ..config import VIDEO_EXTENSIONS, open_path, settings
@@ -539,6 +540,14 @@ class MediaBin(QWidget):
         a = QAction("Import conversion LUT (.cube)…", sub)
         a.triggered.connect(lambda: self.action.emit("import_lut_log", ids))
         sub.addAction(a)
+        sub = m.addMenu("360° footage")
+        sub.setToolTipsVisible(True)
+        current = {getattr(self.project.footage[i], "projection", "") for i in ids if i in self.project.footage}
+        for key, label in spherical.PROJECTIONS.items():
+            a = QAction(label, sub, checkable=True)
+            a.setChecked(current == {key})
+            a.triggered.connect(lambda _=False, k=key: self.action.emit("projection:" + k, ids))
+            sub.addAction(a)
         m.addSeparator()
         a = QAction("Show in folder", m)
         a.triggered.connect(lambda: open_path(os.path.dirname(self.project.footage[ids[0]].path)))

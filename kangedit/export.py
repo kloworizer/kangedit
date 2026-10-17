@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from . import reframe
+from . import keying, reframe, spherical
 from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
@@ -285,17 +285,22 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
             tm = c.timemap()
             spd = "" if (tm.normal or f.is_image) else f"setpts='{tm.setpts(0.0)}',"
             chain = f"[{k}:v:0]setpts=PTS-STARTPTS,{trim}{spd}fps={fps:.4f},trim=duration={length:.4f},"
+            fw, fh = spherical.dims(f, c)
+            if spherical.is_360(f):          # the clip's view of the sphere
+                chain += spherical.ffmpeg_filter(f.projection, spherical.view_of(c), fw, fh, f.lens_fov) + ","
             matrix = "bt709" if (use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
             if needs_color(c.grade, f.log_profile):
                 lut = _grade_cube(workdir, f"lut_ov{j}.cube", c.grade, f)
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
             elif not f.is_image:
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,"
-            pl = reframe.overlay_place(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
+            pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
             chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
             if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
                 chain += f"crop={pl.crop_w}:{pl.crop_h}:{pl.crop_x}:{pl.crop_y},"
             chain += "format=rgba,"
+            if c.key_color:              # green / blue screen made see-through
+                chain += keying.ffmpeg_filter(c.key_color, c.key_similarity, c.key_blend, c.key_despill)
             if abs(c.rotation) >= 0.01:
                 a = math.radians(c.rotation)
                 chain += f"rotate={a:.6f}:ow=rotw({a:.6f}):oh=roth({a:.6f}):c=none,"
@@ -386,10 +391,15 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
         # framerate (blended frames) keeps the input's timebase; the fps pass after it sets the one xfade needs.
         resample = (f"framerate=fps={s.fps:.4f},fps={s.fps:.4f}" if spd and s.blend_slowmo and min(tm.v_in, tm.v_out, tm.speed) < 0.99
                     else f"fps={s.fps:.4f}")
-        chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}{spd}{resample}{turn}[v{j}a]"]
-        sw, sh = reframe.quarter_dims(f.width, f.height, quarters)
         box = reframe.box_rect(tw, th, (clip.box_x, clip.box_y, clip.box_w, clip.box_h)) \
             if clip.box_w > 0 and clip.box_h > 0 else None
+        fw, fh = f.width, f.height
+        view = ""
+        if spherical.is_360(f):            # the clip's view of the sphere, as big as the frame (or its box)
+            fw, fh = (box[2], box[3]) if box else (tw, th)
+            view = "," + spherical.ffmpeg_filter(f.projection, spherical.view_of(clip), fw, fh, f.lens_fov)
+        chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}{spd}{resample}{view}{turn}[v{j}a]"]
+        sw, sh = reframe.quarter_dims(fw, fh, quarters)
         color = needs_color(clip.grade, f.log_profile)
         ph = box[3] if box else th          # picture height: halation and sharpening scale with it
         halation = ffmpeg_halation(clip.grade, ph, f"v{j}g", f"v{j}h")

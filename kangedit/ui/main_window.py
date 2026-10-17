@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
 
 from .. import APP_NAME, autosave, camera, version_string
 from .. import lut as lutlib
-from .. import smart
+from .. import keying, smart, spherical
 from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analyze, load_plain, make_smart,
                         needs_smart, quick_look, quick_path_for)
 from ..autoedit import (AutoEditSettings, apply_edit_style, find_hook, find_hook_montage, hook_plan,
@@ -38,7 +38,7 @@ from .. import polish, scenes
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
                         load_model, project_layout, transcribe, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
-from ..decoder import DecoderPool
+from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
                       frame_size,
                       clear_cache, default_cache_root, fmt_bytes, folder_size, legacy_cache_root, lut_dir,
@@ -111,6 +111,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.project = Project()
         self.analyses: dict[str, Analysis] = {}
+        self._stale_thumbs: set[str] = set()
+        self._analysis_refresh = QTimer(self, singleShot=True, interval=500)
+        self._analysis_refresh.timeout.connect(self._refresh_after_analysis)
         self._refine_lock = threading.Lock()
         self._refine_queue: list = []
         self._refine_cancel = threading.Event()
@@ -1118,7 +1121,8 @@ class MainWindow(QMainWindow):
                             fps=info.fps, has_audio=info.has_audio, codec=info.codec, pix_fmt=info.pix_fmt,
                             bit_depth=info.bit_depth, color_space=info.color_space, color_range=info.color_range,
                             color_transfer=info.color_transfer, rotation=info.rotation,
-                            creation_time=info.creation_time, gps=scenes.parse_location(info.tags))
+                            creation_time=info.creation_time, gps=scenes.parse_location(info.tags),
+                            projection=spherical.detect(path, info.projection, info.width, info.height))
                 self._identify_camera(f, info)
                 for h in (self.project.settings.proxy_height, 360, 540, 720, 1080):
                     pp = proxy_path_for(f, h)
@@ -1190,8 +1194,8 @@ class MainWindow(QMainWindow):
     def queue_analysis(self, ids: list[str], force: bool = False):
         """Analyze footage in two passes: a quick first look from the keyframes (all files at once, in a few
         seconds each), then the full analysis in the background, replacing each quick look as it finishes.
-        Analyses made without the smarter analysis get it added (when it's on). `force` (Re-analyze) runs the
-        full analysis at once."""
+        Analyses made without the smarter analysis get it added in the background too (when it's on), never
+        holding up other tasks. `force` (Re-analyze) runs the full analysis at once."""
         todo = [self.project.footage[fid] for fid in ids if fid in self.project.footage
                 and not self.project.footage[fid].is_image]
         if not force:
@@ -1216,16 +1220,17 @@ class MainWindow(QMainWindow):
                 return [], failed
             full, first, upgrade = [], [], []
             for f in todo:
-                a = load_plain(f)
+                a = self.analyses.get(f.id) or load_plain(f)     # (opening a project has loaded most)
                 if a is None:
                     first.append(f)
                     full.append(f)
                     continue
-                self.analysis_ready.emit(f.id, a)
+                if f.id not in self.analyses:            # (opening a project loads them already)
+                    self.analysis_ready.emit(f.id, a)
                 if a.quick:
                     full.append(f)
-                if needs_smart(f, a):
-                    upgrade.append((f, a))
+                elif needs_smart(f, a):
+                    upgrade.append(f)
             if first:
                 done = [0]
 
@@ -1244,24 +1249,14 @@ class MainWindow(QMainWindow):
                 workers = max(1, min(len(first), (os.cpu_count() or 4) // 2))
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="quick-look") as ex:
                     list(ex.map(look, first))
-            for k, (f, a) in enumerate(upgrade):
-                if cancel.is_set():
-                    break
-                progress(k / len(upgrade), f"Smarter analysis {k + 1}/{len(upgrade)}: {f.name}")
-                try:
-                    if make_smart(f, a, cancel):
-                        a.save(f.analysis_path or analysis_path_for(f))
-                        self.analysis_ready.emit(f.id, a)
-                except Exception:  # noqa: BLE001 - the plain analysis still works
-                    traceback.print_exc()
-            return full, failed
+            return full + upgrade, failed
 
         def done(res):
-            full, failed = res
+            later, failed = res
             if failed:
                 QMessageBox.warning(self, APP_NAME, "Analysis failed:\n\n" + "\n".join(failed)[-1500:])
-            if full:
-                self._refine(full)
+            if later:
+                self._refine(later)
 
         name = f"Analyzing {todo[0].name}" if len(todo) == 1 else f"Analyzing {len(todo)} clips"
         self.tasks.submit(name, job, done, self._task_error("Analysis"))
@@ -1287,6 +1282,29 @@ class MainWindow(QMainWindow):
             if not batch:
                 break
             failed: list[str] = []
+            # Files with a full analysis only need the smarter analysis added (no decoding): those first.
+            rest = []
+            for k, f in enumerate(batch):
+                if cancel.is_set():
+                    return
+                a = self.analyses.get(f.id)
+                if a is None or a.quick:
+                    rest.append(f)
+                    continue
+                if not needs_smart(f, a):
+                    continue
+                self.refine_status.emit(f"Smarter analysis in the background: {k + 1}/{len(batch)} {f.name}")
+                try:
+                    if make_smart(f, a, cancel):
+                        a.save(f.analysis_path or analysis_path_for(f))
+                        self.analysis_ready.emit(f.id, a)
+                except Cancelled:
+                    return
+                except Exception:  # noqa: BLE001 - the plain analysis still works
+                    traceback.print_exc()
+            batch = rest
+            if not batch:
+                continue
             try:
                 analyze_many(batch, lambda p, m="": self.refine_status.emit(f"Full analysis in the background: {m} "
                                                                              f"({p:.0%})"),
@@ -1321,11 +1339,19 @@ class MainWindow(QMainWindow):
     def _on_analysis_ready(self, fid: str, a: Analysis):
         if fid in self.project.footage:
             self.analyses[fid] = a
-            self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] != fid}
+            self._stale_thumbs.add(fid)
             f = self.project.footage[fid]
             if f.log_pending:
                 self._log_from_picture(f, list(a.thumbs))
-            self.refresh_all(captions=False)
+            # Hundreds of files finish one after the other (opening a big project, an import): one refresh for
+            # all that came in within half a second, not a full refresh of the window for each.
+            if not self._analysis_refresh.isActive():
+                self._analysis_refresh.start()
+
+    def _refresh_after_analysis(self):
+        stale, self._stale_thumbs = self._stale_thumbs, set()
+        self.tl._thumb_cache = {k: v for k, v in self.tl._thumb_cache.items() if k[0] not in stale}
+        self.refresh_all(captions=False)
 
     def queue_proxies(self, ids: list[str]):
         height = self.project.settings.proxy_height
@@ -2111,6 +2137,17 @@ class MainWindow(QMainWindow):
     # ================================================================== bin actions
     def bin_action(self, action: str, ids: list[str]):
         if not ids:
+            return
+        if action.startswith("projection:"):     # 360° footage (or not): its clips show a view of the sphere
+            self.project_checkpoint()
+            for fid in ids:
+                self.project.footage[fid].projection = action.split(":", 1)[1]
+            self.project.dirty = True
+            self.bin.refresh()
+            self.tl.refresh()
+            self.viewer.refresh()
+            self.inspector.set_clip(self.inspector.clip)
+            self._update_title()
             return
         if action == "remove":
             usage = self.project.usage()
@@ -2984,6 +3021,26 @@ class MainWindow(QMainWindow):
         self.viewer.refresh()
         self._update_title()
 
+    def _screen_colour(self, c) -> Optional[str]:
+        """The green / blue screen colour of an overlay clip's picture (a frame from the middle of it)."""
+        f = self.project.footage.get(c.footage_id)
+        if f is None:
+            return None
+        t = c.src_in + c.src_dur / 2
+        a = self.analyses.get(f.id)
+        if a is not None and len(a.thumbs):
+            k = int(np.clip(np.searchsorted(a.thumb_times, t), 0, len(a.thumbs) - 1))
+            return keying.guess(np.asarray(a.thumbs[k]))
+        try:
+            dec = FrameDecoder(f.proxy_path if f.has_proxy() else f.path, f.rotation, f.color_space, 360)
+            try:
+                img = dec.frame_at(t)
+            finally:
+                dec.close()
+            return keying.guess(img) if img is not None else None
+        except Exception:  # noqa: BLE001 - unreadable: the caller uses chroma green
+            return None
+
     def _overlay_action(self, action: str, oid: str):
         if action == "link_toggle":
             self.toggle_link(oid)
@@ -2999,6 +3056,13 @@ class MainWindow(QMainWindow):
             return
         if action == "ov_auto_color":                 # in the background; one undo step when it's done
             self._auto_color([c])
+            return
+        if action == "ov_key_auto":                   # chroma key: the screen colour from the picture's edges
+            self.project_checkpoint()
+            c.key_color = self._screen_colour(c) or keying.PRESETS["green"]
+            self.layer_panel.set_clip(c)
+            self.viewer.refresh()
+            self.lbl_status.setText(f"Chroma key: {c.key_color} is made see-through")
             return
         if action == "ov_color":
             self.tl.select_overlay(oid)

@@ -6,6 +6,23 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-10-17
+
+### Fixed
+- Opening a large project made with a version older than 0.6.6 froze the window: every file's analysis was
+  upgraded with the smarter analysis at once, and each one finished redrew the whole window. The upgrade now
+  runs in the background, a file at a time, and the window redraws at most twice a second while it does.
+
+### Added
+- **Chroma key** on video layers (🧩 Layer tab): a green or blue screen made see-through, its colour read from
+  the picture's edges (*Auto*) or chosen, with *Amount*, *Soft edge* and spill removal. Shown in the preview as
+  exported.
+- **360° footage** (Insta360, DJI Osmo 360, GoPro Max...): a clip shows a flat view of the sphere, set in the
+  Inspector's *360° view* group (look left / right, up / down, tilt, field of view) or the whole sphere as a
+  *tiny planet*. Equirectangular 360° videos are recognised by their metadata, raw `.insv` / `.osv`
+  dual-fisheye files by their type; right-click media → *360° footage* sets it by hand. Works on the main track
+  and on video layers.
+
 ## [0.6.6] - 2026-10-17
 
 ### Added

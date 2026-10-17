@@ -5,9 +5,12 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
+from .. import keying
 from ..models import OverlayClip, Project
 from ..speed import MAX_SPEED, MIN_SPEED, RAMPS, SOUND_MODES, sound_mode
 from ..speed import clamp as clamp_speed
@@ -177,6 +180,42 @@ class LayerPanel(QScrollArea):
         f.addRow("Layer", self.sp_layer)
         v.addWidget(g)
 
+        g = QGroupBox("Chroma key (green / blue screen)")
+        f = QFormLayout(g)
+        self.chk_key = QCheckBox("Make the screen colour see-through")
+        self.chk_key.setToolTip("Film in front of a green or blue screen, put the clip on a video layer above the "
+                                "background, and the screen disappears: the layers below show behind the subject")
+        self.chk_key.toggled.connect(self._toggle_key)
+        f.addRow(self.chk_key)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        for text, key, tip in (("Green", "green", "A chroma green screen"), ("Blue", "blue", "A chroma blue screen"),
+                               ("Auto", "auto", "Read the screen colour from the edges of the picture"),
+                               ("Pick…", "pick", "Choose the colour to key out")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, k=key: self._key_preset(k))
+            row.addWidget(b)
+        self.lbl_key = QLabel()
+        self.lbl_key.setFixedSize(22, 22)
+        row.addWidget(self.lbl_key)
+        f.addRow("Colour", row)
+        self.sl_key_sim = ParamSlider(1, 50, keying.SIMILARITY * 100, 0.5, 1, " %")
+        self.sl_key_sim.setToolTip("How far from the key colour still goes see-through: raise it when patches of "
+                                   "the screen stay, lower it when the subject goes see-through")
+        self.sl_key_sim.changed.connect(lambda val: self._set("key_similarity", val / 100.0))
+        self.sl_key_blend = ParamSlider(0, 30, keying.BLEND * 100, 0.5, 1, " %")
+        self.sl_key_blend.setToolTip("A soft edge between the subject and what shows behind it (hair, motion blur)")
+        self.sl_key_blend.changed.connect(lambda val: self._set("key_blend", val / 100.0))
+        self.chk_spill = QCheckBox("Remove the colour's spill on the subject")
+        self.chk_spill.setToolTip("Takes off the green / blue glow the screen throws on hair, skin and edges")
+        self.chk_spill.toggled.connect(lambda on: self._set("key_despill", bool(on)))
+        f.addRow("Amount", self.sl_key_sim)
+        f.addRow("Soft edge", self.sl_key_blend)
+        f.addRow(self.chk_spill)
+        self.key_rows = [self.sl_key_sim, self.sl_key_blend, self.chk_spill]
+        v.addWidget(g)
+
         g = QGroupBox("Sound")
         f = QFormLayout(g)
         self.sl_volume = ParamSlider(0, 200, 100, 1, 0, " %")
@@ -223,6 +262,12 @@ class LayerPanel(QScrollArea):
                         (self.sl_fade_in, clip.fade_in), (self.sl_fade_out, clip.fade_out),
                         (self.sl_volume, clip.volume * 100), (self.sl_pan_x, clip.pan_x), (self.sl_pan_y, clip.pan_y)):
             sl.set_value(val)
+        self.sl_key_sim.set_value(clip.key_similarity * 100)
+        self.sl_key_blend.set_value(clip.key_blend * 100)
+        self.chk_spill.blockSignals(True)
+        self.chk_spill.setChecked(clip.key_despill)
+        self.chk_spill.blockSignals(False)
+        self._show_key()
         self.chk_link.setVisible(bool(clip.link))
         self.chk_link.blockSignals(True)
         self.chk_link.setChecked(clip.linked)
@@ -248,6 +293,40 @@ class LayerPanel(QScrollArea):
         sound = f is not None and f.has_audio and not f.is_image
         self.grp_sound.setEnabled(sound)
         self.grp_sound.setToolTip("" if sound else "This footage has no sound")
+
+    def _toggle_key(self, on: bool):
+        if self.clip is None:
+            return
+        if on and not self.clip.key_color:
+            self._emit("ov_key_auto")              # find the screen colour (green when there's none)
+        elif not on:
+            self._set("key_color", "")
+        self._show_key()
+
+    def _key_preset(self, key: str):
+        if self.clip is None:
+            return
+        if key == "auto":
+            self._emit("ov_key_auto")
+        elif key == "pick":
+            c = QColorDialog.getColor(QColor(self.clip.key_color or keying.PRESETS["green"]), self, "Key colour")
+            if c.isValid():
+                self._set("key_color", c.name())
+        else:
+            self._set("key_color", keying.PRESETS[key])
+        self._show_key()
+
+    def _show_key(self):
+        c = self.clip
+        on = c is not None and bool(c.key_color)
+        self.chk_key.blockSignals(True)
+        self.chk_key.setChecked(on)
+        self.chk_key.blockSignals(False)
+        for w in self.key_rows:
+            w.setEnabled(on)
+        self.lbl_key.setStyleSheet(f"background: {c.key_color}; border: 1px solid #555;" if on else
+                                   "border: 1px dashed #555;")
+        self.lbl_key.setToolTip(c.key_color if on else "Off")
 
     def _set(self, key: str, val, undo_key: str = ""):
         c = self.clip

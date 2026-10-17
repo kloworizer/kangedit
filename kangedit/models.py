@@ -52,6 +52,8 @@ class Footage:
     transcript_lang: str = ""
     kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
     bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
+    projection: str = ""           # 360° footage: "equirect" | "dfisheye" ("" = a normal picture; see spherical.py)
+    lens_fov: float = 195.0        # dual fisheye: each lens's field of view, degrees
     id: str = field(default_factory=new_id)
 
     @property
@@ -102,6 +104,11 @@ class TimelineClip:
     speed: float = 1.0             # 0.5 = half speed (slow motion), 2 = double (see speed.py)
     ramp: str = ""                 # speed.RAMPS key: speed ramp template along the clip ("" = constant)
     audio_mode: str = "sync"       # speed.SOUND_MODES key: the sound at another speed (synced, pitch, normal, mute)
+    view_yaw: float = 0.0          # 360° footage: where the view looks (degrees: right, up, tilt) and how wide
+    view_pitch: float = 0.0
+    view_roll: float = 0.0
+    view_fov: float = 100.0
+    view_tiny: bool = False        # the whole sphere as a "tiny planet"
     id: str = field(default_factory=new_id)
 
     @property
@@ -179,6 +186,16 @@ class OverlayClip:
     mix_in: float = 0.0            # multicam: fades for the main track's transitions (set by multicam, kept apart
     mix_out: float = 0.0           # from the user's fade_in / fade_out)
     piece: int = 0                 # multicam switching: which shot of its main clip
+    # Chroma key (keying.py): "#rrggbb" of a green / blue screen made see-through, "" = off
+    key_color: str = ""
+    key_similarity: float = 0.12
+    key_blend: float = 0.08
+    key_despill: bool = True
+    view_yaw: float = 0.0          # 360° footage: where the view looks (degrees: right, up, tilt) and how wide
+    view_pitch: float = 0.0
+    view_roll: float = 0.0
+    view_fov: float = 100.0
+    view_tiny: bool = False        # the whole sphere as a "tiny planet"
     id: str = field(default_factory=new_id)
 
     @property

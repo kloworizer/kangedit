@@ -13,7 +13,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, Q
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
-from .. import reframe
+from .. import reframe, spherical
 from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
 from ..color import Grade
 from ..config import frame_size
@@ -643,7 +643,7 @@ class Viewer(QWidget):
             f = self.project.footage.get(c.footage_id)
             if f is None or not (c.start <= t < c.end) or c.start >= self.project.duration:
                 continue
-            w, h = reframe.overlay_size(f.width, f.height, tw, th, c.scale, c.box_w, c.box_h)
+            w, h = reframe.overlay_size(*spherical.dims(f, c), tw, th, c.scale, c.box_w, c.box_h)
             out.append((c.id, c.x, c.y, w / tw, h / th, c.rotation))
         return out
 
@@ -656,7 +656,8 @@ class Viewer(QWidget):
                     f.id, Grade.from_dict(g.to_dict()), f.log_profile, f.tonemap, clip.zoom, clip.offset_x,
                     clip.offset_y, f, rot=clip.rotation,
                     box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else (),
-                    speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur)
+                    speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur,
+                    view=spherical.view_of(clip) if spherical.is_360(f) else None)
 
     def _shots(self) -> list[Shot]:
         out, t = [], 0.0

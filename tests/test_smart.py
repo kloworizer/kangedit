@@ -284,3 +284,46 @@ def test_smarter_analysis_is_on_by_default(qapp):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_opening_a_big_older_project_stays_responsive(qapp, monkeypatch, tmp_path):
+    """An older project (analyses made before the smarter analysis) opens without freezing: the upgrade runs in
+    the background, outside the task queue, and the window refreshes a few times, not twice per file."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    from kangedit.ui import main_window as mw
+    files = [Footage(str(tmp_path / f"c{k:03d}.mp4"), 10.0, 1920, 1080, 30.0, False) for k in range(150)]
+    for f in files:
+        open(f.path, "wb").close()
+        _plain(10).save(an.analysis_path_for(f))                    # no smarter analysis yet
+    monkeypatch.setattr(smart, "enabled", lambda: True)
+    upgraded = []
+
+    def fake_smart(f, a, cancel=None):
+        a.sem = np.ones((len(a.thumbs), smart.EMBED_DIM), np.float16)
+        upgraded.append(f.id)
+        return True
+    monkeypatch.setattr(mw, "make_smart", fake_smart)
+    w = mw.MainWindow()
+    try:
+        refreshes = []
+        real = w.refresh_all
+        monkeypatch.setattr(w, "refresh_all", lambda *a, **k: (refreshes.append(1), real(*a, **k)))
+        queued = []
+        monkeypatch.setattr(w.tasks, "submit", lambda name, job, done, err=None: (queued.append(name),
+                                                                                   done(job(lambda *a: None,
+                                                                                            threading.Event()))))
+        p = Project()
+        p.footage = {f.id: f for f in files}
+        t = time.perf_counter()
+        w.set_project(p)
+        assert time.perf_counter() - t < 10.0
+        w._refine_thread.join(20)
+        QTest.qWait(800)
+        assert len(upgraded) == 150 and all(len(w.analyses[f.id].sem) for f in files)
+        assert len(refreshes) <= 6                                   # was two full refreshes per file
+    finally:
+        w.project.dirty = False
+        w.close()

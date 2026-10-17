@@ -52,8 +52,9 @@ def write_cube(path, size=2, fn=lambda r, g, b: (r, g, b)):
 @pytest.fixture(autouse=True)
 def no_blocking_message_boxes(monkeypatch):
     """Tests run unattended: a warning / error / information box (e.g. "Analysis failed" from a background
-    task finishing late, with no FFmpeg on the CI runners) must not wait for a click. They are recorded instead;
-    yes / no questions keep their usual behaviour."""
+    task finishing late, with no FFmpeg on the CI runners) must not wait for a click. They are recorded instead.
+    A yes / no question answers No unless the test sets its own answer: an unexpected one (such as the offer to
+    copy an older cache folder, 0.8 s after a window opens) would otherwise wait for a click forever."""
     shown = []
     try:
         from PySide6.QtWidgets import QMessageBox
@@ -63,6 +64,8 @@ def no_blocking_message_boxes(monkeypatch):
     for name in ("warning", "critical", "information"):
         monkeypatch.setattr(QMessageBox, name,
                             staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[1:3])) or QMessageBox.Ok))
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: shown.append(("question", a[1:3])) or QMessageBox.No))
     try:                        # the offer to transcribe after an import: declined
         from kangedit.ui.main_window import MainWindow
         monkeypatch.setattr(MainWindow, "_ask_transcribe",
