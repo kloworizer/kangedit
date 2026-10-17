@@ -6,6 +6,19 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-17
+
+### Fixed
+- A long timeline (hundreds of clips, such as an edit with fillers taken out) played without sound and
+  couldn't be exported: the whole timeline went to one FFmpeg run with an input per clip, more than a command
+  line may hold on Windows (or files a program may open on macOS). The preview sound and the export of a long
+  timeline are now made in parts, cut only at straight cuts, and joined; music, titles, captions and fades go
+  on in a final pass. When the preview sound can't be made, the status bar now says why.
+
+### Changed
+- The hook of a long-form auto edit takes each of its moments from a different scene (another time, day or
+  place) while there are scenes left, so it shows more of the trip.
+
 ## [0.6.4] - 2026-10-17
 
 ### Added

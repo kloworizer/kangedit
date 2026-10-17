@@ -478,18 +478,39 @@ def hook_plan(s: AutoEditSettings) -> tuple[int, float]:
 def find_hook_montage(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
                       avoid: list[TimelineClip]) -> list[TimelineClip]:
     """The long-form hook: hook_plan(s) short strong moments (none of them overlapping `avoid`), each
-    labelled "hook", strongest first."""
+    labelled "hook", strongest first; each from another scene (a different time, day or place, see
+    scenes.time_groups) while there are scenes left, else from another file."""
+    from .scenes import recorded_time, time_groups
     n, length = hook_plan(s)
     hs = copy.copy(s)
     hs.style = "hook"
-    hs.target_duration = n * length
+    hs.target_duration = length
     hs.clip_min = hs.clip_max = length
     hs.use_every_footage = False
     hs.max_uses = 0
     hs.order = "best_first"
-    clips = select(project_footage, analyses, hs, existing=avoid)[:n]
-    for c in clips:
-        c.label = "hook"
+    ids = [i for i in project_footage if i in analyses]
+    order = sorted(ids, key=lambda i: (recorded_time(project_footage[i]) is None,
+                                       recorded_time(project_footage[i]) or 0.0))
+    groups = time_groups(project_footage, order)
+    clips: list[TimelineClip] = []
+    for _ in range(n):
+        used_scenes = {groups.get(c.footage_id) for c in clips}
+        used_files = {c.footage_id for c in clips}
+        pick = None
+        for allowed in ([i for i in ids if groups.get(i) not in used_scenes],
+                        [i for i in ids if i not in used_files], ids):
+            if not allowed:
+                continue
+            got = select({i: project_footage[i] for i in allowed}, {i: analyses[i] for i in allowed}, hs,
+                         existing=list(avoid) + clips)
+            if got:
+                pick = got[0]
+                break
+        if pick is None:
+            break
+        pick.label = "hook"
+        clips.append(pick)
     return clips
 
 

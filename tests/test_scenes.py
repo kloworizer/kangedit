@@ -186,3 +186,28 @@ def test_file_name_date_sorts_bins_and_story(tmp_path):
     assert scenes.recorded_time(wa) == datetime(2026, 5, 1, 18, 30).timestamp()
     old = _file(tmp_path, "trip_2026_04_20.mp4", mtime=now)
     assert bins.recorded_date(old) == "2026-04-20"
+
+
+def test_hook_moments_come_from_different_scenes(tmp_path):
+    from kangedit.autoedit import find_hook_montage, hook_plan
+    # day 1 has four files (the most footage, so most of the strong moments), days 2 and 3 one each
+    fs = [_file(tmp_path, f"d1_{k}.mp4", tag=_iso(2026, 5, 1, 9, 10 * k), dur=60) for k in range(4)]
+    fs += [_file(tmp_path, "d2.mp4", tag=_iso(2026, 5, 2, 15), dur=60),
+           _file(tmp_path, "d3.mp4", tag=_iso(2026, 5, 3, 11), dur=60)]
+    for f in fs:
+        os.utime(f.path, (time.time(), time.time()))
+    footage = {f.id: f for f in fs}
+    analyses = {f.id: _analysis(60, (10, 20), k) for k, f in enumerate(fs)}
+    for f in fs[:4]:                                   # day 1's moments are the strongest by far
+        an = analyses[f.id]
+        an.activity, an.motion, an.audio = an.activity * 4, an.motion + 6.0, an.audio + 12.0
+    s = AutoEditSettings(video_format="long", clip_min=4.0, clip_max=8.0, min_gap=2.0)
+    hooks = find_hook_montage(footage, analyses, s, [])
+    n, length = hook_plan(s)
+    assert len(hooks) == n == 3 and all(c.label == "hook" for c in hooks)
+    groups = scenes.time_groups(footage, story_order(footage, list(footage)))
+    assert len({groups[c.footage_id] for c in hooks}) == 3                 # one from each day
+    # one scene only: still three moments, from different files
+    one = {f.id: f for f in fs[:4]}
+    hooks = find_hook_montage(one, {i: analyses[i] for i in one}, s, [])
+    assert len(hooks) == 3 and len({c.footage_id for c in hooks}) == 3

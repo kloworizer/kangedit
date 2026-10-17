@@ -98,6 +98,7 @@ class RefineTabs(QTabWidget):
 
 class MainWindow(QMainWindow):
     audio_ready = Signal(int, str)
+    audio_failed = Signal(int, str)        # the preview sound couldn't be made: the reason
     update_checked = Signal(object, str, bool)   # updater.Release or None, error, asked by the user
     analysis_ready = Signal(str, object)   # footage id, Analysis (from worker threads)
 
@@ -625,6 +626,7 @@ class MainWindow(QMainWindow):
         self.caps_panel.toggled.connect(self._toggle_captions)
 
         self.audio_ready.connect(self._on_audio_ready)
+        self.audio_failed.connect(self._on_audio_failed)
         self.update_checked.connect(self._on_update_checked)
         self.analysis_ready.connect(self._on_analysis_ready)
 
@@ -3700,14 +3702,19 @@ class MainWindow(QMainWindow):
                 render_audio(proj, use_proxies, path, cancel)
                 if not cancel.is_set():
                     self.audio_ready.emit(ver, path)
-            except Exception:  # noqa: BLE001 - preview audio is best effort
-                pass
+            except Exception as e:  # noqa: BLE001 - preview audio is best effort, but say why there is none
+                if not cancel.is_set():
+                    self.audio_failed.emit(ver, str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__)
 
         threading.Thread(target=work, daemon=True).start()
 
     def _on_audio_ready(self, ver: int, path: str):
         if ver == self._audio_version:
             self.viewer.set_audio(path)   # also while playing: sound edits are heard right away
+
+    def _on_audio_failed(self, ver: int, reason: str):
+        if ver == self._audio_version:
+            self.lbl_status.setText(f"Playback has no sound: the preview sound couldn't be made ({reason[:200]})")
 
     def _on_play_state(self, playing: bool):
         if playing:

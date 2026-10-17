@@ -15,7 +15,7 @@ from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
 from .config import cache_dir, frame_size
-from .edits import ClipPlan, plan
+from .edits import ClipPlan, edits, plan
 from .fonts import copy_family
 from .titles import write_titles_ass
 from .ffmpeg import FFmpegError, ProgressCb, ffmpeg_matrix, hw_encoder, hw_encoder_args, hw_encoder_label, run_ffmpeg
@@ -26,6 +26,12 @@ CODECS = {
     "h265": ("H.265 / HEVC (MP4) - smaller files", ".mp4"),
     "prores": ("Apple ProRes 422 HQ (MOV) - for further editing", ".mov"),
 }
+# One FFmpeg run opens every clip as an input: a long timeline (hundreds of clips, as after fillers are taken
+# out) is made in parts of about PART_INPUTS inputs, joined afterwards. Windows also limits a command line to
+# 32767 characters, and macOS a program to 256 open files by default.
+MAX_INPUTS = 150
+MAX_ARGS = 24000
+PART_INPUTS = 80
 GPU_STALL = 180.0   # seconds without progress before a GPU export is redone on the CPU
 GRADE_FMT = "gbrp16le"   # pixel format clips are graded in (16-bit planar RGB)
 QUALITIES = {"High": 18, "Medium": 21, "Small file": 26}
@@ -247,14 +253,16 @@ def _overlay_input(project: Project, c: OverlayClip, use_proxies: bool, fps: flo
 
 
 def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str], graph: list[str], k: int,
-              video: Optional[tuple] = None) -> tuple[int, str, list[str]]:
+              video: Optional[tuple] = None, items: Optional[list] = None,
+              dur: Optional[float] = None) -> tuple[int, str, list[str]]:
     """Add the overlay layers (inputs from index k on). video: (frame width, height, workdir, [base label])
-    lays their pictures over the base, bottom layer first; None only takes their sound.
+    lays their pictures over the base, bottom layer first; None only takes their sound. `items` (instead of
+    the project's overlays) and `dur` (instead of the timeline's length) are for a part of the timeline.
     Returns (next input index, video label, overlay audio labels)."""
-    dur = project.duration
+    dur = project.duration if dur is None else dur
     vout = video[3] if video else ""
     audio = []
-    clips = sorted((c for c in project.overlays if c.footage_id in project.footage and c.duration > 0.01
+    clips = sorted((c for c in (project.overlays if items is None else items) if c.footage_id in project.footage and c.duration > 0.01
                     and c.start < dur and os.path.exists(project.footage[c.footage_id].path)),
                    key=lambda c: c.track)
     for j, c in enumerate(clips):
@@ -356,14 +364,12 @@ def gpu_encoder(s: ExportSettings) -> Optional[str]:
     return hw_encoder(s.codec) if s.use_gpu and s.codec in ("h264", "h265") else None
 
 
-def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Optional[str] = None) -> list[str]:
-    tw, th = frame_size(s.aspect, s.resolution)
-    inputs: list[str] = []
-    graph: list[str] = []
-    k = 0
-    final_fmt = "yuv422p10le" if s.codec == "prores" else "yuv420p"
-    plans = plan(project, s.fps)
-    for i, (clip, cp) in enumerate(zip(project.clips, plans)):
+def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, plans: list[ClipPlan],
+                inputs: list[str], graph: list[str], k: int, tw: int, th: int, final_fmt: str) -> int:
+    """Add main-track clips `rng` (picture and sound, labels [v{j}] / [a{j}] numbered from 0) joined into
+    [vcat] / [acat], inputs from index k on. Returns the next input index."""
+    for j, i in enumerate(rng):
+        clip, cp = project.clips[i], plans[i]
         f = project.footage[clip.footage_id]
         args, n_in, silent, ss = _clip_inputs(project, s.use_proxies, i, cp, s.fps)
         inputs += args
@@ -380,13 +386,13 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
         # framerate (blended frames) keeps the input's timebase; the fps pass after it sets the one xfade needs.
         resample = (f"framerate=fps={s.fps:.4f},fps={s.fps:.4f}" if spd and s.blend_slowmo and min(tm.v_in, tm.v_out, tm.speed) < 0.99
                     else f"fps={s.fps:.4f}")
-        chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}{spd}{resample}{turn}[v{i}a]"]
+        chain = [f"[{vi}]setpts=PTS-STARTPTS,{prep}{trim}{spd}{resample}{turn}[v{j}a]"]
         sw, sh = reframe.quarter_dims(f.width, f.height, quarters)
         box = reframe.box_rect(tw, th, (clip.box_x, clip.box_y, clip.box_w, clip.box_h)) \
             if clip.box_w > 0 and clip.box_h > 0 else None
         color = needs_color(clip.grade, f.log_profile)
         ph = box[3] if box else th          # picture height: halation and sharpening scale with it
-        halation = ffmpeg_halation(clip.grade, ph, f"v{i}g", f"v{i}h")
+        halation = ffmpeg_halation(clip.grade, ph, f"v{j}g", f"v{j}h")
         # Graded clips are converted to 16-bit planar RGB (as precise as packed RGB48, faster through the
         # LUT) in the same swscale pass that resizes them, instead of a second full-frame pass.
         convert = ""
@@ -397,29 +403,50 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
             convert = f":in_color_matrix={matrix}:in_range=auto|{GRADE_FMT}"
         mode = "fill" if box else s.fit_mode
         chain.append(reframe.ffmpeg_filter(sw, sh, box[2] if box else tw, box[3] if box else th, mode, clip.zoom,
-                                           clip.offset_x, clip.offset_y, f"v{i}a", f"v{i}b", f"c{i}", convert))
-        post = f"[v{i}b]"
+                                           clip.offset_x, clip.offset_y, f"v{j}a", f"v{j}b", f"c{j}", convert))
+        post = f"[v{j}b]"
         if convert and f"format={GRADE_FMT}" not in chain[-1].split("overlay")[-1]:
             post += f"scale={convert.split('|')[0][1:]},format={GRADE_FMT},"     # (blurred background)
         if color:
             lut = _grade_cube(workdir, f"lut_{i}.cube", clip.grade, f)
             post += f"lut3d=file={lut}:interp=tetrahedral,"
         if halation:
-            chain.append(post + f"null[v{i}g]")
+            chain.append(post + f"null[v{j}g]")
             chain += halation
-            post = f"[v{i}h]"
+            post = f"[v{j}h]"
         sharpen = ffmpeg_sharpen(clip.grade, ph)
         rot = reframe.ffmpeg_tilt(tilt)
         pad = f"pad={tw}:{th}:{box[0]}:{box[1]}:black," if box else ""
         to_out = "scale=" + ("" if convert or f.is_image else f"in_color_matrix={matrix}:in_range=auto:")
         post += (f"{to_out}out_color_matrix=bt709:out_range=tv,format={final_fmt},{sharpen + ',' if sharpen else ''}"
-                 f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{i}]")
+                 f"{rot + ',' if rot else ''}{pad}tpad=stop_mode=clone:stop_duration=1,trim=end_frame={cp.v_frames},setpts=PTS-STARTPTS[v{j}]")
         chain.append(post)
         graph += chain
-        graph.append(_clip_audio(ai, i, clip, cp, silent, ss))
+        graph.append(_clip_audio(ai, j, clip, cp, silent, ss))
 
-    _join(graph, plans, s.fps, video=True)
-    k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"))
+    _join(graph, [plans[i] for i in rng], s.fps, video=True)
+    return k
+
+
+def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Optional[str] = None,
+                 main: Optional[str] = None, rest: Optional[list] = None) -> list[str]:
+    """FFmpeg arguments for the export. `main`: a concat list of the main track made in parts (with the
+    overlays inside them), and `rest` the overlays still to lay over it."""
+    tw, th = frame_size(s.aspect, s.resolution)
+    inputs: list[str] = []
+    graph: list[str] = []
+    k = 0
+    final_fmt = "yuv422p10le" if s.codec == "prores" else "yuv420p"
+    if main is None:
+        k = _main_clips(project, s, workdir, range(len(project.clips)), plan(project, s.fps), inputs, graph, k,
+                        tw, th, final_fmt)
+    else:                     # the main track made in parts (see _parts), joined: one input
+        inputs += ["-f", "concat", "-safe", "0", "-i", main]
+        graph.append("[0:v:0]setpts=PTS-STARTPTS[vcat]")
+        graph.append("[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[acat]")
+        k = 1
+    k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"),
+                                  items=rest)
     aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
     fonts_dir = os.path.join(workdir, "fonts")
     texts = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
@@ -478,6 +505,125 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
     return inputs + out
 
 
+@dataclass
+class Part:
+    """A stretch of the main track made on its own: clips `rng`, from timeline frame `f0` to `f1`, with the
+    overlays that lie wholly inside it (moved to its start)."""
+    rng: range
+    f0: int
+    f1: int
+    overlays: list
+
+
+def _parts(project: Project, fps: float, use_proxies: bool, video: bool) -> Optional[tuple[list[Part], list]]:
+    """How to make a long timeline in parts: (parts, the overlays left for the final pass), or None when one
+    FFmpeg run can take it all. Parts end only at straight cuts (no transition or split edit), so joining them
+    is the same as making the whole at once; at one no overlay plays across when there is one (an overlay
+    across a part's end is laid over the joined parts in the final pass)."""
+    clips = project.clips
+    plans = plan(project, fps)
+    n_in, chars = [], 0
+    for i, cp in enumerate(plans):
+        args, n, _silent, _ss = _clip_inputs(project, use_proxies, i, cp, fps)
+        n_in.append(n)
+        chars += sum(len(a) + 3 for a in args)
+    ovs = [c for c in project.overlays if c.footage_id in project.footage and c.duration > 0.01]
+    total = sum(n_in) + len(ovs) + len(project.sounds)
+    chars += 120 * (len(ovs) + len(project.sounds))
+    if total <= MAX_INPUTS and chars <= MAX_ARGS:
+        return None
+    es = edits(project)
+    end_f = [cp.start_f + cp.nfr for cp in plans]
+    starts = [cp.start_f for cp in plans]
+
+    def cut(i: int) -> bool:        # a straight cut into clip i: a part may start there
+        e = es[i]
+        return e.half <= 0 and abs(e.split) < 1e-6 and e.lead <= 0
+
+    def spanned(i: int) -> bool:    # an overlay plays across that cut (it then goes to the final pass)
+        t = starts[i] / fps
+        return any(o.start < t - 1e-3 and o.end > t + 1e-3 for o in ovs)
+
+    bounds, count = [0], 0
+    for i in range(len(clips)):
+        if i > bounds[-1] and count >= PART_INPUTS and cut(i) and (count >= 2 * PART_INPUTS or not spanned(i)):
+            bounds.append(i)
+            count = 0
+        count += n_in[i]
+    bounds.append(len(clips))
+    parts, placed = [], set()
+    for a, b in zip(bounds, bounds[1:]):
+        f0, f1 = starts[a], end_f[b - 1]
+        t0, t1 = f0 / fps, f1 / fps
+        inside = []
+        for o in ovs:
+            if id(o) not in placed and o.start >= t0 - 1e-3 and o.end <= t1 + 1e-3:
+                placed.add(id(o))
+                moved = OverlayClip.from_dict(o.to_dict())
+                moved.start = o.start - t0
+                inside.append(moved)
+        parts.append(Part(range(a, b), f0, f1, inside))
+    if len(parts) < 2:
+        return None
+    return parts, [o for o in ovs if id(o) not in placed]
+
+
+def _write_concat(workdir: str, files: list[str]) -> str:
+    path = os.path.join(workdir, "parts.txt")
+    with open(path, "w", encoding="utf-8") as fh:
+        for f in files:
+            fh.write("file '" + f.replace("\\", "/").replace("'", "'\\''") + "'\n")
+    return path
+
+
+def _part_video_args(s: ExportSettings) -> list[str]:
+    """A part of the export is kept at near-lossless quality until the final pass encodes it."""
+    if s.codec == "prores":
+        return ["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "8", "-pix_fmt", "yuv420p"]
+
+
+def _export_parts(project: Project, s: ExportSettings, workdir: str, parts: list[Part],
+                  progress: Optional[ProgressCb], cancel: Optional[threading.Event]) -> str:
+    """Make each part of the main track (with its overlays) to a file; returns their concat list."""
+    tw, th = frame_size(s.aspect, s.resolution)
+    final_fmt = "yuv422p10le" if s.codec == "prores" else "yuv420p"
+    plans = plan(project, s.fps)
+    total = max(1, parts[-1].f1)
+    files = []
+    for n, part in enumerate(parts):
+        inputs: list[str] = []
+        graph: list[str] = []
+        k = _main_clips(project, s, workdir, part.rng, plans, inputs, graph, 0, tw, th, final_fmt)
+        dur = (part.f1 - part.f0) / s.fps
+        k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"),
+                                      items=part.overlays, dur=dur)
+        aout = "acat"
+        if ov_audio:
+            graph.append(f"[acat]{''.join(f'[{x}]' for x in ov_audio)}amix=inputs={len(ov_audio) + 1}:normalize=0:"
+                         f"duration=first:dropout_transition=0[apart]")
+            aout = "apart"
+        # every part's sound exactly as long as its picture, so the joined parts stay in sync
+        graph.append(f"[{aout}]apad,atrim=end={dur:.6f}[afit]")
+        graph.append(f"[{vout}]trim=end_frame={part.f1 - part.f0},setpts=PTS-STARTPTS[vfit]")
+        gpath = os.path.join(workdir, f"graph_part{n}.txt")
+        with open(gpath, "w", encoding="utf-8") as fh:
+            fh.write(";\n".join(graph))
+        out = os.path.join(workdir, f"part{n:03d}.mkv")
+        args = inputs + ["-/filter_complex", os.path.basename(gpath), "-map", "[vfit]", "-map", "[afit]"] \
+            + _part_video_args(s) + ["-r", f"{s.fps:.4f}", "-colorspace", "bt709", "-color_primaries", "bt709",
+                                     "-color_trc", "bt709", "-color_range", "tv", "-c:a", "pcm_s16le", out]
+        base = part.f0 / total
+
+        def prog(p, msg="", base=base, share=(part.f1 - part.f0) / total, n=n):
+            if progress is not None:
+                progress(0.85 * (base + share * max(0.0, min(1.0, p))),
+                         f"Exporting part {n + 1} of {len(parts)}")
+        run_ffmpeg(args, dur, prog, cancel, cwd=workdir, label=f"Exporting part {n + 1} of {len(parts)}")
+        files.append(out)
+    return _write_concat(workdir, files)
+
+
 def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] = None,
            cancel: Optional[threading.Event] = None) -> str:
     if not project.clips:
@@ -486,47 +632,97 @@ def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] =
     name = os.path.basename(s.output)
     workdir = tempfile.mkdtemp(prefix="export_", dir=str(cache_dir("tmp")))
     try:
+        main, rest, final = None, None, progress
+        split = _parts(project, s.fps, s.use_proxies, video=True)
+        if split is not None:
+            parts, rest = split
+            main = _export_parts(project, s, workdir, parts, progress, cancel)
+
+            def final(p, msg="", _progress=progress):
+                if _progress is not None:
+                    _progress(0.85 + 0.15 * max(0.0, min(1.0, p)), msg)
         if encoder:
             try:
                 # A GPU encoder that hangs (some driver versions never start) is given up after GPU_STALL s.
-                run_ffmpeg(build_export(project, s, workdir, encoder), project.duration, progress, cancel,
+                run_ffmpeg(build_export(project, s, workdir, encoder, main, rest), project.duration, final, cancel,
                            cwd=workdir, label=f"Exporting {name} (GPU: {hw_encoder_label(encoder)})",
                            stall=GPU_STALL)
                 return s.output
             except FFmpegError:
                 pass   # driver hiccup, out of video memory, a hang, unsupported source...: redo it on the CPU
-        run_ffmpeg(build_export(project, s, workdir), project.duration, progress, cancel, cwd=workdir,
-                   label=f"Exporting {name}" + (" (CPU)" if s.use_gpu else ""))
+        run_ffmpeg(build_export(project, s, workdir, None, main, rest), project.duration, final, cancel,
+                   cwd=workdir, label=f"Exporting {name}" + (" (CPU)" if s.use_gpu else ""))
     finally:
         _cubes.pop(workdir, None)
         shutil.rmtree(workdir, ignore_errors=True)
     return s.output
 
 
-def render_audio(project: Project, use_proxies: bool, out_wav: str,
-                 cancel: Optional[threading.Event] = None) -> Optional[str]:
-    """Mix the timeline audio into a WAV for synced preview playback."""
-    if not project.clips:
-        return None
-    inputs, graph, k = [], [], 0
-    fps = project.settings.fps
-    plans = plan(project, fps)
-    for i, (clip, cp) in enumerate(zip(project.clips, plans)):
+def _main_audio(project: Project, use_proxies: bool, fps: float, rng: range, plans: list[ClipPlan],
+                inputs: list[str], graph: list[str], k: int) -> int:
+    """The sound of main-track clips `rng` joined into [acat] (inputs from index k on). Returns the next
+    input index."""
+    for j, i in enumerate(rng):
+        clip, cp = project.clips[i], plans[i]
         args, n_in, silent, ss = _clip_inputs(project, use_proxies, i, cp, fps)
         inputs += args
         ai = f"{k + 1}:a:0" if silent else f"{k}:a:0"
         k += n_in
-        graph.append(_clip_audio(ai, i, clip, cp, silent, ss))
-    _join(graph, plans, fps, video=False)
-    k, _, ov_audio = _overlays(project, use_proxies, fps, inputs, graph, k)
-    aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
+        graph.append(_clip_audio(ai, j, clip, cp, silent, ss))
+    _join(graph, [plans[i] for i in rng], fps, video=False)
+    return k
+
+
+def _run_graph(inputs: list[str], graph: list[str], out_label: str, out: str, workdir: str, name: str,
+               duration: float, cancel: Optional[threading.Event]) -> None:
+    with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh:
+        fh.write(";\n".join(graph))
+    run_ffmpeg(inputs + ["-/filter_complex", name, "-map", f"[{out_label}]", "-c:a", "pcm_s16le", out],
+               duration, None, cancel, cwd=workdir)
+
+
+def render_audio(project: Project, use_proxies: bool, out_wav: str,
+                 cancel: Optional[threading.Event] = None) -> Optional[str]:
+    """Mix the timeline audio into a WAV for synced preview playback (a long timeline in parts, joined)."""
+    if not project.clips:
+        return None
+    fps = project.settings.fps
+    plans = plan(project, fps)
     workdir = tempfile.mkdtemp(prefix="audio_", dir=str(cache_dir("tmp")))
     try:
-        with open(os.path.join(workdir, "graph.txt"), "w", encoding="utf-8") as fh:
-            fh.write(";\n".join(graph))
+        inputs: list[str] = []
+        graph: list[str] = []
+        split = _parts(project, fps, use_proxies, video=False)
+        rest = None
+        if split is None:
+            k = _main_audio(project, use_proxies, fps, range(len(project.clips)), plans, inputs, graph, 0)
+        else:
+            parts, rest = split
+            files = []
+            for n, part in enumerate(parts):
+                p_in: list[str] = []
+                p_graph: list[str] = []
+                pk = _main_audio(project, use_proxies, fps, part.rng, plans, p_in, p_graph, 0)
+                dur = (part.f1 - part.f0) / fps
+                _, _, ov = _overlays(project, use_proxies, fps, p_in, p_graph, pk, items=part.overlays, dur=dur)
+                label = "acat"
+                if ov:
+                    p_graph.append(f"[acat]{''.join(f'[{x}]' for x in ov)}amix=inputs={len(ov) + 1}:normalize=0:"
+                                   f"duration=first:dropout_transition=0[apart]")
+                    label = "apart"
+                p_graph.append(f"[{label}]apad,atrim=end={dur:.6f}[afit]")
+                f = os.path.join(workdir, f"part{n:03d}.wav")
+                _run_graph(p_in, p_graph, "afit", f, workdir, f"graph_part{n}.txt", dur, cancel)
+                if cancel is not None and cancel.is_set():
+                    return None
+                files.append(f)
+            inputs += ["-f", "concat", "-safe", "0", "-i", _write_concat(workdir, files)]
+            graph.append("[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[acat]")
+            k = 1
+        k, _, ov_audio = _overlays(project, use_proxies, fps, inputs, graph, k, items=rest)
+        aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
         tmp = out_wav + ".part.wav"
-        run_ffmpeg(inputs + ["-/filter_complex", "graph.txt", "-map", f"[{aout}]", "-c:a", "pcm_s16le", tmp],
-                   project.duration, None, cancel, cwd=workdir)
+        _run_graph(inputs, graph, aout, tmp, workdir, "graph.txt", project.duration, cancel)
         os.replace(tmp, out_wav)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
