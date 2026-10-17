@@ -512,3 +512,34 @@ def write_ass(path: str, caps: list[Caption], style: CaptionStyle, width: int, h
                     event(t0, t1, f"{{\\fs{fs}{pop}}}{_ass_text(w)}")
                 else:
                     event(t0, t1, render(c, i))
+
+
+def merged_transcript(footage: list[Footage], headers: bool = True) -> str:
+    """The transcripts of these files as one text in recording order (the oldest date each file carries, see
+    scenes.recorded_time), a sentence per line; with `headers`, each file's part starts with its recording
+    time and name. Files without a transcript (or with no words) are left out."""
+    from datetime import datetime
+
+    from .polish import sentence_spans
+    from .scenes import recorded_time
+
+    def key(f: Footage):
+        t = recorded_time(f)
+        return (t is None, t or 0.0, f.name.lower())
+
+    parts = []
+    for f in sorted((f for f in footage if f.transcript), key=key):
+        lines = []
+        for i, j in sentence_spans(f.transcript):
+            line = " ".join(t for t in (str(w.get("w", "")).strip() for w in f.transcript[i:j + 1]) if t)
+            if line:
+                lines.append(line)
+        if not lines:
+            continue
+        if headers:
+            t = recorded_time(f)
+            when = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M") if t is not None else "no date"
+            lines.insert(0, f"── {when} · {f.name}")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
+

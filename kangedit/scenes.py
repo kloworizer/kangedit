@@ -1,9 +1,9 @@
 """When footage was recorded, scenes (time groups of footage), and scenic openers for them.
 
 The recording time of a file is the oldest of the dates it carries: the camera's creation time tag, the file's
-creation date and its modification date. Copying a file renews its creation date but keeps its modification
-date, and a camera with its clock unset writes no tag or a wrong one, so the oldest believable date is the
-closest to when it was really shot. Bins by date, story order (and so where the opening and closing are looked
+creation date, its modification date and a date in its file name. Copying a file renews its creation date but
+keeps its modification date, and a camera with its clock unset writes no tag or a wrong one, so the oldest
+believable date is the closest to when it was really shot. Bins by date, story order (and so where the opening and closing are looked
 for) and scenes all use it.
 
 A scene is a time group: files recorded close together. A new scene starts where the next file begins more
@@ -57,10 +57,40 @@ def _file_times(path: str) -> list[float]:
     return out
 
 
+# A date in a file name, with the time when there is one: VID_20260501_091005, PXL_20260501_091005123,
+# DJI_20260501091005_0001, 2026-05-01 09.10.05, IMG-20260501-WA0001, GX010001_2026_05_01...
+_NAME_DATE = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])"
+                        r"(?:(?: at |[ _T.-])?([01]\d|2[0-3])[-_.:h]?([0-5]\d)(?:[-_.:m]?([0-5]\d))?\d{0,3})?(?!\d)")
+
+
+def name_time(name: str) -> Optional[tuple[float, bool]]:
+    """(timestamp, has a time of day) of the date in a file name (local time), or None when it has none (or
+    one that can't be a recording date)."""
+    stem = os.path.splitext(os.path.basename(name))[0]
+    for m in _NAME_DATE.finditer(stem):
+        y, mo, d, h, mi, sec = (int(g) if g else None for g in m.groups())
+        try:
+            dt = datetime(y, mo, d, h if h is not None else 12, mi or 0, sec or 0)
+        except ValueError:
+            continue
+        t = dt.timestamp()
+        if EARLIEST <= t <= datetime.now().timestamp() + 86400:
+            return t, h is not None
+    return None
+
+
 def recorded_time(f: Footage) -> Optional[float]:
     """When footage was recorded (a timestamp): the oldest believable of its creation tag, its file's creation
-    date and its modification date; None when it has none of them."""
+    date, its modification date and a date in its file name (phones and cameras often name files by when they
+    were recorded); None when it has none of them. A name with a date but no time only counts when it's an
+    earlier day than the others."""
     times = [t for t in [_tag_time(f)] + _file_times(f.path) if t is not None and t >= EARLIEST]
+    named = name_time(f.path)
+    if named is not None:
+        t, timed = named
+        day = datetime.fromtimestamp(t).date()
+        if timed or not any(datetime.fromtimestamp(x).date() <= day for x in times):
+            times.append(t)
     return min(times) if times else None
 
 

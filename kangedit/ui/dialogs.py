@@ -12,12 +12,13 @@ from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
                                QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-                               QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+                               QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
+                               QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
 from ..autoedit import (FORMAT_PRESETS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
                         suggest_duration)
-from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS
+from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS, merged_transcript
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
                       fmt_bytes, folder_size, frame_size, open_path)
 from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
@@ -190,8 +191,11 @@ class AutoEditDialog(QDialog):
         f = QFormLayout(g)
         self.cb_style = _combo(STYLE_LABELS, last.style)
         self.cb_order = _combo(ORDERS, last.order)
-        self.chk_every = QCheckBox("Use every footage at least once (if it fits)")
+        self.chk_every = QCheckBox("Use every footage at least once")
         self.chk_every.setChecked(last.use_every_footage)
+        self.chk_every.setToolTip("Every usable file gets a clip, shorter ones when that fits them in the target "
+                                  "length; with more files than fit even at the shortest clip length, the edit "
+                                  "runs longer than the target.")
         self.chk_replace = QCheckBox("Replace current timeline (otherwise append)")
         self.chk_replace.setChecked(last.replace_timeline)
         f.addRow("Prioritize", self.cb_style)
@@ -241,6 +245,12 @@ class AutoEditDialog(QDialog):
         self.chk_pauses.setToolTip("Each cut moves to the nearest pause (the transcript's word timings, else a "
                                    "quieter moment), up to 0.6 s")
         self.chk_pauses.setChecked(last.cut_on_pauses)
+        self.chk_sentences = QCheckBox("Whole sentences (long form): every clip with speech holds complete sentences")
+        self.chk_sentences.setToolTip("In a long-form edit each clip that has speech starts and ends on whole "
+                                      "sentences of the transcript (a sentence cut into is taken in whole, or "
+                                      "left out when the clip would get too long). Uses the transcripts: footage "
+                                      "without one is cut between words as usual (Media panel → Transcribe).")
+        self.chk_sentences.setChecked(last.whole_sentences)
         self.chk_beats = QCheckBox("Cut on the beat of the music (when the timeline has music)")
         self.chk_beats.setToolTip("Add music first (Sounds tab → Background music): the cuts then move to its nearest beat, up to "
                                   "half a beat")
@@ -255,7 +265,8 @@ class AutoEditDialog(QDialog):
         self.chk_loud = QCheckBox("Even out the loudness of the clips")
         self.chk_loud.setChecked(last.even_loudness)
         f.addRow("Pacing", self.cb_pacing)
-        for w in (self.chk_pauses, self.chk_beats, self.chk_fillers, self.chk_variety, self.chk_loud):
+        for w in (self.chk_sentences, self.chk_pauses, self.chk_beats, self.chk_fillers, self.chk_variety,
+                  self.chk_loud):
             f.addRow(w)
         lay2.addWidget(g)
 
@@ -538,6 +549,7 @@ class AutoEditDialog(QDialog):
             bookends=self.chk_bookends.isChecked(),
             pacing=self.cb_pacing.currentData(),
             cut_on_pauses=self.chk_pauses.isChecked(),
+            whole_sentences=self.chk_sentences.isChecked(),
             beat_sync=self.chk_beats.isChecked(),
             remove_fillers=self.chk_fillers.isChecked(),
             shot_variety=self.chk_variety.isChecked(),
@@ -1089,3 +1101,81 @@ class OfficialLutDialog(QDialog):
 
     def mapping(self) -> dict:
         return {k: cb.currentData() for k, cb in self.combos.items() if cb.currentData()}
+
+
+class TranscriptDialog(QDialog):
+    """The transcripts of the footage merged into one text in recording order, to read, copy or save."""
+
+    def __init__(self, project: Project, ids: Optional[list[str]] = None, parent=None,
+                 transcribe=None):
+        super().__init__(parent)
+        self.setWindowTitle("Full transcript")
+        self.resize(760, 640)
+        self.project = project
+        self.ids = ids
+        self._transcribe = transcribe        # called with the ids of the files without a transcript
+        lay = QVBoxLayout(self)
+        self.lbl = QLabel()
+        self.lbl.setWordWrap(True)
+        lay.addWidget(self.lbl)
+        self.chk_headers = QCheckBox("File names and recording times")
+        self.chk_headers.setChecked(True)
+        self.chk_headers.toggled.connect(self.refresh)
+        lay.addWidget(self.chk_headers)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        lay.addWidget(self.text, 1)
+        row = QHBoxLayout()
+        self.b_rest = QPushButton("Transcribe the rest")
+        self.b_rest.setToolTip("Transcribe the files without a transcript (in the background); open this again "
+                               "when it's done")
+        self.b_rest.clicked.connect(self._transcribe_rest)
+        b_copy = QPushButton("Copy all")
+        b_copy.setObjectName("primary")
+        b_copy.clicked.connect(self.copy_all)
+        b_save = QPushButton("Save as .txt…")
+        b_save.clicked.connect(self._save)
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(self.b_rest)
+        row.addStretch(1)
+        row.addWidget(b_copy)
+        row.addWidget(b_save)
+        row.addWidget(b_close)
+        lay.addLayout(row)
+        self.refresh()
+
+    def footage(self) -> list:
+        ids = self.ids if self.ids is not None else list(self.project.footage)
+        return [self.project.footage[i] for i in ids if i in self.project.footage
+                and not self.project.footage[i].is_image]
+
+    def missing(self) -> list[str]:
+        return [f.id for f in self.footage() if f.transcript is None and f.has_audio]
+
+    def refresh(self):
+        foot = self.footage()
+        done = sum(1 for f in foot if f.transcript)
+        rest = self.missing()
+        self.text.setPlainText(merged_transcript(foot, self.chk_headers.isChecked()))
+        msg = f"{done} of {len(foot)} file(s) transcribed, in recording order."
+        if rest:
+            msg += f" {len(rest)} file(s) with sound have no transcript yet."
+        self.lbl.setText(msg)
+        self.b_rest.setVisible(bool(rest) and self._transcribe is not None)
+
+    def copy_all(self):
+        QApplication.clipboard().setText(self.text.toPlainText())
+        self.lbl.setText(self.lbl.text().split(" Copied")[0] + " Copied to the clipboard.")
+
+    def _transcribe_rest(self):
+        if self._transcribe is not None:
+            self._transcribe(self.missing())
+            self.b_rest.setEnabled(False)
+
+    def _save(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save transcript", "transcript.txt", "Text (*.txt)")
+        if path:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.text.toPlainText() + "\n")
+

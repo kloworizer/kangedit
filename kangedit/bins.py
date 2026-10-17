@@ -106,7 +106,7 @@ def move_to_bin(project: Project, ids: list[str], name: str) -> None:
 
 def recorded_date(f: Footage) -> str:
     """The day the footage was recorded, "YYYY-MM-DD" (local time): the oldest of its creation time tag, the
-    file's creation date and its modification date (see scenes.recorded_time)."""
+    file's creation date, its modification date and a date in its file name (see scenes.recorded_time)."""
     t = recorded_time(f)
     if t is None:
         return "Unknown date"

@@ -450,16 +450,21 @@ class Project:
         return -1
 
     def conflicts(self, min_gap: float = 0.0) -> set[str]:
-        """Clip ids that overlap (or sit closer than min_gap to) another clip of the same footage."""
+        """Clip ids that overlap (or sit closer than min_gap to) another clip of the same footage. Pieces of one
+        take cut straight together (one right after the other on the timeline, going on in the source, such as
+        what's left after fillers are taken out) are not counted."""
         bad: set[str] = set()
         by_src: dict[str, list[TimelineClip]] = {}
         for c in self.clips:
             by_src.setdefault(c.footage_id, []).append(c)
+        pos = {id(c): k for k, c in enumerate(self.clips)}
         for items in by_src.values():
             items = sorted(items, key=lambda c: c.src_in)
             for a, b in zip(items, items[1:]):
                 if abs(b.src_in - a.src_out) < 0.02:
                     continue  # contiguous pieces (e.g. after a split) are not a repeat
+                if pos[id(b)] == pos[id(a)] + 1 and b.src_in >= a.src_out - 0.02:
+                    continue  # a jump cut (fillers / a pause taken out): the take goes on, nothing is repeated
                 if b.src_in < a.src_out + min_gap - 1e-3:
                     bad.add(a.id)
                     bad.add(b.id)

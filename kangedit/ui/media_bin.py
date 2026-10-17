@@ -314,6 +314,33 @@ class MediaBin(QWidget):
             it = self.grid.item(i)
             it.setSelected(it.data(Qt.UserRole) in ids)
 
+    def reveal(self, fid: str) -> bool:
+        """Show and select this footage (and only it), clearing the bin and filters when they hide it."""
+        f = self.project.footage.get(fid)
+        if f is None:
+            return False
+        shown = (self.current_bin(), self.cb_kind.currentData() or "all", self.cb_ratio.currentData() or "all")
+        if not binlib.visible(f, *shown):
+            for cb in (self.cb_bin, self.cb_kind, self.cb_ratio):
+                cb.blockSignals(True)
+                cb.setCurrentIndex(0)
+                cb.blockSignals(False)
+            self.refresh()
+        self._select([fid])
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            if it.data(0, Qt.UserRole) == fid:
+                self.tree.setCurrentItem(it)
+                self.tree.scrollToItem(it)
+        for i in range(self.grid.count()):
+            it = self.grid.item(i)
+            if it.data(Qt.UserRole) == fid:
+                self.grid.setCurrentItem(it)
+                self.grid.scrollToItem(it)
+        self._select([fid])
+        self.stack.currentWidget().setFocus()
+        return True
+
     def current_bin(self) -> str:
         data = self.cb_bin.currentData()
         return binlib.ALL if data is None else data
@@ -480,6 +507,7 @@ class MediaBin(QWidget):
                            (None, None),
                            ("proxy", "Generate proxy"), ("delete_proxy", "Delete proxy"),
                            ("analyze", "Analyze (re-run)"), ("transcribe", "Transcribe for captions"),
+                           ("transcript", "Show the full transcript…"),
                            (None, None)):
             if key is None:
                 m.addSeparator()

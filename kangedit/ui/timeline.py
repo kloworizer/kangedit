@@ -837,6 +837,7 @@ class TimelineView(QWidget):
             for key, label in TEMPLATES.items():
                 self._menu_action(sub, label, f"multicam_layout:{key}", oid)
         self._menu_action(m, "Settings…\tDouble-click", "ov_edit", oid)
+        self._menu_action(m, "Show in Media panel", "show_media", c.footage_id)
         m.addSeparator()
         self._menu_action(m, "Delete\tDel", "ov_delete", oid)
         m.exec(gpos)
@@ -1607,7 +1608,8 @@ class TimelineView(QWidget):
                   ("link_toggle", None), ("speed", None),
                   ("face_zoom", f"Zoom{many} to face"),
                   ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
-                  (None, None), ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
+                  (None, None), ("show_media", "Show in Media panel"),
+                  ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
             if key is None:
                 m.addSeparator()

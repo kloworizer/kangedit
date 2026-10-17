@@ -4,7 +4,7 @@ with the panel, and a Refine panel that can be made narrow."""
 import numpy as np
 from kangedit.analysis import Analysis
 from kangedit.autoedit import AutoEditSettings, select
-from kangedit.models import Footage, Project
+from kangedit.models import Footage, Project, TimelineClip
 
 
 def test_target_length_in_minutes(qapp):
@@ -58,7 +58,10 @@ def test_use_every_footage_uses_nearly_all_of_it():
                          order="chronological", use_every_footage=True)
     clips = select(footage, analyses, s, [f.id for f in files])
     used = len({c.footage_id for c in clips})
-    assert used >= 0.9 * len(files)                                   # was 130 of 313 with full-length clips
+    assert used == len(files)                                         # was 130 of 313 with full-length clips
+    p = Project()
+    p.footage, p.clips = footage, clips
+    assert not p.conflicts(s.min_gap)
     s.use_every_footage = False
     assert len({c.footage_id for c in select(footage, analyses, s, [f.id for f in files])}) < used
 
@@ -97,3 +100,16 @@ def test_refine_panel_can_be_made_narrow(qapp):
     finally:
         w.project.dirty = False
         w.close()
+
+
+def test_jump_cuts_are_not_counted_as_overlaps():
+    f = Footage("talk.mp4", 120.0, 1920, 1080, 30.0, True)
+    p = Project()
+    p.footage = {f.id: f}
+    # one take with a filler and a pause taken out: three pieces in a row
+    p.clips = [TimelineClip(f.id, 10.0, 14.0), TimelineClip(f.id, 14.6, 18.0), TimelineClip(f.id, 20.0, 25.0)]
+    assert not p.conflicts(12.0)
+    # the same moment shown again later, or out of order, is still flagged
+    p.clips.append(TimelineClip(f.id, 26.0, 30.0))
+    p.clips.insert(1, TimelineClip(f.id, 40.0, 44.0))
+    assert len(p.conflicts(12.0)) >= 2

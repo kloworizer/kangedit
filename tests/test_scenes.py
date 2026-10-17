@@ -154,3 +154,35 @@ def test_broll_joins_a_scene_without_splitting_it(tmp_path):
     body = {a.id: a, b.id: b}
     groups = scenes.join_scenes(scenes.time_groups(body, [a.id, b.id]), body, {r.id: r, other_day.id: other_day})
     assert groups == {a.id: 0, b.id: 0, r.id: 0}                  # one scene; the far-off day is left out
+
+
+@pytest.mark.parametrize("name, want", [
+    ("VID_20260501_091005.mp4", (2026, 5, 1, 9, 10, 5)),
+    ("PXL_20260501_091005123.mp4", (2026, 5, 1, 9, 10, 5)),
+    ("DJI_20260501091005_0001_D.MP4", (2026, 5, 1, 9, 10, 5)),
+    ("2026-05-01 09.10.05.mov", (2026, 5, 1, 9, 10, 5)),
+    ("Screen Recording 2026-05-01 at 09.10.05.mov", (2026, 5, 1, 9, 10, 5)),
+    ("VID-20260501-WA0001.mp4", (2026, 5, 1, None, None, None)),
+    ("trip_2026_05_01.mp4", (2026, 5, 1, None, None, None)),
+    ("GX010123.MP4", None), ("clip_99991231.mp4", None), ("20261301_x.mp4", None)])
+def test_dates_in_file_names(name, want):
+    got = scenes.name_time(name)
+    if want is None:
+        assert got is None
+        return
+    y, mo, d, h, mi, sec = want
+    t, timed = got
+    assert timed == (h is not None)
+    assert t == datetime(y, mo, d, h if h is not None else 12, mi or 0, sec or 0).timestamp()
+
+
+def test_file_name_date_sorts_bins_and_story(tmp_path):
+    now = time.time()
+    phone = _file(tmp_path, "VID_20260501_091005.mp4", mtime=now)        # copied today, recorded in May
+    assert scenes.recorded_time(phone) == datetime(2026, 5, 1, 9, 10, 5).timestamp()
+    assert bins.recorded_date(phone) == "2026-05-01"
+    # a date without a time doesn't move a file within the day it was recorded
+    wa = _file(tmp_path, "VID-20260501-WA0001.mp4", mtime=datetime(2026, 5, 1, 18, 30).timestamp())
+    assert scenes.recorded_time(wa) == datetime(2026, 5, 1, 18, 30).timestamp()
+    old = _file(tmp_path, "trip_2026_04_20.mp4", mtime=now)
+    assert bins.recorded_date(old) == "2026-04-20"

@@ -63,4 +63,10 @@ def no_blocking_message_boxes(monkeypatch):
     for name in ("warning", "critical", "information"):
         monkeypatch.setattr(QMessageBox, name,
                             staticmethod(lambda *a, _n=name, **k: shown.append((_n, a[1:3])) or QMessageBox.Ok))
+    try:                        # the offer to transcribe after an import: declined
+        from kangedit.ui.main_window import MainWindow
+        monkeypatch.setattr(MainWindow, "_ask_transcribe",
+                            lambda self, n: shown.append(("transcribe", n)) or (False, False))
+    except ImportError:
+        pass
     yield shown

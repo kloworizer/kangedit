@@ -50,7 +50,7 @@ from ..tasks import TaskQueue
 from ..titles import ANIM_IN, ANIM_OUT, TEXT_PRESETS, anim_lengths, make_text
 from .captions_panel import CaptionsPanel
 from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog, ExportDialog, OfficialLutDialog,
-                      ProxyDialog)
+                      ProxyDialog, TranscriptDialog)
 from .flow import FlowBar
 from .inspector import Inspector, wrap_angle
 from .layer_panel import PLACEMENTS, LayerPanel
@@ -281,6 +281,9 @@ class MainWindow(QMainWindow):
         fin = m.addMenu("Finish the edit")
         for key, label, tip in (
                 ("beats", "Cut on the music's beat", "Move each cut to the nearest beat of the music on the timeline"),
+                ("sentences", "Cut on whole sentences",
+                 "Make every clip with speech start and end on whole sentences of the transcript (transcribes the "
+                 "footage first when needed)"),
                 ("pauses", "Cut between words", "Move cuts that fall inside a word to the pause next to it"),
                 ("fillers", "Remove fillers, long pauses and false starts",
                  "Take \"um / eh / anu\", long silences and words said twice out of the clips (transcribes the "
@@ -329,6 +332,12 @@ class MainWindow(QMainWindow):
                                     "Transcribe speech and create captions")
         m.addAction(self.a_captions)
         m.addAction(self._act("Caption style…", self.caption_style_dialog))
+        m.addAction(self._act("Full transcript…", lambda: self.transcript_dialog(), None,
+                              "All the footage's transcripts merged in recording order, to read, copy or save"))
+        self.a_ask_transcribe = QAction("Offer to transcribe after importing", self, checkable=True)
+        self.a_ask_transcribe.setChecked(self.qs.value("ask_transcribe_on_import", True, type=bool))
+        self.a_ask_transcribe.toggled.connect(lambda v: self.qs.setValue("ask_transcribe_on_import", v))
+        m.addAction(self.a_ask_transcribe)
         m.addSeparator()
         m.addAction(self._act("Re-analyze all footage", lambda: self.queue_analysis(list(self.project.footage), True)))
         m.addAction(self._act("Cache folder && clearing…", self.cache_dialog, None,
@@ -1115,6 +1124,8 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText(f"Imported {len(added)} file(s)" + (f" ({n_img} image(s))" if n_img else "")
                                 + (". Analyzing in the background…" if videos else ". Drag them onto the timeline "
                                    "or onto a video layer above it."))
+        if videos:
+            self.offer_transcription()
 
     def _image_footage(self, path: str) -> Footage:
         """Footage for a picture (see images.py): any clip length fits in it, it has no sound."""
@@ -1275,8 +1286,8 @@ class MainWindow(QMainWindow):
                           self._task_error("Auto edit from script"))
 
     def finish_timeline(self, kind: str):
-        """One finishing step (polish.py) on the main track: "beats", "pauses", "fillers", "variety" or
-        "loudness"; in the background, applied in one undo step."""
+        """One finishing step (polish.py) on the main track: "beats", "sentences", "pauses", "fillers",
+        "variety" or "loudness"; in the background, applied in one undo step."""
         clips = [TimelineClip.from_dict(c.to_dict()) for c in self.project.clips]
         footage = {fid: self.project.footage[fid] for fid in {c.footage_id for c in clips}
                    if fid in self.project.footage}
@@ -1288,17 +1299,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Add music to the timeline first (Sounds tab → Background "
                                                     "music): the cuts move to its beat.")
             return
-        if kind == "fillers":
+        if kind in ("fillers", "sentences"):
             todo = [fid for fid, f in footage.items() if f.has_audio and f.transcript is None]
             if todo:
                 self.queue_transcription(todo)
         use_gpu = self.a_gpu_analysis.isChecked()
         s = copy.copy(self.last_auto)
-        for k in ("cut_on_pauses", "beat_sync", "remove_fillers", "shot_variety", "even_loudness"):
+        for k in ("cut_on_pauses", "whole_sentences", "beat_sync", "remove_fillers", "shot_variety",
+                  "even_loudness"):
             setattr(s, k, False)
         s.pacing = "steady"
+        s.video_format = "long"          # whole sentences are a long-form step
         flag = {"beats": "beat_sync", "pauses": "cut_on_pauses", "fillers": "remove_fillers",
-                "variety": "shot_variety", "loudness": "even_loudness"}[kind]
+                "variety": "shot_variety", "loudness": "even_loudness", "sentences": "whole_sentences"}[kind]
         setattr(s, flag, True)
 
         def job(progress, cancel):
@@ -1326,6 +1339,7 @@ class MainWindow(QMainWindow):
             self.refresh_all()
             self._schedule_audio()
             label = {"beats": "Cuts moved to the beat", "pauses": "Cuts moved between words",
+                     "sentences": "Clips set on whole sentences",
                      "fillers": "Fillers and pauses taken out", "variety": "Shot sizes varied",
                      "loudness": "Loudness evened out"}[kind]
             self.lbl_status.setText(label + (" · " + " · ".join(notes) if notes else ""))
@@ -1600,6 +1614,10 @@ class MainWindow(QMainWindow):
             beats = self._music_beats(music_clip, cancel) if music_clip is not None else None
             clips, more = polish.finish(clips, everything, analyses, s, beats, t_start, avoid=used)
             notes += more
+            # Nothing shown twice: a clip that ended up on (or too near) a moment another one shows is left out.
+            clips, dropped = polish.drop_repeats(clips, s.min_gap, used)
+            if dropped:
+                notes.append(f"{dropped} repeated moment(s) left out")
             apply_edit_style(clips, everything, analyses, s, groups=groups)
             plan = (multicam.switch_plan(self.project, analyses, mc_angles, syncs, shot)
                     if multi and multi.get("template") == "switch" else None)
@@ -2027,6 +2045,8 @@ class MainWindow(QMainWindow):
             self.queue_analysis(ids, force=True)
         elif action == "transcribe":
             self.transcribe_media(ids)
+        elif action == "transcript":
+            self.transcript_dialog(ids)
         elif action == "detect_log":
             self.detect_log(ids)
         elif action == "import_lut_log":
@@ -3005,7 +3025,10 @@ class MainWindow(QMainWindow):
     # ================================================================== right-click menus
     def _timeline_action(self, key: str, payload: str):
         """Context-menu commands from the timeline (clips, titles, captions, empty space)."""
-        if key.startswith("text_add:"):
+        if key == "show_media":                      # payload: a clip id (main track) or a footage id (layers)
+            c = next((x for x in self.project.clips if x.id == payload), None)
+            self.show_in_media(c.footage_id if c is not None else payload)
+        elif key.startswith("text_add:"):
             self.add_text(key.split(":", 1)[1], float(payload))
         elif key.startswith("text_"):
             self._text_action(key, payload)
@@ -3481,6 +3504,46 @@ class MainWindow(QMainWindow):
 
         name = f"Transcribing {todo[0].name}" if len(todo) == 1 else f"Transcribing {len(todo)} files"
         self.tasks.submit(name, job, finished, self._task_error("Transcription"))
+
+    def _ask_transcribe(self, n: int) -> tuple[bool, bool]:
+        """Ask whether to transcribe n files now: (yes, don't ask again)."""
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          f"{n} file(s) in the project have sound but no transcript yet.\n"
+                          "Transcribe them now (in the background)? Captions, the full transcript, edits by "
+                          "script and cuts on whole sentences use the transcripts.",
+                          QMessageBox.Yes | QMessageBox.No, self)
+        box.setDefaultButton(QMessageBox.Yes)
+        chk = QCheckBox("Don't ask again (Tools → Offer to transcribe after importing)")
+        box.setCheckBox(chk)
+        return box.exec() == QMessageBox.Yes, chk.isChecked()
+
+    def offer_transcription(self):
+        """After an import: offer to transcribe every file of the project that has sound and no transcript."""
+        if not self.a_ask_transcribe.isChecked():
+            return
+        todo = [fid for fid, f in self.project.footage.items()
+                if not f.is_image and f.has_audio and f.transcript is None]
+        if not todo:
+            return
+        yes, stop = self._ask_transcribe(len(todo))
+        if stop:
+            self.a_ask_transcribe.setChecked(False)
+        if yes:
+            self.queue_transcription(todo)
+
+    def transcript_dialog(self, ids: Optional[list[str]] = None):
+        """The transcripts merged in recording order (all footage, or the given files)."""
+        dlg = TranscriptDialog(self.project, ids, self, transcribe=self.queue_transcription)
+        dlg.exec()
+
+    def show_in_media(self, fid: str):
+        """Timeline → Show in Media panel: select the clip's footage there (clearing filters that hide it)."""
+        if self.bin.reveal(fid):
+            dock = self.bin.parentWidget()
+            if dock is not None:
+                dock.show()
+                dock.raise_()
+            self.lbl_status.setText(f"{self.project.footage[fid].name} is selected in the Media panel")
 
     def transcribe_media(self, ids: list[str]):
         """Media panel → Transcribe for captions: the selected files without a transcript; when they all have

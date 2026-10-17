@@ -6,6 +6,31 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-17
+
+### Added
+- **Whole sentences** (✨ Auto Edit → Finishing, on by default; *Tools → Finish the edit → Cut on whole
+  sentences*): in a long-form edit every clip with speech starts and ends on complete sentences of the
+  transcript. A sentence a clip cuts into is taken in whole, or left out when the clip would get too long.
+- **Full transcript** (*Tools → Full transcript…*, or right-click media → *Show the full transcript…*): every
+  file's transcript merged in recording order, a sentence per line, with or without file names and times;
+  *Copy all* or save as .txt, and *Transcribe the rest* for files without one.
+- After an import, KangEdit offers to transcribe every file with sound that has no transcript yet (*Don't ask
+  again*, or *Tools → Offer to transcribe after importing*).
+- Right-click a timeline clip (main track or video layer) → **Show in Media panel**: its footage is selected
+  there, clearing a bin or filter that hid it.
+- Dates in file names (`VID_20260501_091005`, `PXL_…`, `DJI_…`, `2026-05-01 09.10.05`, `IMG-20260501-WA0001`…)
+  count as a recording date: *Bins by date*, story order and scenes use them.
+
+### Fixed
+- *Use every footage at least once* now uses every usable file (0.6.3 stopped at 90% once past the target
+  length). With more files than fit even at the shortest clip length, the edit runs longer than the target.
+- "Clips overlap / too close to another clip": the pieces *Remove fillers* leaves of one take (cut straight
+  together, one after the other) were counted, so an edit could show dozens of warnings with nothing repeated.
+  They aren't any more, and an auto edit now leaves out any clip that would still show a moment another clip
+  shows (closer than the gap between reuses).
+- Cuts on the beat no longer shorten a clip into its last words.
+
 ## [0.6.3] - 2026-10-16
 
 ### Changed

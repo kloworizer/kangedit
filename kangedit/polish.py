@@ -26,6 +26,8 @@ FILLERS = {
     "um", "umm", "uh", "uhh", "uhm", "er", "erm", "ah", "ahh", "hmm", "hm", "mm", "mmm", "eh", "ehm", "em",
     "emm", "eee", "ee", "anu", "apa namanya", "gitu", "kayak", "like", "you know",
 }
+SENTENCE_PAUSE = 1.0     # a silence this long ends a sentence even without punctuation
+_SENT_END = re.compile(r"[.!?…。！？][\"'”’)\]]*$")
 LONG_PAUSE = 0.9         # a silence longer than this inside a clip is shortened to KEEP_PAUSE
 KEEP_PAUSE = 0.35
 MIN_PIECE = 0.4          # pieces of a cleaned-up clip shorter than this are dropped
@@ -105,6 +107,84 @@ def snap_to_pauses(clips: list[TimelineClip], footage: dict[str, Footage], analy
             c.src_in, c.src_out = round(a, 3), round(b, 3)
             moved += 1
     return moved
+
+
+def sentence_spans(words: list[dict], pause: float = SENTENCE_PAUSE) -> list[tuple[int, int]]:
+    """(first, last) word index of each sentence of a transcript: up to a word ending in . ! ? (or …) or
+    followed by a silence of `pause` seconds."""
+    out: list[tuple[int, int]] = []
+    start = 0
+    for i, w in enumerate(words):
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        if nxt is None or _SENT_END.search(str(w.get("w", "")).strip()) or float(nxt["s"]) - float(w["e"]) > pause:
+            out.append((start, i))
+            start = i + 1
+    return out
+
+
+def sentences(words: list[dict], pause: float = SENTENCE_PAUSE) -> list[tuple[float, float]]:
+    """(start, end) time of each sentence of a transcript (see sentence_spans)."""
+    return [(float(words[i]["s"]), float(words[j]["e"])) for i, j in sentence_spans(words, pause)]
+
+
+def snap_to_sentences(clips: list[TimelineClip], footage: dict[str, Footage], max_len: float,
+                      gap: float = 0.05, avoid: Sequence[TimelineClip] = ()) -> int:
+    """Make every clip with speech start and end on whole sentences (the transcript's), so each holds at least
+    one complete sentence: a sentence cut into is taken in whole when the clip stays within `max_len`
+    seconds, else left out when the clip has another whole one. Clips without speech, hooks, and clips that
+    would land on a moment another clip shows stay as they are. In place; returns how many changed."""
+    changed = 0
+    for c in clips:
+        f = footage.get(c.footage_id)
+        if f is None or f.is_image or not f.transcript or not _normal(c) or c.label == "hook":
+            continue
+        a, b = c.src_in, c.src_out
+        inside = [(s0, s1) for s0, s1 in sentences(f.transcript) if s0 < b and s1 > a]
+        if not inside:
+            continue
+        cut_in, cut_out = inside[0][0] < a - 1e-3, inside[-1][1] > b + 1e-3
+        if not cut_in and not cut_out:
+            continue
+        grow_a = max(0.0, inside[0][0] - WORD_PAD_IN) if cut_in else a
+        grow_b = min(f.duration, inside[-1][1] + WORD_PAD_OUT) if cut_out else b
+        drop_a = (inside[1][0] - WORD_PAD_IN if len(inside) > 1 else None) if cut_in else a
+        drop_b = (inside[-2][1] + WORD_PAD_OUT if len(inside) > 1 else None) if cut_out else b
+        for x, y in ((grow_a, grow_b), (grow_a, drop_b), (drop_a, grow_b), (drop_a, drop_b)):
+            if x is None or y is None or y - x < max(MIN_LEN, 1.0) or y - x > max_len:
+                continue
+            if not any(s0 >= x - 1e-3 and s1 <= y + 1e-3 for s0, s1 in inside):
+                continue                                              # not one whole sentence in it
+            if _free(clips, c, x, y, gap, avoid):
+                c.src_in, c.src_out = round(x, 3), round(y, 3)
+                changed += 1
+                break
+    return changed
+
+
+def drop_repeats(clips: list[TimelineClip], gap: float, avoid: Sequence[TimelineClip] = ()) -> tuple[list[TimelineClip], int]:
+    """The clips without those that show a moment (closer than `gap` seconds in the source) that an earlier
+    clip, a hook / opening / closing / scene opener or an `avoid` clip already shows. Pieces of one take cut
+    straight together (one right after the other, going on in the source) are not repeats. Returns the clips
+    kept and how many were dropped."""
+    def clash(c: TimelineClip, o: TimelineClip) -> bool:
+        if o.footage_id != c.footage_id or o is c:
+            return False
+        if abs(c.src_in - o.src_out) < 0.02 or abs(o.src_in - c.src_out) < 0.02:
+            return False                                               # contiguous pieces
+        return c.src_in < o.src_out + gap - 1e-3 and o.src_in < c.src_out + gap - 1e-3
+
+    special = [c for c in clips if c.label in ("hook", "opening", "closing", "scene")]
+    kept: list[TimelineClip] = []
+    take: list[TimelineClip] = []          # the pieces of the take the last kept clip belongs to
+    for c in clips:
+        prev = kept[-1] if kept else None
+        jump = prev is not None and prev.footage_id == c.footage_id and c.src_in >= prev.src_out - 0.02
+        others = list(avoid) + [o for o in special if o is not c] + kept
+        if any(o is c for o in special) or not any(clash(c, o) for o in others
+                                                   if not (jump and any(o is t for t in take))):
+            take = take + [c] if jump else [c]
+            kept.append(c)
+    return kept, len(clips) - len(kept)
 
 
 def _quiet_near(an, t: float, shift: float, lo: float, hi: float) -> float:
@@ -404,6 +484,8 @@ def snap_to_beats(clips: list[TimelineClip], footage: dict[str, Footage], beats:
                 continue
             if words and _word_at(words, out) is not None:
                 continue
+            if d < 0 and words and any(w["s"] < c.src_out and w["e"] > out for w in words):
+                continue                                               # would cut off the last words
             if d > 0 and not _free(clips, c, c.src_in, out, gap, avoid):
                 continue
             c.src_out = round(out, 3)
@@ -439,10 +521,10 @@ def finish(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dic
            beats: Optional[np.ndarray] = None, start: float = 0.0,
            avoid: Sequence[TimelineClip] = ()) -> tuple[list[TimelineClip], list[str]]:
     """The finishing steps an auto edit's settings `s` (AutoEditSettings) ask for, in order: pacing, varied
-    shot sizes, cuts between words, fillers / pauses / false starts out, cuts on the beat (`beats`: timeline
-    times; the clips start at `start`), even loudness. No step moves a clip onto the `avoid` clips or nearer
-    than the edit's gap (s.min_gap) to another moment of the same footage. Returns the clips (filler removal
-    makes new ones) and notes for the status bar."""
+    shot sizes, whole sentences (a long-form edit, s.video_format "long"), cuts between words, fillers / pauses
+    / false starts out, cuts on the beat (`beats`: timeline times; the clips start at `start`), even loudness.
+    No step moves a clip onto the `avoid` clips or nearer than the edit's gap (s.min_gap) to another moment of
+    the same footage. Returns the clips (filler removal makes new ones) and notes for the status bar."""
     gap = max(0.05, float(getattr(s, "min_gap", 0.0)))
     from .autoedit import score_samples
     notes: list[str] = []
@@ -454,6 +536,10 @@ def finish(clips: list[TimelineClip], footage: dict[str, Footage], analyses: dic
         n = vary_shots(clips, footage, analyses, scores, gap, avoid=avoid)
         if n:
             notes.append(f"{n} shot(s) swapped for another size")
+    if getattr(s, "whole_sentences", False) and getattr(s, "video_format", "") == "long":
+        n = snap_to_sentences(clips, footage, max(2 * s.clip_max, s.clip_max + 10.0), gap, avoid)
+        if n:
+            notes.append(f"{n} clip(s) set on whole sentences")
     if getattr(s, "cut_on_pauses", False):
         snap_to_pauses(clips, footage, analyses, gap=gap, avoid=avoid)
     if getattr(s, "remove_fillers", False):
