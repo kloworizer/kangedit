@@ -12,6 +12,7 @@ import os
 import subprocess
 import threading
 import traceback
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -599,10 +600,34 @@ def load_cached(footage: Footage, cancel: Optional[threading.Event] = None,
     return a
 
 
-def lane_plan(use_gpu: bool = True) -> tuple[Optional[str], int]:
-    """(hardware decode method or None, number of CPU decode lanes)."""
+MAX_LANES = 10
+
+
+def total_lanes() -> int:
+    """Files (or segments) analysed at once. Each lane keeps about one thread busy (the per-sample work: faces,
+    movement, the smarter analysis) plus its FFmpeg decoding, so the CPU is only full with about as many lanes as
+    it has threads: a 12-thread CPU gets 10 (it had 5 and sat half idle), leaving room for the window."""
     cores = os.cpu_count() or 4
-    return (hw_decoder() if use_gpu else None), max(1, min(4, cores // 4))
+    return max(2, min(MAX_LANES, cores - cores // 6))
+
+
+def _no_gpu_reason(j: "_Job") -> str:
+    """Why a file is decoded on the CPU (for the log and the status)."""
+    f = j.footage
+    if j.src != f.path:
+        return "proxy"
+    if f.codec not in HW_CODECS:
+        return f"codec {f.codec or '?'}"
+    if f.pix_fmt not in _HW_FORMATS:
+        return f"pixel format {f.pix_fmt or '?'}"
+    return "GPU decoding failed earlier"
+
+
+def lane_plan(use_gpu: bool = True) -> tuple[Optional[str], int]:
+    """(hardware decode method or None, number of CPU decode lanes): the GPU lanes (gpu_lanes) and these make
+    total_lanes()."""
+    hw = hw_decoder() if use_gpu else None
+    return hw, max(1, total_lanes() - (gpu_lanes() if hw else 0))
 
 
 def gpu_lanes() -> int:
@@ -637,15 +662,19 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
     results: dict[str, Analysis] = {}
     audio_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis-audio")
     on_gpu = sum(1 for j in jobs if j.gpu_ok())
+    why = Counter(_no_gpu_reason(j) for j in jobs if not j.gpu_ok()) if hw else Counter()
     if not hw:
         lanes_label = f"{cpu_lanes} CPU"
+    elif on_gpu == 0 and set(why) == {"proxy"}:   # small proxies decode faster on the CPU than 4K on the GPU
+        lanes_label = f"{lanes} CPU, from the proxies"
     elif on_gpu == 0:       # e.g. 4:2:2 or 4:4:4 footage: no graphics card decodes it, every lane uses the CPU
         lanes_label = f"{lanes} CPU, the GPU can't decode this footage"
     elif on_gpu < len(jobs):
         lanes_label = f"{n_gpu} GPU + {cpu_lanes} CPU, {len(jobs) - on_gpu} file(s) on the CPU only"
     else:
         lanes_label = f"{n_gpu} GPU + {cpu_lanes} CPU"
-    log.info("analysis: %d file(s), %d GPU-decodable, %s", len(jobs), on_gpu, lanes_label)
+    log.info("analysis: %d file(s), %d GPU-decodable%s; %s", len(jobs), on_gpu,
+             "".join(f", {n} {r}" for r, n in why.most_common()), lanes_label)
 
     def label() -> str:
         if len(jobs) == 1:
@@ -672,7 +701,7 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
             threads = 0
             if not on_gpu:
                 state["cpu_busy"] += 1
-                threads = max(2, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
+                threads = max(1, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
             if u.job.audio is None and u.job.footage.has_audio:
                 u.job.audio = audio_pool.submit(_read_audio, u.job.src, cancel)
             return u, on_gpu, threads
@@ -702,7 +731,7 @@ def analyze_many(footages: list[Footage], progress: Optional[ProgressCb] = None,
                         with lock:
                             state["cpu_busy"] += 1
                             on_gpu = False
-                            threads = max(2, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
+                            threads = max(1, cores // max(1, min(lanes, state["cpu_busy"] + len(pending))))
                     else:
                         _gpu_worked(j)
                 if data is None:

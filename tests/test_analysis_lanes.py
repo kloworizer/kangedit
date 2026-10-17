@@ -35,11 +35,11 @@ def lanes(monkeypatch):
         with lock:
             rec["active"] += 1
             rec["peak"] = max(rec["peak"], rec["active"])
-            rec["calls"].append((threading.current_thread().name, u.job.footage.path, hw, threads))
+            rec["calls"].append((threading.current_thread().name, u.job.src, hw, threads))   # the file decoded
         time.sleep(0.03)
         with lock:
             rec["active"] -= 1
-        if hw and u.job.footage.path in rec["fail"]:
+        if hw and u.job.src in rec["fail"]:
             return None
         return {}
 
@@ -112,3 +112,24 @@ def test_smarter_analysis_upgrade_runs_in_parallel(qapp, monkeypatch):
     finally:
         w.project.dirty = False
         w.close()
+
+
+@pytest.mark.parametrize("cores,want", [(2, 2), (4, 4), (8, 7), (12, 10), (16, 10), (32, 10)])
+def test_about_a_lane_per_thread(monkeypatch, cores, want):
+    monkeypatch.setattr(an.os, "cpu_count", lambda: cores)
+    assert an.total_lanes() == want           # a 12-thread CPU had 5 lanes and sat half idle
+    monkeypatch.setattr(an, "hw_decoder", lambda: "d3d11va")
+    hw, cpu = an.lane_plan()
+    assert cpu + an.gpu_lanes() == want
+
+
+def test_proxies_are_analysed_on_the_cpu_and_say_so(lanes, tmp_path):
+    fs = _clips(6, "yuv420p")
+    for f in fs:
+        f.proxy_path = str(tmp_path / f"{f.id}.mp4")
+        open(f.proxy_path, "wb").close()
+    msgs = []
+    an.analyze_many(fs, progress=lambda p, m="": msgs.append(m))
+    assert "from the proxies" in msgs[0]
+    assert all(hw is None and p.endswith(".mp4") and str(tmp_path) in p for _, p, hw, _ in lanes["calls"])
+    assert lanes["peak"] == 5

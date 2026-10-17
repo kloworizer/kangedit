@@ -6,6 +6,16 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-10-17
+
+### Changed
+- The full analysis runs about one file per CPU thread (10 on a 12-thread CPU, was 5), so it uses the whole
+  CPU instead of about half of it. Each analysis lane keeps roughly one thread busy, so the earlier count left
+  most of a large CPU idle.
+- Footage with proxies is analysed from the proxies on the CPU, which is faster than decoding the 4K originals
+  on the GPU. The status now says so ("from the proxies") instead of claiming the GPU can't decode the
+  footage, and the log names why each file is decoded on the CPU (proxy, codec or pixel format).
+
 ## [0.6.8] - 2026-10-17
 
 ### Fixed
