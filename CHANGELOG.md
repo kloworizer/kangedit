@@ -6,6 +6,87 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-18
+
+### Added
+- **Dynamic zoom** (Clip tab): a slow zoom in or out, or a pan across the picture (also zoom + pan), as
+  DaVinci Resolve's Dynamic Zoom, with how much it zooms and its easing. Brings life to photos and steady
+  shots; the preview shows it as the export makes it.
+- **Stabilize** (Clip tab): smooths a shaky handheld clip. The camera's movement is measured once in the
+  background (optical flow, kept in the cache per file), the picture follows a steadier path, zoomed in just
+  enough to hide the edges; *Strength* goes from "take out the shake" to "hold it as on a tripod". Shown in the
+  preview as exported; an export measures what isn't measured yet.
+- **Transcript while slipping**: in Slip mode (or during an Alt / Shift slip) the clip's transcript shows
+  under the timeline buttons, the sentences it shows highlighted as you drag. Click a sentence (or find it by
+  its words) to slip the clip to start on it.
+- **Choose the hook**: 🎣 Hook (H) no longer swaps in a random strong moment. It shows the strongest moments
+  of the whole video as thumbnails (start, middle, end), the best ticked; tick the ones you like, set how many
+  clips the hook has (1-5) or ask for more suggestions. The hook plays the moments in the order they were
+  ticked (the number on each card); the ticked ones stay when you ask for more suggestions.
+- **Hook clips** setting in ✨ Auto Edit: a hook of 1 to 5 clips (a teaser of 2 s moments), or automatic
+  (1 in short-form, 3 in long-form).
+- **Hook preview**: pointing at a card in the hook picker plays its moment.
+- **Zoom in on / out from the face** (Dynamic zoom): the face is found in the clip's own moment.
+- **Dynamic zoom and stabilization on the video layers** too, in the preview as in the export.
+- **Voice clean-up** (Clip tab → Audio): background noise and wind rumble taken out of a clip's speech, tuned
+  to the clip's measured noise level, heard in playback as exported; *Clean up every clip with wind* switches
+  it on wherever the smarter analysis heard wind.
+- **Transcript of the edit** (🗒 Transcript tab): what is said in each clip, in timeline order. Click to go
+  there, drag to reorder the clips, find a clip by its words.
+- **Make a thumbnail** (Tools): the edit's best stills (or the frame at the playhead), framed on the face, with
+  big outlined text, saved as a 1280 × 720 (or vertical / square) JPG.
+- **YouTube chapters** (Tools): chapter lines for the description from the edit's scenes (or parts of it),
+  named by day and first words, to edit and copy, with optional title cards.
+- **Check before export**: a missing file, missing music, captions without transcripts, a silent video, titles
+  past the end, a draft from proxies… listed with a fix before the export starts (a missing file stops it).
+- **Clip icons on the timeline**: 🎣 hook, 🏞 scene opener, 👋 opening / closing, 🔍 dynamic zoom,
+  〰 stabilized, 🎙 voice cleaned up.
+- **♪ updating** beside the viewer's time while the preview sound is mixed again after a change.
+- **Qwen3-ASR** speech model (Captions panel → *Speech model*, or *Style… → Speech recognition*): Qwen3-ASR
+  1.7B, more accurate than Whisper large-v3 in many languages (Indonesian, English, Chinese…), for captions
+  and every transcript. Runs offline with sherpa-onnx on the CPU (slower than Whisper turbo) in a helper
+  process; the model (about 2.5 GB) downloads on first use. Its words are timed by a quick Whisper pass.
+- **Play media in the viewer (Source mode)**: double-click footage in Media to play it on its own, with its
+  sound and a bar of the whole file. Mark the part to use with In / Out (I / O) or by selecting its words in
+  the transcript under the viewer, then *Insert at playhead* or *Append* it to the timeline. *Timeline* (or a
+  click on the timeline) shows the edit again. Double-click in Media used to append the best moment: that is
+  now in its right-click menu only.
+- **Background noise before transcribing** (Captions panel): road, wind or crowd noise drowning the voice is
+  cleaned out of the sound before speech recognition (Auto when the background is loud; Always / Never).
+- Transcribing never starts silently: it says it started (and with which model), that it waits behind
+  another task, or that the files are transcribed already; the Qwen3-ASR download shows GB done.
+- The guided tour (?) and the keyboard shortcuts (F1) explain the new features.
+
+### Fixed
+- Music just added to the timeline could stay silent in playback (the export had it): every proxy finished
+  in the background cancelled the preview sound being mixed and started it again, so on a big project, while
+  proxies were being made, the new mix never finished and playback kept the sound from before the music. A
+  finished proxy no longer mixes the sound again, and a mix taking a while is shown in the status bar.
+- Speech under loud constant noise (a car's road roar) gave no text at all: voice activity detection heard
+  no voice in it, so the file was cached as "nobody speaks". When the background is loud the recogniser now
+  hears the whole sound, and the fake sign-off Whisper adds at the end of such a file ("Terima kasih telah
+  menonton!") is dropped. Files cached empty by an older version are transcribed again.
+- On Windows, a download or error with no console to write to (the app runs without one) could fail; such
+  output is now dropped, and errors go to the log.
+- The timeline's right-click menu showed the J / L cut menu twice and no *Split at playhead*.
+- The Refine panel could be made so narrow that its tabs (Layer, Caption, Text…) were cut off: its smallest
+  width now shows every tab.
+
+### Changed
+- Media panel → right-click → *Transcribe (again) for captions* transcribes the selected files that aren't
+  transcribed yet with the speech model and language set now (Captions panel, *Captions → Style…*), replacing
+  their transcripts, without asking; the ones already transcribed with them are kept (with their caption
+  edits). Each file's transcript remembers the model and language it was made with.
+- The *Auto* speech model picks Qwen3-ASR on a computer that runs it well (6 or more CPU cores, 12 GB of
+  memory or more), else Whisper large-v3 on an NVIDIA GPU and large-v3-turbo on the CPU.
+- A *Hook first* edit has its hook only at the beginning of the timeline. Long-form *Hook first* edits also
+  opened every later scene with a scenic shot, with a dissolve and its sound leading in, which played like
+  another hook in every scene; scene openers are now only added to edits in story order (*Chronological*).
+- The hook is for the whole video again, not one moment per scene: the long-form teaser takes the strongest
+  moments of all the footage scored together (still never the same moment twice, nor one the edit already
+  shows), strongest first, wherever they were filmed. Before, each of its moments came from another scene
+  and was only the best of that scene. *🎣 Hook* suggests moments from the whole video the same way.
+
 ## [0.6.9] - 2026-10-17
 
 ### Changed

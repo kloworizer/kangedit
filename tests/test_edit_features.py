@@ -154,3 +154,27 @@ def test_font_files_are_found_by_name():
     assert fonts.font_files(name.upper()) == files
     assert name in fonts.families_in_file(files[0])
     assert fonts.font_files("No Such Font 123") == []
+
+
+def test_hook_clips_setting():
+    from kangedit.autoedit import hook_plan
+    assert hook_plan(AutoEditSettings()) == (1, 3.0)                              # short-form: one quick clip
+    assert hook_plan(AutoEditSettings(video_format="long", clip_max=10.0)) == (3, 2.0)   # long: a teaser
+    assert hook_plan(AutoEditSettings(hook_clips=4)) == (4, 2.0)
+    assert hook_plan(AutoEditSettings(video_format="long", clip_max=10.0, hook_clips=1)) == (1, 4.0)
+    assert hook_plan(AutoEditSettings(hook_clips=9))[0] == 5
+    footage, analyses = two_files()
+    clips = select(footage, analyses, AutoEditSettings(target_duration=12.0, order="hook", hook_clips=2))
+    assert [c.label for c in clips[:3]] == ["hook", "hook", ""]
+    assert all(abs(c.duration - 2.0) < 0.05 for c in clips[:2])
+
+
+def test_auto_edit_dialog_sets_the_hook_clips(qapp):
+    from kangedit.models import Project
+    from kangedit.ui.dialogs import AutoEditDialog
+    d = AutoEditDialog(Project(), [], AutoEditSettings(order="hook", hook_clips=3))
+    assert d.cb_hook.currentData() == 3 and d.cb_hook.isEnabled()
+    d.cb_hook.setCurrentIndex(d.cb_hook.findData(5))
+    assert d.settings().hook_clips == 5
+    d.cb_order.setCurrentIndex(d.cb_order.findData("chronological"))
+    assert not d.cb_hook.isEnabled()                       # no hook in story order

@@ -144,7 +144,7 @@ class MediaBin(QWidget):
         self.tree.setIconSize(QSize(64, 36))
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._menu)
-        self.tree.itemDoubleClicked.connect(lambda *_: self.action.emit("append_best", self.selected_ids()))
+        self.tree.itemDoubleClicked.connect(lambda *_: self.action.emit("play", self.selected_ids()[:1]))
         self.tree.setColumnWidth(0, 200)
         self.tree.setColumnWidth(1, 52)
         self.tree.setColumnWidth(2, 60)
@@ -158,7 +158,7 @@ class MediaBin(QWidget):
         self.grid.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.grid.customContextMenuRequested.connect(self._menu)
-        self.grid.itemDoubleClicked.connect(lambda *_: self.action.emit("append_best", self.selected_ids()))
+        self.grid.itemDoubleClicked.connect(lambda *_: self.action.emit("play", self.selected_ids()[:1]))
         self._icons_timer = QTimer(self, singleShot=True, interval=120)
         self._icons_timer.timeout.connect(self._refresh_grid_icons)
         self.grid.resized.connect(self._apply_thumb_size)
@@ -502,12 +502,14 @@ class MediaBin(QWidget):
         a = m.addAction(f"Add to {binlib.BROLL} bin", lambda: self.add_to_broll(ids))
         a.setToolTip("Cutaway footage (views, travel, details): scenes of a long-form auto edit open with it first")
         m.addSeparator()
-        for key, label in (("append_best", "Append best moment to timeline"),
+        for key, label in (("play", "▶ Play in the viewer (mark the part to use)"),
+                           (None, None),
+                           ("append_best", "Append best moment to timeline"),
                            ("append_whole", "Append whole clip to timeline"),
                            ("overlay", "Add on a video layer at the playhead (picture in picture)"),
                            (None, None),
                            ("proxy", "Generate proxy"), ("delete_proxy", "Delete proxy"),
-                           ("analyze", "Analyze (re-run)"), ("transcribe", "Transcribe for captions"),
+                           ("analyze", "Analyze (re-run)"), ("transcribe", "Transcribe (again) for captions"),
                            ("transcript", "Show the full transcript…"),
                            (None, None)):
             if key is None:

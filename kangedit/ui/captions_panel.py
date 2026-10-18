@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QPushButton,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+                               QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from ..captions import Caption
+from ..captions import CLEANUPS, WHISPER_MODELS, Caption
 from .theme import fmt_time
 
 
@@ -19,13 +19,16 @@ class CaptionsPanel(QWidget):
     seek = Signal(float)
     toggled = Signal(bool)
     delete_requested = Signal(list)    # caption rows; every row for "Delete all"
+    model_changed = Signal(str)        # the speech model chosen (captions.WHISPER_MODELS key)
+    cleanup_changed = Signal(str)      # background noise clean-up before transcribing (captions.CLEANUPS key)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.captions: list[Caption] = []
         b_gen = QPushButton("🎙 Generate captions")
         b_gen.setObjectName("primary")
-        b_gen.setToolTip("Transcribe speech in the footage used on the timeline (Whisper, runs offline)")
+        b_gen.setToolTip("Transcribe speech in the footage used on the timeline (runs offline, with the speech "
+                         "model below)")
         b_gen.clicked.connect(self.generate.emit)
         b_style = QPushButton("Style…")
         b_style.clicked.connect(self.style_requested.emit)
@@ -39,8 +42,33 @@ class CaptionsPanel(QWidget):
         tools.addWidget(b_srt)
         tools.addStretch(1)
         tools.addWidget(self.chk_show)
-        top = QVBoxLayout()         # two rows: fits a narrow panel
+        self.cb_model = QComboBox()
+        for key, label in WHISPER_MODELS.items():
+            self.cb_model.addItem(label.split(" — ")[0], key)
+            self.cb_model.setItemData(self.cb_model.count() - 1, label, Qt.ToolTipRole)
+        self.cb_model.setToolTip("The speech model that transcribes the footage, for captions and for every "
+                                 "transcript (also Style… → Speech recognition).\nQwen3-ASR is the most accurate "
+                                 "in many languages but slower; large-v3 / turbo are Whisper's best.")
+        self.cb_model.currentIndexChanged.connect(lambda: self.model_changed.emit(self.cb_model.currentData()))
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Speech model"))
+        model_row.addWidget(self.cb_model, 1)
+        self.cb_clean = QComboBox()
+        for key, label in CLEANUPS.items():
+            self.cb_clean.addItem(label, key)
+        self.cb_clean.setToolTip("Road, engine, wind or crowd noise drowning the voice makes the speech hard to "
+                                 "recognise: the sound is cleaned up first (the rumble and hiss cut, the noise "
+                                 "taken down, the voice evened out).\nAuto does it when the background is loud "
+                                 "and the voice doesn't stand far above it. Only for transcribing: the video's "
+                                 "sound is not changed (see Clip → Clean up the voice for that).")
+        self.cb_clean.currentIndexChanged.connect(lambda: self.cleanup_changed.emit(self.cb_clean.currentData()))
+        clean_row = QHBoxLayout()
+        clean_row.addWidget(QLabel("Background noise"))
+        clean_row.addWidget(self.cb_clean, 1)
+        top = QVBoxLayout()         # rows: fits a narrow panel
         top.addWidget(b_gen)
+        top.addLayout(model_row)
+        top.addLayout(clean_row)
         top.addLayout(tools)
         self.b_delete = QPushButton("🗑 Delete selected")
         self.b_delete.setToolTip("Remove the selected captions (Del). Select several with Ctrl / Shift.")
@@ -103,6 +131,13 @@ class CaptionsPanel(QWidget):
         rows = self._selected_rows()
         if rows and self.table.state() != QAbstractItemView.EditingState:
             self.delete_requested.emit(rows)
+
+    def set_model(self, key: str, cleanup: str = "auto") -> None:
+        """Show the project's speech model and noise clean-up (without saying they changed)."""
+        for cb, val in ((self.cb_model, key), (self.cb_clean, cleanup)):
+            cb.blockSignals(True)
+            cb.setCurrentIndex(max(0, cb.findData(val)))
+            cb.blockSignals(False)
 
     def _sync_buttons(self):
         self.b_delete.setEnabled(bool(self._selected_rows()))

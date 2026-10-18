@@ -58,7 +58,9 @@ SOFTWARE.```
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT |
 | [CTranslate2](https://github.com/OpenNMT/CTranslate2) | MIT |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (includes ONNX Runtime, MIT) | Apache-2.0 |
 | Whisper models (downloaded on first use) | MIT (OpenAI) |
+| Qwen3-ASR 1.7B model, sherpa-onnx conversion (downloaded on first use, when chosen) | Apache-2.0 (Alibaba Qwen) |
 
 ## Downloaded separately
 

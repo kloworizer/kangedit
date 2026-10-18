@@ -16,8 +16,10 @@ datas = [(os.path.join(ASSETS, f), "kangedit/assets") for f in os.listdir(ASSETS
 datas += collect_data_files("faster_whisper")           # Silero VAD model used by transcription
 datas += collect_data_files("yt_dlp_ejs")               # YouTube challenge solver scripts (music download)
 binaries = collect_dynamic_libs("ctranslate2")          # Whisper inference runtime
+binaries += collect_dynamic_libs("sherpa_onnx")         # Qwen3-ASR runtime (its own ONNX Runtime, in a helper process)
 hiddenimports = collect_submodules("kangedit")          # UI modules are imported lazily
 hiddenimports += collect_submodules("yt_dlp") + collect_submodules("yt_dlp_ejs")   # extractors load lazily
+hiddenimports += collect_submodules("sherpa_onnx")
 
 a = Analysis(
     [os.path.join(ROOT, "main.py")],

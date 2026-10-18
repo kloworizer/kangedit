@@ -127,6 +127,10 @@ def _report(text: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
+    from .asr_qwen import WORKER_FLAG
+    if WORKER_FLAG in argv[1:]:                # the Qwen3-ASR helper process (see asr_qwen.py): no window
+        from .asr_qwen import worker_main
+        return worker_main(argv[argv.index(WORKER_FLAG) + 1:])
     if "--version" in argv[1:]:
         _report(f"{APP_NAME} {version_string()}")
         return 0

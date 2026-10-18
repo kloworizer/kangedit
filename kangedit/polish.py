@@ -122,6 +122,13 @@ def sentence_spans(words: list[dict], pause: float = SENTENCE_PAUSE) -> list[tup
     return out
 
 
+def clip_words(clip, footage) -> str:
+    """What is said in a clip: the words of its footage's transcript within its source range ("" for none)."""
+    words = (footage.transcript or []) if footage is not None else []
+    mids = ((str(w.get("w", "")).strip(), (float(w["s"]) + float(w["e"])) / 2) for w in words)
+    return " ".join(w for w, m in mids if w and clip.src_in <= m < clip.src_out)
+
+
 def sentences(words: list[dict], pause: float = SENTENCE_PAUSE) -> list[tuple[float, float]]:
     """(start, end) time of each sentence of a transcript (see sentence_spans)."""
     return [(float(words[i]["s"]), float(words[j]["e"])) for i, j in sentence_spans(words, pause)]

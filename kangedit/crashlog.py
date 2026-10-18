@@ -17,6 +17,21 @@ log = logging.getLogger("kangedit")
 _fault_file = None   # kept open for the whole run: faulthandler writes to it from the crash itself
 
 
+_quiet = False       # the app has no console: stdout / stderr go nowhere
+
+
+def quiet_missing_streams() -> None:
+    """Without a console (pythonw.exe, the windowed build) sys.stdout and sys.stderr are None, and any library
+    printing to them fails ('NoneType' object has no attribute 'write'): a download's progress bar, a
+    traceback printed while handling an error. They are given a stream that takes everything and drops it
+    (what matters goes to the log)."""
+    global _quiet
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+            _quiet = True
+
+
 def log_dir() -> Path:
     from .config import app_data_dir
     path = app_data_dir() / "logs"
@@ -32,13 +47,14 @@ def install() -> Path:
     """Start logging to the log file and hook every way the app can die. Returns the log file's path."""
     global _fault_file
     from . import APP_NAME, version_string
+    quiet_missing_streams()
     path = log_path()
     handler = logging.handlers.RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s"))
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if os.environ.get("KANGEDIT_DEBUG") else logging.INFO)
     root.addHandler(handler)
-    if sys.stderr is not None:
+    if not _quiet:
         console = logging.StreamHandler()
         console.setLevel(logging.WARNING)
         root.addHandler(console)

@@ -1,6 +1,7 @@
 """Recording dates (the oldest one a file carries), scenes as time groups, scenic openers and transitions
 between scenes, and clearing all bins."""
 
+import itertools
 import os
 import threading
 import time
@@ -11,7 +12,7 @@ import pytest
 
 from kangedit import bins, scenes
 from kangedit.analysis import Analysis
-from kangedit.autoedit import AutoEditSettings, apply_edit_style
+from kangedit.autoedit import AutoEditSettings, apply_edit_style, select
 from kangedit.bookends import story_order
 from kangedit.models import Footage, Project, TimelineClip
 
@@ -143,6 +144,32 @@ def test_long_form_auto_edit_opens_scenes(qapp, tmp_path, monkeypatch):
         w.close()
 
 
+def test_hook_first_edit_has_its_hook_only_at_the_start(qapp, tmp_path, monkeypatch):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        fs, footage, analyses, groups = _three_days(tmp_path)
+        p = Project()
+        p.footage = footage
+        w.set_project(p)
+        monkeypatch.setattr("kangedit.ui.main_window.load_or_analyze", lambda f, **kw: analyses[f.id])
+        monkeypatch.setattr(w, "queue_analysis", lambda ids, force=False: None)
+        monkeypatch.setattr(w.tasks, "submit",
+                            lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+        for fmt in ("long", "short"):
+            s = AutoEditSettings(video_format=fmt, target_duration=60.0, clip_min=4.0, clip_max=8.0, min_gap=2.0,
+                                 order="hook", transitions="scenes", bookends=False)
+            w._run_auto_edit(s, list(footage), None)
+            labels = [c.label for c in w.project.clips]
+            n = len(list(itertools.takewhile(lambda x: x == "hook", labels)))
+            assert n >= 1 and "hook" not in labels[n:]                 # the hook opens the video...
+            assert "scene" not in labels                                # ...and no scene opens with another
+            assert len({groups[c.footage_id] for c in w.project.clips[n:]}) == 3
+    finally:
+        w.project.dirty = False
+        w.close()
+
+
 def test_broll_joins_a_scene_without_splitting_it(tmp_path):
     a = _file(tmp_path, "a.mp4", tag=_iso(2026, 5, 1, 1, 0), dur=300)
     b = _file(tmp_path, "b.mp4", tag=_iso(2026, 5, 1, 1, 20), dur=300)
@@ -188,9 +215,8 @@ def test_file_name_date_sorts_bins_and_story(tmp_path):
     assert bins.recorded_date(old) == "2026-04-20"
 
 
-def test_hook_moments_come_from_different_scenes(tmp_path):
-    from kangedit.autoedit import find_hook_montage, hook_plan
-    # day 1 has four files (the most footage, so most of the strong moments), days 2 and 3 one each
+def _three_days(tmp_path):
+    """Day 1 has four files with by far the strongest moments, days 2 and 3 one ordinary file each."""
     fs = [_file(tmp_path, f"d1_{k}.mp4", tag=_iso(2026, 5, 1, 9, 10 * k), dur=60) for k in range(4)]
     fs += [_file(tmp_path, "d2.mp4", tag=_iso(2026, 5, 2, 15), dur=60),
            _file(tmp_path, "d3.mp4", tag=_iso(2026, 5, 3, 11), dur=60)]
@@ -198,16 +224,36 @@ def test_hook_moments_come_from_different_scenes(tmp_path):
         os.utime(f.path, (time.time(), time.time()))
     footage = {f.id: f for f in fs}
     analyses = {f.id: _analysis(60, (10, 20), k) for k, f in enumerate(fs)}
-    for f in fs[:4]:                                   # day 1's moments are the strongest by far
+    for f in fs[:4]:
         an = analyses[f.id]
         an.activity, an.motion, an.audio = an.activity * 4, an.motion + 6.0, an.audio + 12.0
+    groups = scenes.time_groups(footage, story_order(footage, list(footage)))
+    return fs, footage, analyses, groups
+
+
+def test_hook_is_the_strongest_moments_of_the_whole_video(tmp_path):
+    from kangedit.autoedit import find_hook_montage, hook_plan
+    fs, footage, analyses, groups = _three_days(tmp_path)
     s = AutoEditSettings(video_format="long", clip_min=4.0, clip_max=8.0, min_gap=2.0)
     hooks = find_hook_montage(footage, analyses, s, [])
     n, length = hook_plan(s)
     assert len(hooks) == n == 3 and all(c.label == "hook" for c in hooks)
-    groups = scenes.time_groups(footage, story_order(footage, list(footage)))
-    assert len({groups[c.footage_id] for c in hooks}) == 3                 # one from each day
-    # one scene only: still three moments, from different files
-    one = {f.id: f for f in fs[:4]}
-    hooks = find_hook_montage(one, {i: analyses[i] for i in one}, s, [])
-    assert len(hooks) == 3 and len({c.footage_id for c in hooks}) == 3
+    assert all(abs(c.duration - length) < 0.05 for c in hooks)
+    # not one per scene: the strongest moments of the video, which are all on day 1, strongest first
+    assert {groups[c.footage_id] for c in hooks} == {groups[fs[0].id]}
+    assert [c.score for c in hooks] == sorted((c.score for c in hooks), reverse=True)
+    # none of them on a moment the edit already shows, and no two the same
+    again = find_hook_montage(footage, analyses, s, hooks)
+    assert len(again) == 3
+    assert not any(a.footage_id == h.footage_id and a.src_in < h.src_out and h.src_in < a.src_out
+                   for a in again for h in hooks)
+
+
+def test_best_moments_first_ranks_the_whole_video(tmp_path):
+    fs, footage, analyses, groups = _three_days(tmp_path)
+    s = AutoEditSettings(video_format="long", target_duration=60.0, clip_min=4.0, clip_max=8.0, min_gap=2.0,
+                         order="best_first")
+    clips = select(footage, analyses, s, story_order(footage, list(footage)))
+    assert len({groups[c.footage_id] for c in clips}) == 3          # every day is in the edit...
+    assert [c.score for c in clips] == sorted((c.score for c in clips), reverse=True)   # ...ranked together
+    assert groups[clips[0].footage_id] == groups[fs[0].id]

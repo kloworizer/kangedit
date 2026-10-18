@@ -114,7 +114,7 @@ def test_script_dialog_preview_and_app_flow(window, footage, monkeypatch, tmp_pa
         f.transcript = _take("nothing from the script here", 1.0)
         return f.transcript
     monkeypatch.setattr("kangedit.ui.main_window.transcribe", fake_transcribe)
-    monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None: None)
+    monkeypatch.setattr("kangedit.ui.main_window.load_model", lambda name, progress=None, cancel=None: None)
     monkeypatch.setattr(window.tasks, "submit",
                         lambda name, job, done, err=None: done(job(lambda *x: None, threading.Event())))
     st = {"script": SCRIPT, "footage": [a.id, b.id, c.id], "threshold": 0.6, "prefer": "last", "pad_in": 0.15,

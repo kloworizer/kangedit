@@ -333,6 +333,7 @@ def test_timeline_menu_lists_speeds_and_ramps(window):
     tl._context_menu(tl.mapToGlobal(tl.rect().center()), window.project.clips[0].id)
     assert "0.5× slow motion" in seen and "2× fast motion" in seen and "Custom speed…" in seen
     assert all(v[0] in seen for v in speed.RAMPS.values())
+    assert "Split at playhead\tS" in seen and seen.count("Audio edit (J / L cut)") == 1
 
 
 def test_viewer_shows_the_frame_the_speed_map_says(window):

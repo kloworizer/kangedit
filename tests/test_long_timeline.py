@@ -1,5 +1,5 @@
 """A long timeline (hundreds of clips) is made in parts and joined: the preview sound and the export come out
-as if made in one FFmpeg run, and the hook of a long-form edit takes moments from different scenes."""
+as if made in one FFmpeg run."""
 
 import os
 import subprocess

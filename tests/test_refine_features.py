@@ -202,12 +202,12 @@ def test_new_hook_goes_before_the_opening(window):
     fa = next(iter(footage))
     opening = TimelineClip(fa, 0.5, 4.5, label="opening")
     window.project.clips = [opening, TimelineClip(fa, 10.0, 15.0)]
-    window.new_hook()
+    window.new_hook(choose=False)
     clips = window.project.clips
     hooks = [c for c in clips if c.label == "hook"]
     assert len(hooks) >= 2 and clips[len(hooks)] is opening
     first = [(c.src_in, c.footage_id) for c in hooks]
-    window.new_hook()                                   # replaces the teaser, keeps the opening
+    window.new_hook(choose=False)                      # replaces the teaser, keeps the opening
     assert [c.label for c in window.project.clips].count("hook") == len(hooks)
     assert [(c.src_in, c.footage_id) for c in window.project.clips[:len(hooks)]] != first
 
@@ -260,3 +260,361 @@ def test_autosave_saves_in_place_and_keeps_untitled_work(window, tmp_path):
     assert len(autosave.backups(path)) == 1                      # the version before the change
     window.set_project(Project())
     assert not autosave.recovery_path().exists()
+
+
+def test_inspector_sets_dynamic_zoom_and_stabilize(window, monkeypatch):
+    clip = _project_with_clip(window)
+    measured = []
+    monkeypatch.setattr(window, "measure_shake", lambda: measured.append(1))
+    ins = window.inspector
+    ins.set_clip(clip)
+    assert ins.grp_motion.isVisibleTo(ins) and ins.grp_stab.isVisibleTo(ins)
+    assert not ins.mo_amount.isEnabled()                     # off: nothing to set
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("in_left"))
+    assert clip.motion == "in_left" and ins.mo_amount.isEnabled()
+    ins.mo_amount.set_value(20.0, emit=True)
+    assert clip.motion_amount == pytest.approx(0.2)
+    ins.cb_ease.setCurrentIndex(ins.cb_ease.findData("linear"))
+    assert clip.motion_ease == "linear"
+    ins.chk_stab.setChecked(True)
+    assert clip.stabilize == pytest.approx(0.5) and measured
+    assert "Measuring" in ins.lbl_stab.text()
+    ins.st_strength.set_value(80.0, emit=True)
+    assert clip.stabilize == pytest.approx(0.8)
+    ins.chk_stab.setChecked(False)
+    assert clip.stabilize == 0.0
+    window.undo()
+    assert window.project.clips[0].stabilize == pytest.approx(0.8)
+
+
+def test_slip_shows_the_transcript_and_slips_to_a_sentence(window):
+    clip = _project_with_clip(window, start=1.0, dur=2.0)
+    f = window.project.footage[clip.footage_id]
+    f.has_audio = True
+    f.transcript = [{"s": 0.5, "e": 0.9, "w": "Hello"}, {"s": 1.0, "e": 1.6, "w": "there."},
+                    {"s": 6.0, "e": 6.4, "w": "Look"}, {"s": 6.5, "e": 7.2, "w": "at"}, {"s": 7.3, "e": 7.9, "w": "this!"}]
+    panel = window.timeline.slip_text
+    window._on_select(clip.id)
+    assert panel.isHidden()                                   # Move mode: no transcript
+    window.timeline.btn_slip.setChecked(True)
+    assert not panel.isHidden() and panel.list.count() == 2
+    assert panel.list.item(0).text().endswith("Hello there.") and panel.list.item(0).font().bold()
+    assert not panel.list.item(1).font().bold()               # the clip (1-3 s) doesn't show the second
+    panel.search.setText("look")
+    assert panel.list.item(0).isHidden() and not panel.list.item(1).isHidden()
+    panel._clicked(panel.list.item(1))                        # slip to "Look at this!"
+    c = window.project.clips[0]
+    assert (c.src_in, c.src_out) == (6.0, 8.0) and panel.list.item(1).font().bold()
+    window.undo()
+    assert window.project.clips[0].src_in == 1.0
+    window.timeline.btn_move.setChecked(True)
+    assert panel.isHidden()
+    # a temporary slip (Alt / Shift drag in Move mode) shows it for the drag
+    window._slip_follow(clip.id, 1.5)
+    assert not panel.isHidden()
+    window.tl.slip_end.emit()
+    assert panel.isHidden()
+
+
+def test_hook_button_offers_the_strongest_moments_as_thumbnails(window, monkeypatch):
+    from kangedit.autoedit import HOOK_SUGGESTIONS
+    from kangedit.ui.hook_picker import HookPicker
+    footage, analyses = two_files()
+    for a in analyses.values():                          # a thumbnail a second, each a different grey
+        n = int(a.times[-1]) + 1
+        a.thumbs = np.stack([np.full((36, 64, 3), 5 * k, np.uint8) for k in range(n)])
+        a.thumb_times = np.arange(n, dtype=np.float32)
+    window.project.footage = footage
+    window.analyses.update(analyses)
+    window.project.settings.video_format = "short"
+    window.last_auto = AutoEditSettings(clip_min=1.5, clip_max=3.0, min_gap=1.0)
+    fa = next(iter(footage))
+    window.project.clips = [TimelineClip(fa, 2.0, 5.0), TimelineClip(fa, 12.0, 15.0)]
+    seen = {}
+
+    def run(dlg):
+        seen["first"] = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        assert len(dlg.cards) == HOOK_SUGGESTIONS
+        assert not dlg.cards[0][0].icon().isNull()                  # a picture of the moment
+        scores = [c.score for _, c in dlg.cards]
+        assert scores == sorted(scores, reverse=True)               # strongest first...
+        assert [b.isChecked() for b, _ in dlg.cards] == [True] + [False] * (HOOK_SUGGESTIONS - 1)   # ...ticked
+        assert all(abs(c.duration - 3.0) < 0.05 for _, c in dlg.cards)   # as long as the hook it replaces
+        dlg.sp_count.setValue(2)                                    # a 2-clip teaser: 2 s moments, top two ticked
+        assert [b.isChecked() for b, _ in dlg.cards][:3] == [True, True, False]
+        assert all(abs(c.duration - 2.0) < 0.05 for _, c in dlg.cards)
+        before = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        dlg.more()                                                  # others, not offered yet; the ticked stay
+        now = [(c.footage_id, c.src_in) for _, c in dlg.cards]
+        assert now[:2] == before[:2] and [b.isChecked() for b, _ in dlg.cards][:3] == [True, True, False]
+        assert not set(before) & set(now[2:])
+        dlg.cards[0][0].setChecked(False)
+        dlg.cards[2][0].setChecked(True)
+        seen["chosen"] = [(c.footage_id, c.src_in) for c in dlg.chosen()]
+        return HookPicker.Accepted
+
+    monkeypatch.setattr(HookPicker, "exec", run)
+    window.project.clips[0].motion_face, window.project.clips[0].voice_floor = [0.9, 0.1], -30.0   # old moment's
+    window.new_hook()
+    clips = window.project.clips
+    assert [c.label for c in clips[:2]] == ["hook", "hook"] and clips[2].label == ""
+    assert clips[0].motion_face is None and clips[0].voice_floor == 0.0            # not the old moment's
+    assert [(c.footage_id, c.src_in) for c in clips[:2]] == seen["chosen"]
+    assert len(clips) == 3 and clips[2].src_in == 12.0               # the hook replaced the first clip
+    assert window.last_auto.hook_clips == 2                         # the next auto edit's hook has 2 clips
+    window.undo()
+    assert [(c.src_in, c.label) for c in window.project.clips] == [(2.0, ""), (12.0, "")]
+
+
+def test_hook_plays_the_moments_in_the_order_they_were_ticked(window, monkeypatch):
+    from kangedit.ui.hook_picker import HookPicker
+    footage, analyses = two_files()
+    window.project.footage = footage
+    window.analyses.update(analyses)
+    window.project.settings.video_format = "short"
+    window.last_auto = AutoEditSettings(clip_min=1.5, clip_max=3.0, min_gap=1.0)
+    fa = next(iter(footage))
+    window.project.clips = [TimelineClip(fa, 2.0, 5.0), TimelineClip(fa, 12.0, 15.0)]
+    picked = []
+
+    def moment(c):
+        return (c.footage_id, c.src_in)
+
+    def run(dlg):
+        dlg.sp_count.setValue(3)
+        cards = dlg.cards
+        for b, _ in cards:                                # start from nothing ticked
+            b.setChecked(False)
+        a, b_, c = cards[0], cards[1], cards[2]
+        for card in (c, a, b_):                           # tick C, then A, then B
+            card[0].setChecked(True)
+        assert [moment(x) for x in dlg.chosen()] == [moment(c[1]), moment(a[1]), moment(b_[1])]
+        assert c[0].text().startswith("✔ 1") and a[0].text().startswith("✔ 2") and b_[0].text().startswith("✔ 3")
+        a[0].setChecked(False)                            # untick A: B moves up
+        a[0].setChecked(True)                             # and ticked again, it goes last
+        assert [moment(x) for x in dlg.chosen()] == [moment(c[1]), moment(b_[1]), moment(a[1])]
+        before = [moment(x) for x in dlg.chosen()]
+        dlg.more()                                        # other suggestions keep the ticked ones, in order
+        assert [moment(x) for x in dlg.chosen()] == before
+        dlg.sp_count.setValue(2)                          # fewer clips: the last ticked goes
+        assert [moment(x) for x in dlg.chosen()] == before[:2]
+        dlg.sp_count.setValue(3)
+        dlg.cards[-1][0].setChecked(True)
+        assert len(dlg.chosen()) == 4
+        picked[:] = [moment(x) for x in dlg.chosen()]
+        return HookPicker.Accepted
+
+    monkeypatch.setattr(HookPicker, "exec", run)
+    window.new_hook()
+    hooks = [c for c in window.project.clips if c.label == "hook"]
+    assert [moment(c) for c in hooks] == picked and window.project.clips[:len(hooks)] == hooks
+
+
+def test_face_zoom_finds_the_face_and_layers_get_movement(window, monkeypatch):
+    import threading
+    from kangedit import reframe
+    from kangedit.models import OverlayClip
+    from kangedit.ui import main_window as mw
+    clip = _project_with_clip(window)
+    f = window.project.footage[clip.footage_id]
+
+    class Dec:
+        def frame_at(self, t):
+            return np.zeros((72, 128, 3), np.uint8)
+
+    class Pool:
+        def __init__(self, limit=4):
+            pass
+
+        def get(self, *a):
+            return Dec()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mw, "DecoderPool", Pool)
+    monkeypatch.setattr(reframe, "find_face", lambda frames: (0.7, 0.4, 0.2))
+    monkeypatch.setattr(window.tasks, "submit",
+                        lambda name, job, done, err=None: done(job(lambda *a: None, threading.Event())))
+    ins = window.inspector
+    ins.set_clip(clip)
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("face"))
+    assert clip.motion == "face" and clip.motion_face == [0.7, 0.4]
+    # a clip on a video layer: the same groups, the movement on its picture
+    ov = OverlayClip(f.id, 0.0, 1.0, 3.0, scale=0.5)
+    window.project.overlays = [ov]
+    ins.set_clip(ov)
+    assert not ins.grp_motion.isHidden() and not ins.grp_stab.isHidden()
+    ins.cb_motion.setCurrentIndex(ins.cb_motion.findData("in"))
+    assert ov.motion == "in" and clip.motion == "face"
+    shots = window.viewer._overlay_shots()
+    assert shots[0].motion is not None and shots[0].motion.kind == "in"
+
+
+def test_voice_clean_up_from_the_inspector(window, monkeypatch):
+    from kangedit import voice
+    clip = _project_with_clip(window)
+    ins = window.inspector
+    ins.set_clip(clip)
+    assert not ins.voice_amt.isEnabled()
+    ins.chk_voice.setChecked(True)
+    assert clip.voice_clean == pytest.approx(voice.DEFAULT) and -60 < clip.voice_floor < -20   # its noise measured
+    ins.voice_amt.set_value(90.0, emit=True)
+    assert clip.voice_clean == pytest.approx(0.9)
+    ins.chk_voice.setChecked(False)
+    assert clip.voice_clean == 0.0
+    # every clip with wind, at once (undoable)
+    other = TimelineClip(clip.footage_id, 20.0, 22.0)
+    window.project.clips.append(other)
+    monkeypatch.setattr(voice, "wind_in", lambda a, x, y: 0.5 if x >= 20.0 else 0.0)
+    window.clean_voices_with_wind()
+    assert other.voice_clean == pytest.approx(voice.DEFAULT) and clip.voice_clean == 0.0
+    window.undo()
+    assert all(c.voice_clean == 0.0 for c in window.project.clips)
+
+
+def test_clip_marks_on_the_timeline(window):
+    from kangedit.ui.timeline import clip_marks, marks_text
+    clip = _project_with_clip(window)
+    assert clip_marks(clip) == []
+    clip.label, clip.motion, clip.stabilize, clip.voice_clean = "hook", "in", 0.5, 0.6
+    icons = [i for i, _ in clip_marks(clip)]
+    assert icons == ["🎣", "🔍", "〰", "🎙"]
+    assert marks_text(clip) == "🎣 hook · 🔍 zoom in · 〰 stabilized · 🎙 voice cleaned up"
+    clip.label = "scene"
+    assert clip_marks(clip)[0] == ("🏞", "scene opener")
+    window.tl.refresh()
+    window.tl.repaint()                                  # paints the marks without trouble
+
+
+def test_viewer_shows_while_the_sound_is_mixed_again(window, monkeypatch):
+    clip = _project_with_clip(window)
+    badge = window.viewer.lbl_audio
+    window._audio_timer.stop()
+    window.viewer.set_audio_pending(False)
+    assert badge.isHidden()
+    window._schedule_audio()                       # a change: the badge until the new mix is ready
+    assert not badge.isHidden()
+    window._audio_timer.stop()
+    ver = window._audio_version
+    window._on_audio_ready(ver, "")                # an older mix finishing doesn't hide it...
+    window._audio_version += 1
+    window._on_audio_ready(window._audio_version - 1, "")
+    window.viewer.set_audio_pending(True)
+    window._on_audio_ready(window._audio_version, "")   # ...the latest does
+    assert badge.isHidden()
+    window.viewer.set_audio_pending(True)
+    window._on_audio_failed(window._audio_version, "boom")
+    assert badge.isHidden() and clip is not None
+
+
+def test_pointing_at_a_hook_card_plays_its_moment(qapp):
+    import time
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+    from kangedit.ui.hook_picker import HookPicker
+    moments = [TimelineClip("f", float(k * 5), float(k * 5 + 2), score=1.0 - k / 10) for k in range(4)]
+    asked = []
+
+    def decode(c, cancel):
+        asked.append(c.src_in)
+        return [np.full((90, 160, 3), int(c.src_in * 10), np.uint8) for _ in range(6)]
+
+    dlg = HookPicker(None, 1, lambda k, avoid: [m for m in moments if m not in avoid][:4], lambda c: None,
+                     lambda c: f"moment {c.src_in:g}", lambda k: 2.0, decode)
+
+    def wait_for(cond):
+        end = time.time() + 3
+        while not cond() and time.time() < end:
+            QApplication.processEvents()
+            time.sleep(0.01)
+        return cond()
+
+    assert wait_for(lambda: len(dlg.preview.frames) == 6)          # the strongest plays first
+    assert asked == [0.0] and dlg.preview.clip_id == dlg.cards[0][1].id
+    QApplication.sendEvent(dlg.cards[2][0], QEvent(QEvent.Enter))   # point at the third card
+    assert wait_for(lambda: dlg.preview.clip_id == dlg.cards[2][1].id and len(dlg.preview.frames) == 6)
+    assert asked == [0.0, 10.0] and "moment 10" in dlg.lbl_preview.text()
+    QApplication.sendEvent(dlg.cards[2][0], QEvent(QEvent.Enter))   # again: not decoded again
+    assert asked == [0.0, 10.0]
+    dlg.reject()
+    assert dlg.preview.frames == []
+
+
+def test_moment_frames_decodes_a_real_clip(window, tmp_path):
+    import threading
+    from kangedit.ffmpeg import ffmpeg_bin, probe, run
+    if not ffmpeg_bin():
+        pytest.skip("needs FFmpeg")
+    src = str(tmp_path / "m.mp4")
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4",
+         "-pix_fmt", "yuv420p", "-y", src])
+    i = probe(src)
+    f = Footage(src, i.duration, i.width, i.height, i.fps, i.has_audio)
+    window.project.footage = {f.id: f}
+    frames = window._moment_frames(TimelineClip(f.id, 1.0, 3.0), threading.Event())
+    assert len(frames) == 24 and frames[0].shape[0] == 240
+    assert np.abs(frames[0].astype(int) - frames[-1].astype(int)).mean() > 5      # it moves
+
+
+def test_transcript_of_the_whole_edit(window):
+    footage, analyses = two_files()
+    fa, fb = list(footage)
+    footage[fa].transcript = [{"s": 1.0, "e": 1.5, "w": "Hello"}, {"s": 1.6, "e": 2.0, "w": "there."},
+                              {"s": 12.0, "e": 12.5, "w": "Look!"}]
+    footage[fb].transcript = None
+    window.project.footage = footage
+    a, b, c = TimelineClip(fa, 0.5, 2.5), TimelineClip(fb, 4.0, 6.0), TimelineClip(fa, 11.0, 13.0)
+    window.project.clips = [a, b, c]
+    panel = window.edit_text
+    window.show_refine(panel)
+    rows = [panel.list.item(k).text() for k in range(panel.list.count())]
+    assert len(rows) == 3 and rows[0].endswith("Hello there.") and rows[2].endswith("Look!")
+    assert "no transcript yet" in rows[1] and "transcribe them" in panel.info.text()
+    panel._clicked(panel.list.item(2))                      # goes to the third clip
+    assert abs(window.viewer.t - 4.0) < 0.05
+    panel.search.setText("look")
+    assert panel.list.item(0).isHidden() and not panel.list.item(2).isHidden()
+    panel.search.setText("")
+    # dragged into another order: the edit follows (undoable), the numbers and times too
+    panel.reordered.emit([c.id, a.id, b.id])
+    assert [x.id for x in window.project.clips] == [c.id, a.id, b.id]
+    assert panel.list.item(0).text().startswith("1.  00:00") and panel.list.item(0).text().endswith("Look!")
+    window.undo()
+    assert [x.id for x in window.project.clips] == [a.id, b.id, c.id]
+    window.viewer.time_changed.emit(2.5)                   # the clip playing is marked
+    assert panel.list.item(1).background().color().alpha() > 0
+
+
+def test_moving_a_transcript_row_moves_the_clip(window):
+    from PySide6.QtCore import QModelIndex
+    footage, analyses = two_files()
+    fa, fb = list(footage)
+    window.project.footage = footage
+    a, b, c = TimelineClip(fa, 0.5, 2.5), TimelineClip(fb, 4.0, 6.0), TimelineClip(fa, 11.0, 13.0)
+    window.project.clips = [a, b, c]
+    window.show_refine(window.edit_text)
+    m = window.edit_text.list.model()
+    assert m.moveRow(QModelIndex(), 2, QModelIndex(), 0)       # the row a drag moves
+    assert [x.id for x in window.project.clips] == [c.id, a.id, b.id]
+
+
+def test_more_suggestions_shows_every_moment_in_turn(qapp):
+    from kangedit.ui.hook_picker import HookPicker
+    pool = [TimelineClip("f", 10.0 * k, 10.0 * k + 2.0) for k in range(20)]
+
+    def fetch(count, avoid):
+        taken = {c.src_in for c in avoid}
+        return [c for c in pool if c.src_in not in taken][:6]
+
+    dlg = HookPicker(None, 2, fetch, lambda c: None, lambda c: f"{c.src_in:g}", lambda n: 2.0)
+    seen = {c.src_in for _, c in dlg.cards}
+    for b, _ in dlg.cards[:2]:
+        b.setChecked(True)
+    for _ in range(5):
+        dlg.more()                                      # two ticked: they stay, new ones fill the rest
+        new = [c.src_in for _, c in dlg.cards[2:]]
+        assert new and not (set(new) & seen)
+        seen |= set(new)
+    assert seen == {c.src_in for c in pool}             # none skipped
+    dlg.deleteLater()

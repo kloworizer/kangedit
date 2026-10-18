@@ -95,7 +95,8 @@ def test_refine_panel_can_be_made_narrow(qapp):
     from kangedit.ui.main_window import REFINE_MIN_WIDTH, MainWindow
     w = MainWindow()
     try:
-        assert w.d_right.minimumWidth() == REFINE_MIN_WIDTH <= 300
+        assert REFINE_MIN_WIDTH <= 300
+        assert w.d_right.minimumWidth() == max(REFINE_MIN_WIDTH, w.right_tabs.tabs_width())   # every tab shown
         assert w._right_width >= 370                                   # but starts wide enough for every tab
     finally:
         w.project.dirty = False

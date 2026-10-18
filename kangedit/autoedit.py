@@ -79,6 +79,7 @@ class AutoEditSettings:
     max_uses: int = 0               # per footage, 0 = unlimited
     use_every_footage: bool = True
     order: str = "hook"
+    hook_clips: int = 0             # clips in the opening hook: 1-5 (0 = automatic: 1 short-form, 3 long-form)
     style: str = "balanced"
     similarity: float = 0.93        # cosine similarity above which segments count as repeats
     replace_timeline: bool = True
@@ -497,7 +498,7 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     # Ordering
     n_hook, hook_len = hook_plan(s)
     if s.order == "hook" and n_hook > 1:
-        # Long-form: a quick teaser of a few short moments, then the edit in story order.
+        # A teaser of a few short moments (long-form, or as many as asked), then the edit in story order.
         hs = copy.copy(s)
         hs.order = "chronological"
         hs.target_duration = max(s.clip_min, s.target_duration - n_hook * hook_len)
@@ -518,51 +519,43 @@ def select(project_footage: dict[str, Footage], analyses: dict[str, Analysis],
     return clips
 
 
+MAX_HOOK_CLIPS = 5
+HOOK_SUGGESTIONS = 6         # strong moments the hook picker offers at a time
+
+
 def hook_plan(s: AutoEditSettings) -> tuple[int, float]:
-    """(clips, seconds each) of the opening hook: one quick clip in short-form; in long-form, where shots
-    are long, a teaser of 3 short moments."""
-    if s.video_format == "long" or s.clip_max > 4.0:
-        return 3, 2.0
-    return 1, s.clip_max
+    """(clips, seconds each) of the opening hook: s.hook_clips when set, else one quick clip in short-form and,
+    in long-form where shots are long, a teaser of 3 short moments. A teaser's moments are 2 s each."""
+    long_form = s.video_format == "long" or s.clip_max > 4.0
+    n = int(np.clip(s.hook_clips, 1, MAX_HOOK_CLIPS)) if s.hook_clips else (3 if long_form else 1)
+    if n > 1:
+        return n, min(2.0, max(s.clip_max, 1.0))
+    return 1, (min(s.clip_max, 4.0) if long_form else s.clip_max)
 
 
-def find_hook_montage(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
-                      avoid: list[TimelineClip]) -> list[TimelineClip]:
-    """The long-form hook: hook_plan(s) short strong moments (none of them overlapping `avoid`), each
-    labelled "hook", strongest first; each from another scene (a different time, day or place, see
-    scenes.time_groups) while there are scenes left, else from another file."""
-    from .scenes import recorded_time, time_groups
-    n, length = hook_plan(s)
+def hook_suggestions(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
+                     avoid: list[TimelineClip], count: int, length: float) -> list[TimelineClip]:
+    """The `count` strongest moments of `length` seconds for a hook, of the whole video (all the footage scored
+    together, not scene by scene; none of them overlapping `avoid` or repeating each other), strongest first,
+    each labelled "hook"."""
     hs = copy.copy(s)
     hs.style = "hook"
-    hs.target_duration = length
+    hs.target_duration = count * length
     hs.clip_min = hs.clip_max = length
     hs.use_every_footage = False
     hs.max_uses = 0
     hs.order = "best_first"
-    ids = [i for i in project_footage if i in analyses]
-    order = sorted(ids, key=lambda i: (recorded_time(project_footage[i]) is None,
-                                       recorded_time(project_footage[i]) or 0.0))
-    groups = time_groups(project_footage, order)
-    clips: list[TimelineClip] = []
-    for _ in range(n):
-        used_scenes = {groups.get(c.footage_id) for c in clips}
-        used_files = {c.footage_id for c in clips}
-        pick = None
-        for allowed in ([i for i in ids if groups.get(i) not in used_scenes],
-                        [i for i in ids if i not in used_files], ids):
-            if not allowed:
-                continue
-            got = select({i: project_footage[i] for i in allowed}, {i: analyses[i] for i in allowed}, hs,
-                         existing=list(avoid) + clips)
-            if got:
-                pick = got[0]
-                break
-        if pick is None:
-            break
-        pick.label = "hook"
-        clips.append(pick)
+    clips = select(project_footage, analyses, hs, existing=list(avoid))[:count]
+    for c in clips:
+        c.label = "hook"
     return clips
+
+
+def find_hook_montage(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,
+                      avoid: list[TimelineClip]) -> list[TimelineClip]:
+    """The hook teaser: the hook_plan(s) strongest short moments of the whole video (see hook_suggestions)."""
+    n, length = hook_plan(s)
+    return hook_suggestions(project_footage, analyses, s, avoid, n, length)
 
 
 def find_hook(project_footage: dict[str, Footage], analyses: dict[str, Analysis], s: AutoEditSettings,

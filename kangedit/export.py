@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
-from . import keying, reframe, spherical
+from . import keying, motion, reframe, spherical, stabilize, voice
 from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
@@ -106,10 +106,12 @@ _IMAGE_PREP = "format=rgba,premultiply=inplace=1,"
 
 
 def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.0,
-                 segs: Optional[list] = None, ss: float = 0.0, keep_pitch: bool = True) -> str:
+                 segs: Optional[list] = None, ss: float = 0.0, keep_pitch: bool = True, clean: float = 0.0,
+                 floor: float = 0.0) -> str:
     """The sound of a clip: `dur` seconds from `skip` seconds into the input, or at another speed `segs`
     [(source start, source end, speed)] (source times; the input starts at source time `ss`), time-stretched
-    with its pitch kept, or resampled (pitch moving with the speed) when not keep_pitch."""
+    with its pitch kept, or resampled (pitch moving with the speed) when not keep_pitch. clean: voice clean-up
+    strength, floor: the clip's background noise level (see voice.py)."""
     fade = min(0.02, dur / 4)
     fmt = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
     head, src = "", f"[{inp}]"
@@ -150,7 +152,7 @@ def _audio_chain(inp: str, out: str, dur: float, volume: float, skip: float = 0.
         head += "".join(f"[{out}p{k}]" for k in range(n)) + f"concat=n={n}:v=0:a=1[{out}r];"
         src, skip, fmt = f"[{out}r]", 0.0, ""
     trim = f"atrim=start={skip:.4f},asetpts=PTS-STARTPTS," if skip > 0.0005 else ""
-    return (f"{head}{src}{trim}{fmt}"
+    return (f"{head}{src}{trim}{fmt}{voice.ffmpeg_filter(clean, floor)}"
             f"volume={volume:.3f},afade=t=in:d={fade:.3f},afade=t=out:st={max(0.0, dur - fade):.4f}:d={fade:.3f},"
             f"apad,atrim=duration={dur:.4f},asetpts=PTS-STARTPTS[{out}]")
 
@@ -168,7 +170,8 @@ def _clip_audio(ai: str, i: int, clip, cp: ClipPlan, silent: bool, ss: float) ->
     mode = sound_mode(clip.audio_mode)
     return _audio_chain(ai, f"a{i}", cp.a_dur, 0.0 if mode == "mute" else clip.volume,
                         0.0 if silent else max(0.0, cp.a_in - ss),
-                        None if silent else _speed_segments(clip, cp.a_t0, cp.a_t0 + cp.a_dur), ss, mode != "pitch")
+                        None if silent else _speed_segments(clip, cp.a_t0, cp.a_t0 + cp.a_dur), ss, mode != "pitch",
+                        0.0 if silent else clip.voice_clean, clip.voice_floor)
 
 
 def _curve(fade: float) -> str:
@@ -276,7 +279,7 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
         if sound:
             delay = int(round(max(0.0, c.start) * 1000))
             graph.append(_audio_chain(f"{k}:a:0", f"ova{j}r", length, c.volume, 0.0, _speed_segments(c, 0.0, length),
-                                      c.src_in, sound_mode(c.audio_mode) != "pitch"))
+                                      c.src_in, sound_mode(c.audio_mode) != "pitch", c.voice_clean, c.voice_floor))
             graph.append(f"[ova{j}r]adelay=delays={delay}:all=1[ova{j}]")
             audio.append(f"ova{j}")
         if video is not None:
@@ -295,9 +298,19 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
             elif not f.is_image:
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,"
             pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
-            chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
-            if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
-                chain += f"crop={pl.crop_w}:{pl.crop_h}:{pl.crop_x}:{pl.crop_y},"
+            mv = motion.of_clip(c, f, pl.crop_w / max(1, pl.crop_h))
+            if mv is not None:           # a dynamic zoom / stabilization inside its picture, by command
+                ss = 2 if pl.crop_w * 2 <= 4096 else 1
+                frames = int(math.ceil(length * fps)) + 1
+                mp = motion.export_plan(mv, c, pl, fw, fh, frames, 0, fps, f"ovm{j}", ss)
+                name = f"motion_ov{j}_{c.id}.txt"
+                with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh_:
+                    fh_.write("\n".join(mp.commands) + "\n")
+                chain += reframe.ffmpeg_moving_layer(pl, f"ovm{j}", (name, ss, mp.rotates, mp.cut))
+            else:
+                chain += f"scale={pl.scaled_w}:{pl.scaled_h}:flags=lanczos,"
+                if (pl.crop_w, pl.crop_h) != (pl.scaled_w, pl.scaled_h):
+                    chain += f"crop={pl.crop_w}:{pl.crop_h}:{pl.crop_x}:{pl.crop_y},"
             chain += "format=rgba,"
             if c.key_color:              # green / blue screen made see-through
                 chain += keying.ffmpeg_filter(c.key_color, c.key_similarity, c.key_blend, c.key_despill)
@@ -412,8 +425,19 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
         if color or halation:
             convert = f":in_color_matrix={matrix}:in_range=auto|{GRADE_FMT}"
         mode = "fill" if box else s.fit_mode
-        chain.append(reframe.ffmpeg_filter(sw, sh, box[2] if box else tw, box[3] if box else th, mode, clip.zoom,
-                                           clip.offset_x, clip.offset_y, f"v{j}a", f"v{j}b", f"c{j}", convert))
+        bw, bh = (box[2], box[3]) if box else (tw, th)
+        moving = None
+        mv = motion.of_clip(clip, f, bw / bh)
+        if mv is not None:                 # a dynamic zoom / stabilization: a window per frame, by command
+            pl = reframe.place(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y)
+            sup = 2 if pl.crop_w * 2 <= 4096 else 1         # supersampled (not `ss`: the input's start, below)
+            mp = motion.export_plan(mv, clip, pl, sw, sh, cp.v_frames, cp.pre_f, s.fps, f"c{j}", sup)
+            name = f"motion_{i}.txt"
+            with open(os.path.join(workdir, name), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(mp.commands) + "\n")
+            moving = (name, sup, mp.rotates, mp.cut)
+        chain.append(reframe.ffmpeg_filter(sw, sh, bw, bh, mode, clip.zoom, clip.offset_x, clip.offset_y,
+                                           f"v{j}a", f"v{j}b", f"c{j}", convert, moving))
         post = f"[v{j}b]"
         if convert and f"format={GRADE_FMT}" not in chain[-1].split("overlay")[-1]:
             post += f"scale={convert.split('|')[0][1:]},format={GRADE_FMT},"     # (blurred background)
@@ -634,10 +658,23 @@ def _export_parts(project: Project, s: ExportSettings, workdir: str, parts: list
     return _write_concat(workdir, files)
 
 
+def measure_shake(project: Project, use_proxies: bool, progress: Optional[ProgressCb] = None,
+                 cancel: Optional[threading.Event] = None) -> int:
+    """Measure the camera's shake in the stabilized clips not measured yet (see stabilize.py). Returns how many."""
+    todo = stabilize.missing(project)
+    for n, (f, t0, t1) in enumerate(todo):
+        def step(p, n=n, f=f):
+            if progress is not None:
+                progress(0.0, f"Measuring the camera shake ({n + 1} of {len(todo)}): {f.name} {p * 100:.0f} %")
+        stabilize.analyze(f, t0, t1, use_proxies, step, cancel)
+    return len(todo)
+
+
 def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] = None,
            cancel: Optional[threading.Event] = None) -> str:
     if not project.clips:
         raise RuntimeError("The timeline is empty")
+    measure_shake(project, s.use_proxies, progress, cancel)
     encoder = gpu_encoder(s)
     name = os.path.basename(s.output)
     workdir = tempfile.mkdtemp(prefix="export_", dir=str(cache_dir("tmp")))

@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
-import traceback
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 
 from .ffmpeg import Cancelled
+
+log = logging.getLogger("kangedit.tasks")
 
 CANCEL_GRACE = 0.5   # seconds a cancelled task gets to stop before the queue moves on
 
@@ -90,8 +92,8 @@ class TaskQueue(QObject):
                 except Cancelled:
                     out["cancelled"] = True
                 except Exception as e:  # noqa: BLE001
-                    traceback.print_exc()
                     out["error"] = f"{e}"
+                    log.exception("Task %r failed", task.name)
 
             # The task runs in its own thread so a cancel is answered at once, even while the task is stuck in
             # a call that cannot be interrupted (native code, a subprocess); it then finishes or bails out on

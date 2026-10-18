@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from . import keying, reframe, spherical
+from .motion import Motion
 from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, needs_color, profile_short
 from .decoder import DecoderPool
 from .edits import blend
@@ -72,6 +73,7 @@ class Shot:
     ramp: str = ""
     src_len: float = 0.0         # length of its source range
     view: Optional[spherical.View] = None   # 360° footage: the view of the sphere it shows
+    motion: Optional[Motion] = None          # a dynamic zoom / stabilization (see motion.py)
 
     def src_at(self, off: float) -> float:
         """Source time shown `off` seconds after the shot's start (also before / after it: handles)."""
@@ -87,6 +89,7 @@ class OverlayShot:
     log_profile: str
     tonemap: str
     footage: Footage = field(compare=False, hash=False)
+    motion: Optional[Motion] = None          # a dynamic zoom / stabilization inside its picture (motion.py)
 
     @property
     def grade(self) -> Grade:
@@ -370,10 +373,12 @@ class PreviewEngine:
                 with self._cv:   # gave way to playback: finish once the buffer has refilled
                     play["prerolled"].discard(j)
 
-    def _layer(self, shot: Shot, src_t: float, look: Look, interrupt) -> list:
+    def _layer(self, shot: Shot, src_t: float, look: Look, interrupt, off: Optional[float] = None) -> list:
+        """[(decoder, frame, shot, (seconds into the shot, source time))] of source time src_t."""
         dec = self.decoders.get(shot.footage, look.use_proxies, look.decode_h, shot.index % SLOTS)
         frame, _ = dec.raw_at(src_t, interrupt)
-        return [] if frame is None else [(dec, frame, shot)]
+        when = (src_t - shot.src_in if off is None else off, src_t)
+        return [] if frame is None else [(dec, frame, shot, when)]
 
     def _gather(self, shots: list[Shot], i: int, t: float, look: Look, interrupt) -> tuple[list, Optional[tuple]]:
         """Decode the timeline at t: ([(decoder, frame, shot)], None) for shot i, or both shots' layers and
@@ -388,11 +393,12 @@ class PreviewEngine:
         if pair is not None:
             a, b, kind, cut, half = pair
             # Both sides run into their handles: a past its out point, b before its in point.
-            layers = (self._layer(a, a.src_at(t - a.start), look, interrupt)
-                      + self._layer(b, b.src_at(t - b.start), look, interrupt))
+            layers = (self._layer(a, a.src_at(t - a.start), look, interrupt, t - a.start)
+                      + self._layer(b, b.src_at(t - b.start), look, interrupt, t - b.start))
             if len(layers) == 2:
                 return layers, (kind, (t - (cut - half)) / (2 * half))
-        return self._layer(shot, shot.src_at(min(max(0.0, t - shot.start), shot.dur)), look, interrupt), None
+        off = min(max(0.0, t - shot.start), shot.dur)
+        return self._layer(shot, shot.src_at(off), look, interrupt, off), None
 
     def _overlays(self, t: float, look: Look, interrupt) -> list:
         """Decode the overlay layers showing at timeline time t: [(decoder, frame, OverlayShot)]."""
@@ -418,7 +424,7 @@ class PreviewEngine:
                 t: Optional[float] = None, ovl: list = ()) -> np.ndarray:
         """Convert, grade and reframe decoded layers (on the render pool during playback), then lay the overlay
         layers on top. t: the timeline time, for the fade in / out (None when showing a source frame)."""
-        imgs = [self._finish(dec.rgb_of(frame), shot, look, playing) for dec, frame, shot in layers]
+        imgs = [self._finish(dec.rgb_of(frame), shot, look, playing, when) for dec, frame, shot, when in layers]
         out = blend(mix[0], imgs[0], imgs[1], mix[1]) if mix is not None else imgs[0]
         if ovl and t is not None:
             out = np.array(out, copy=True) if not out.flags.writeable or out.base is not None else out
@@ -440,12 +446,19 @@ class PreviewEngine:
             rgba = np.dstack([fn(np.ascontiguousarray(rgba[..., :3])), rgba[..., 3]])
         if c.key_color:
             rgba = keying.apply(rgba, c.key_color, c.key_similarity, c.key_blend, c.key_despill)
+        window = None
+        if ov.motion is not None:
+            p = reframe.overlay_place(rgba.shape[1], rgba.shape[0], look.width, look.height, c.scale, c.box_w,
+                                      c.box_h, c.pan_x, c.pan_y)
+            window = ov.motion.at_placement(t - c.start, c.src_at(t - c.start), p)
         layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
-                                      c.pan_x, c.pan_y)
+                                      c.pan_x, c.pan_y, window)
         layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
         reframe.composite(out, layer, c.x * look.width, c.y * look.height, c.alpha_at(t))
 
-    def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool) -> np.ndarray:
+    def _finish(self, img: np.ndarray, shot: Shot, look: Look, playing: bool,
+                when: Optional[tuple] = None) -> np.ndarray:
+        """when: (seconds into the shot, source time) of the frame, for its movement (see motion.py)."""
         fn = self._grader(shot, playing) if look.color else None
         quarters, tilt = reframe.split_rotation(shot.rot)
         if shot.view is not None:   # 360°: the clip's view of the sphere, as big as the frame (or its box)
@@ -454,9 +467,14 @@ class PreviewEngine:
         img = reframe.rotate_quarters(img, quarters)
         if shot.box:   # a box of the frame, cropped to fill it, black around it
             bx, by, bw, bh = reframe.box_rect(look.width, look.height, shot.box)
-            out = reframe.render(img, bw, bh, "fill", shot.zoom, shot.ox, shot.oy, fn)
+            mode, tw, th = "fill", bw, bh
         else:
-            out = reframe.render(img, look.width, look.height, look.fit_mode, shot.zoom, shot.ox, shot.oy, fn)
+            mode, tw, th = look.fit_mode, look.width, look.height
+        window = None
+        if shot.motion is not None and when is not None:
+            p = reframe.place(img.shape[1], img.shape[0], tw, th, mode, shot.zoom, shot.ox, shot.oy)
+            window = shot.motion.at_placement(when[0], when[1], p)
+        out = reframe.render(img, tw, th, mode, shot.zoom, shot.ox, shot.oy, fn, window)
         if look.color and has_spatial(shot.grade):
             out = apply_spatial(out, shot.grade)
         out = reframe.tilt(out, tilt)

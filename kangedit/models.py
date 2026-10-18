@@ -50,6 +50,7 @@ class Footage:
     # Word-level transcript in source time: [{"s": start, "e": end, "w": text}, ...]
     transcript: Optional[list] = None
     transcript_lang: str = ""
+    transcript_model: str = ""     # what made it: "speech model|language" (see captions.transcript_key)
     kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
     bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
     projection: str = ""           # 360° footage: "equirect" | "dfisheye" ("" = a normal picture; see spherical.py)
@@ -109,6 +110,15 @@ class TimelineClip:
     view_roll: float = 0.0
     view_fov: float = 100.0
     view_tiny: bool = False        # the whole sphere as a "tiny planet"
+    # Movement inside the framed picture (see motion.py): a dynamic zoom (motion.MOTIONS key, how much it
+    # zooms, motion.EASES key) and stabilization strength (0 = off, up to 1).
+    motion: str = ""
+    motion_amount: float = 0.12
+    motion_ease: str = "both"
+    motion_face: Optional[list] = None   # where "zoom on the face" zooms: [x, y] in parts of the clip's picture
+    stabilize: float = 0.0
+    voice_clean: float = 0.0       # take noise and wind out of the speech: 0 = off, up to 1 (see voice.py)
+    voice_floor: float = 0.0       # its background noise level, dBFS (0 = not known)
     id: str = field(default_factory=new_id)
 
     @property
@@ -196,6 +206,13 @@ class OverlayClip:
     view_roll: float = 0.0
     view_fov: float = 100.0
     view_tiny: bool = False        # the whole sphere as a "tiny planet"
+    motion: str = ""               # dynamic zoom and stabilization inside the layer's picture (see TimelineClip)
+    motion_amount: float = 0.12
+    motion_ease: str = "both"
+    motion_face: Optional[list] = None
+    stabilize: float = 0.0
+    voice_clean: float = 0.0
+    voice_floor: float = 0.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -380,6 +397,7 @@ class ProjectSettings:
     proxy_height: int = 540
     whisper_model: str = "auto"         # captions.resolve_model: large-v3 on an NVIDIA GPU, else turbo
     whisper_language: str = ""     # "" = auto detect
+    speech_cleanup: str = "auto"   # captions.CLEANUPS key: clean road / wind noise out before transcribing
     captions: CaptionStyle = field(default_factory=CaptionStyle)
     video_format: str = "short"    # short | long | custom (auto-edit preset)
     # Fade from / to black and silence at the start / end of the timeline (seconds, 0 = off).

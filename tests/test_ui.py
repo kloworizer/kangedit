@@ -131,3 +131,45 @@ def test_toolbars_wrap_instead_of_hiding_buttons(qapp):
     finally:
         window.project.dirty = False
         window.close()
+
+
+def test_guided_tour_walks_every_step(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        w.resize(1400, 900)
+        w.show()
+        qapp.processEvents()
+        w.show_tour()
+        tour = w._tour
+        titles = [s.title for s in tour.steps]
+        assert "For YouTube and socials" in titles
+        for k in range(len(tour.steps)):
+            tour.show_step(k)
+            assert not tour._target_rect().isNull() or tour.steps[k].target is None
+        tour.close_tour(True)
+        assert w._tour is None
+    finally:
+        w.project.dirty = False
+        w.close()
+
+
+def test_refine_panel_never_hides_a_tab(qapp):
+    from kangedit.ui.main_window import MainWindow
+    w = MainWindow()
+    try:
+        w.show()
+        qapp.processEvents()
+        tabs = w.right_tabs
+        assert not tabs.usesScrollButtons()
+        bar = tabs.tabBar()
+        need = sum(bar.tabRect(i).width() for i in range(bar.count()))
+        assert w.d_right.minimumWidth() >= need
+        from PySide6.QtCore import Qt
+        w.resizeDocks([w.d_right], [100], Qt.Horizontal)       # dragged as narrow as it goes
+        qapp.processEvents()
+        assert w.d_right.width() >= need
+        assert all(bar.tabRect(i).right() <= bar.width() for i in range(bar.count()))   # every tab in sight
+    finally:
+        w.project.dirty = False
+        w.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import time
 from dataclasses import replace
@@ -13,17 +14,18 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen, Q
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
-from .. import reframe, spherical
+from .. import motion, reframe, spherical
 from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
 from ..color import Grade
 from ..config import frame_size
 from ..decoder import DecoderPool
 from ..edits import TRANSITIONS, edits
 from ..fonts import ensure_qt_font
-from ..models import OverlayClip, Project, TextClip
+from ..models import OverlayClip, Project, TextClip, TimelineClip
 from ..titles import text_state
 from ..preview import Look, OverlayShot, PreviewEngine, Rendered, Shot
 from .platform_overlay import draw_platform_overlay
+from .source_view import SourcePanel
 from .text_render import draw_text, text_rect
 from .theme import fmt_time
 
@@ -293,9 +295,12 @@ class Canvas(QWidget):
 
 
 class Viewer(QWidget):
-    time_changed = Signal(float)
+    time_changed = Signal(float)               # the timeline's playhead (not sent in Source mode)
     play_state = Signal(bool)
     adjust_mode_changed = Signal(str)
+    mode_changed = Signal(str)                 # "timeline" | "source"
+    use_source = Signal(str, float, float, str)   # footage id, in, out, "insert" | "append"
+    transcribe_source = Signal(str)            # footage id
 
     PREVIEW_SHORT = 540
 
@@ -320,6 +325,12 @@ class Viewer(QWidget):
         # Log conversion, LUTs and grading in the viewer (never affects export). "playback": off only while
         # playing, so playback is lighter and a paused frame still shows the finished color.
         self.adjust_mode = "on"            # "on" | "playback" | "off"
+        # Source mode: a file from the Media panel plays on its own (a one-clip project of it), with its sound;
+        # the timeline's project, playhead and sound are kept to come back to.
+        self.mode = "timeline"
+        self.source_fid = ""
+        self.marks: dict[str, list] = {}   # footage id -> [in, out] (None: not set)
+        self._timeline: Optional[tuple] = None   # (project, playhead, sound file, sound valid) while in Source
 
         self.canvas = Canvas()
         self.timer = QTimer(self)
@@ -343,7 +354,7 @@ class Viewer(QWidget):
                        (self.btn_play, "Play / Pause (Space)"), (self.btn_next, "Next clip (Down)"),
                        (self.btn_end, "Go to end (End)")):
             b.setToolTip(tip)
-            b.setFixedWidth(40)
+            b.setFixedWidth(34)
         self.btn_play.clicked.connect(self.toggle_play)
         self.btn_start.clicked.connect(lambda: self.seek(0))
         self.btn_end.clicked.connect(lambda: self.seek(max(0.0, self.project.duration - 1e-3)))
@@ -368,8 +379,41 @@ class Viewer(QWidget):
         self.canvas.background_activated.connect(self.toggle_fullscreen)
         self._home: Optional[tuple[QWidget, int]] = None   # where the viewer sits while full screen
 
+        # Shown while the preview sound is being mixed again after a change (music, sounds, volume, trims):
+        # playback has the sound from before the change until then.
+        self.lbl_audio = QLabel("♪ updating")
+        self.lbl_audio.setStyleSheet("color: #1e1f22; background: #f0b429; border-radius: 4px; padding: 1px 6px;")
+        self.lbl_audio.setToolTip("The preview sound is being mixed again after your last change. Until it is "
+                                  "ready, playback has the sound from before (a music track or sound just added "
+                                  "is heard once it is). The export always has the latest.")
+        self.lbl_audio.hide()
+        self.lbl_time.setMinimumWidth(self.lbl_time.sizeHint().width())   # the badge never squeezes the time
+        self.btn_timeline = QPushButton("Timeline")
+        self.btn_source = QPushButton("Source")
+        for b, tip in ((self.btn_timeline, "Play the edit (the timeline)"),
+                       (self.btn_source, "Play a file from the Media panel on its own (double-click it there), "
+                                         "mark the part to use (I / O, or its words) and put it on the timeline")):
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setStyleSheet("padding: 3px 6px;")
+        self.btn_timeline.setChecked(True)
+        self.btn_source.setEnabled(False)
+        self.btn_timeline.clicked.connect(lambda: self.show_timeline())
+        self.btn_source.clicked.connect(lambda: self.open_source(self.source_fid))
+        self.source_panel = SourcePanel()
+        self.source_panel.hide()
+        self.source_panel.bar.seek.connect(self.seek)
+        self.source_panel.words.seek.connect(self.seek)
+        self.source_panel.words.marked.connect(self.set_marks)
+        self.source_panel.mark.connect(self.mark)
+        self.source_panel.use.connect(lambda how: self.use_source.emit(self.source_fid, *self.marked_range(), how))
+        self.source_panel.transcribe.connect(lambda: self.transcribe_source.emit(self.source_fid))
         bar = QHBoxLayout()
+        bar.addWidget(self.btn_timeline)
+        bar.addWidget(self.btn_source)
         bar.addWidget(self.lbl_time)
+        bar.addWidget(self.lbl_audio)
         bar.addStretch(1)
         for b in (self.btn_start, self.btn_prev, self.btn_play, self.btn_next, self.btn_end):
             bar.addWidget(b)
@@ -385,6 +429,7 @@ class Viewer(QWidget):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(self.canvas, 1)
         lay.addLayout(bar)
+        lay.addWidget(self.source_panel)
 
     # ------------------------------------------------------------------ full screen
     def is_fullscreen(self) -> bool:
@@ -437,12 +482,18 @@ class Viewer(QWidget):
             self.seek(0)
         elif k == Qt.Key_End:
             self.seek(max(0.0, self.project.duration - 1e-3))
+        elif k in (Qt.Key_I, Qt.Key_O) and self.mode == "source":
+            self.mark("in" if k == Qt.Key_I else "out")
         else:
             super().keyPressEvent(e)
 
     # ------------------------------------------------------------------ public api
     def set_project(self, project: Project):
         self.stop()
+        self._leave_source()
+        self.source_fid = ""
+        self.marks = {}
+        self.btn_source.setEnabled(False)
         self.project = project
         self.drop_decoders()
         self.t = 0.0
@@ -480,7 +531,12 @@ class Viewer(QWidget):
         self.refresh()
 
     def set_audio(self, path: Optional[str]):
-        """Use a new preview mix. During playback it takes over at the current time (live sound edits)."""
+        """Use a new preview mix. During playback it takes over at the current time (live sound edits). In
+        Source mode it is kept for the timeline."""
+        if self.mode == "source" and self._timeline is not None:
+            proj, t, _, _ = self._timeline
+            self._timeline = (proj, t, path, bool(path) and os.path.exists(path))
+            return
         self._audio_path = path
         self.audio_valid = bool(path) and os.path.exists(path)
         self._audio_resume = self.playing and self._play_clock is not None and self.audio_valid
@@ -495,7 +551,16 @@ class Viewer(QWidget):
             self.player.play()
 
     def invalidate_audio(self):
+        if self.mode == "source" and self._timeline is not None:
+            proj, t, path, _ = self._timeline
+            self._timeline = (proj, t, path, False)
+            return
         self.audio_valid = False
+
+    def set_audio_pending(self, on: bool):
+        """Show (or hide) that the preview sound is being mixed again (the timeline's: not in Source mode)."""
+        self._audio_pending = on
+        self.lbl_audio.setVisible(on and self.mode == "timeline")
 
     def seek(self, t: float):
         dur = self.project.duration
@@ -503,7 +568,140 @@ class Viewer(QWidget):
         if self.playing:
             self._restart_playback()
         self.refresh()
+        self._emit_time(self.t)
+
+    def _emit_time(self, t: float):
+        """The playhead moved: the timeline's (time_changed), or in Source mode the file's (its panel)."""
+        if self.mode == "source":
+            a, b = self.marks.get(self.source_fid, [None, None])
+            self.source_panel.show_state(t, a, b, self.project.settings.fps)
+        else:
+            self.time_changed.emit(t)
+
+    # ------------------------------------------------------------------ source mode
+    def open_source(self, fid: str, footage=None):
+        """Play a file from the Media panel on its own (Source mode), from its mark in (or where it was left)."""
+        f = footage if footage is not None else (self._timeline[0] if self._timeline else self.project).footage.get(fid)
+        if f is None:
+            self.btn_source.setChecked(self.mode == "source")      # (a checkable button: as it was)
+            self.btn_timeline.setChecked(self.mode != "source")
+            return
+        self.stop()
+        if self.mode == "timeline":
+            self._timeline = (self.project, self.t, self._audio_path, self.audio_valid)
+        tl = self._timeline[0]
+        src = Project()
+        src.settings = copy.copy(tl.settings)
+        src.settings.fade_in = src.settings.fade_out = 0.0
+        src.footage = {f.id: f}
+        src.clips = [TimelineClip(f.id, 0.0, max(0.05, f.duration), id="source")]
+        same = self.source_fid == f.id and self.mode == "source"
+        self.mode, self.source_fid, self.project = "source", f.id, src
+        self.marks.setdefault(f.id, [None, None])
+        if not same:
+            self.t = self.marks[f.id][0] or 0.0
+        sound = (f.proxy_path if tl.settings.use_proxies and f.has_proxy() else f.path) \
+            if f.has_audio and not f.is_image else None
+        self._audio_path = sound
+        self.audio_valid = bool(sound) and os.path.exists(sound)
+        self.player.setSource(QUrl.fromLocalFile(sound) if self.audio_valid else QUrl())
+        self.source_panel.show_file(f)
+        self.source_panel.show()
+        self.btn_source.setEnabled(True)
+        self.btn_source.setText("Source")
+        self.btn_source.setToolTip(f"Playing {f.name} on its own. Timeline: back to the edit")
+        self.btn_source.setChecked(True)
+        self.btn_timeline.setChecked(False)
+        self.lbl_audio.hide()
+        self.refresh()
+        self._emit_time(self.t)
+        self.mode_changed.emit("source")
+
+    def show_timeline(self):
+        """Back to the edit (Timeline mode), where its playhead was."""
+        if self.mode != "source":
+            self.btn_timeline.setChecked(True)
+            return
+        self.stop()
+        self._leave_source()
+        self.refresh()
         self.time_changed.emit(self.t)
+        self.mode_changed.emit("timeline")
+
+    def _leave_source(self):
+        if self.mode != "source" or self._timeline is None:
+            return
+        proj, t, path, valid = self._timeline
+        self._timeline = None
+        # (the edit may have got shorter meanwhile: an Undo after Insert)
+        self.mode, self.project, self.t = "timeline", proj, max(0.0, min(t, max(0.0, proj.duration - 1e-3)))
+        self._audio_path, self.audio_valid = path, valid
+        self.player.setSource(QUrl.fromLocalFile(path) if path and os.path.exists(path) else QUrl())
+        self.source_panel.hide()
+        self.btn_timeline.setChecked(True)
+        self.btn_source.setChecked(False)
+        self.lbl_audio.setVisible(getattr(self, "_audio_pending", False))
+
+    def close_source(self, fids) -> None:
+        """Files taken out of the project: Source mode stops showing them (back to the edit)."""
+        if self.source_fid not in fids:
+            return
+        self.show_timeline()
+        self.marks.pop(self.source_fid, None)
+        self.source_fid = ""
+        self.btn_source.setEnabled(False)
+        self.btn_source.setChecked(False)
+
+    def timeline_time(self) -> float:
+        """The timeline's playhead (kept while in Source mode)."""
+        return self._timeline[1] if self.mode == "source" and self._timeline is not None else self.t
+
+    def set_timeline_time(self, t: float):
+        """Move the timeline's playhead (in Source mode: where it goes back to)."""
+        if self.mode == "source" and self._timeline is not None:
+            proj, _, path, valid = self._timeline
+            self._timeline = (proj, t, path, valid)
+        else:
+            self.seek(t)
+
+    def update_source(self, footage):
+        """The file shown in Source mode changed (a new transcript): show it again."""
+        if self.mode == "source" and footage is not None and footage.id == self.source_fid:
+            self.source_panel.show_file(footage)
+            self._emit_time(self.t)
+
+    def mark(self, kind: str):
+        """Mark in / out at the playhead, or clear the marks (Source mode)."""
+        if self.mode != "source":
+            return
+        m = self.marks.setdefault(self.source_fid, [None, None])
+        if kind == "in":
+            m[0] = round(self.t, 3)
+            if m[1] is not None and m[1] <= m[0]:
+                m[1] = None
+        elif kind == "out":
+            m[1] = round(self.t + 1.0 / max(1.0, self.project.settings.fps), 3)
+            if m[0] is not None and m[0] >= m[1]:
+                m[0] = None
+        else:
+            m[0] = m[1] = None
+        self._emit_time(self.t)
+
+    def set_marks(self, a: float, b: float):
+        """Mark in and out at once (words selected in the transcript): a little room around the words."""
+        if self.mode != "source":
+            return
+        dur = self.project.duration
+        self.marks[self.source_fid] = [round(max(0.0, a - 0.05), 3), round(min(dur, b + 0.1), 3)]
+        self.seek(max(0.0, a - 0.05))
+
+    def marked_range(self) -> tuple[float, float]:
+        """The marked part of the file in Source mode (the whole file where a mark isn't set)."""
+        a, b = self.marks.get(self.source_fid, [None, None])
+        dur = self.project.duration
+        a = a if a is not None else 0.0
+        b = b if b is not None else dur
+        return a, max(a + 0.05, b)
 
     def show_source(self, clip_id: Optional[str], src_t: float = 0.0):
         """Temporarily show a clip's source frame (used while slipping/trimming)."""
@@ -545,11 +743,19 @@ class Viewer(QWidget):
         self.seek(self.t + frames / max(1.0, self.project.settings.fps))
 
     def prev_clip(self):
+        if self.mode == "source":              # the file's marks
+            a, _ = self.marks.get(self.source_fid, [None, None])
+            self.seek(a if a is not None and a < self.t - 0.05 else 0.0)
+            return
         starts = self.project.clip_starts()
         prev = [s for s in starts if s < self.t - 0.05]
         self.seek(prev[-1] if prev else 0.0)
 
     def next_clip(self):
+        if self.mode == "source":
+            _, b = self.marks.get(self.source_fid, [None, None])
+            self.seek(b if b is not None and b > self.t + 0.05 else self.project.duration)
+            return
         starts = self.project.clip_starts()
         nxt = [s for s in starts if s > self.t + 0.01]
         if nxt:
@@ -581,7 +787,7 @@ class Viewer(QWidget):
         if t >= self.project.duration:
             self.t = max(0.0, self.project.duration - 1e-3)
             self.stop()
-            self.time_changed.emit(self.t)
+            self._emit_time(self.t)
             return
         fr = self.engine.take_frame(t)
         if fr is not None:
@@ -591,7 +797,7 @@ class Viewer(QWidget):
             return
         self.t = t
         self.lbl_time.setText(f"{fmt_time(self.t, fps)} / {fmt_time(self.project.duration, fps)}")
-        self.time_changed.emit(self.t)
+        self._emit_time(self.t)
 
     def _sync_audio(self, t: float):
         """Keep the preview mix playing in step with the clock. Also restarts it after an edit during
@@ -632,7 +838,10 @@ class Viewer(QWidget):
         for c in sorted(self.project.overlays, key=lambda x: x.track):
             f = self.project.footage.get(c.footage_id)
             if f is not None and c.duration > 0 and c.start < self.project.duration:
-                out.append(OverlayShot(OverlayClip.from_dict(c.to_dict()), f.log_profile, f.tonemap, f))
+                tw, th = self.preview_size()
+                w, h = reframe.overlay_size(*spherical.dims(f, c), tw, th, c.scale, c.box_w, c.box_h)
+                out.append(OverlayShot(OverlayClip.from_dict(c.to_dict()), f.log_profile, f.tonemap, f,
+                                       motion.of_clip(c, f, w / max(1, h))))
         return tuple(out)
 
     def overlay_boxes(self, t: float) -> list:
@@ -657,7 +866,15 @@ class Viewer(QWidget):
                     clip.offset_y, f, rot=clip.rotation,
                     box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else (),
                     speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur,
-                    view=spherical.view_of(clip) if spherical.is_360(f) else None)
+                    view=spherical.view_of(clip) if spherical.is_360(f) else None,
+                    motion=motion.of_clip(clip, f, self._aspect(clip)))
+
+    def _aspect(self, clip) -> float:
+        """Width / height of the picture a main-track clip shows in (its box, or the frame)."""
+        tw, th = self.preview_size()
+        if clip.box_w > 0 and clip.box_h > 0:
+            tw, th = clip.box_w * tw, clip.box_h * th
+        return tw / max(1e-6, th)
 
     def _shots(self) -> list[Shot]:
         out, t = [], 0.0
@@ -726,7 +943,7 @@ class Viewer(QWidget):
         self.canvas.overlay_boxes = self.overlay_boxes(t) if self._override is None else []
         self.canvas.overlay_gain = self._look().fade_gain(t)
         st = self.project.settings.captions
-        if self._override is None and st.enabled:
+        if self._override is None and st.enabled and self.mode == "timeline":
             for c in self.captions:
                 if c.start <= t < c.end:
                     self.canvas.caption, self.canvas.caption_t = c, t

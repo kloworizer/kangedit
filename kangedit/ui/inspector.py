@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QLabel, QMenu, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
-from .. import spherical
+from .. import motion, spherical, stabilize, voice
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import OverlayClip, Project, TimelineClip
@@ -364,6 +364,52 @@ class Inspector(QScrollArea):
         self.grp_reframe = g
         lay.addWidget(g)
 
+        # --- Dynamic zoom: a slow zoom or pan across the picture (as DaVinci Resolve's Dynamic Zoom)
+        g = QGroupBox("Dynamic zoom (slow zoom / pan)")
+        g.setToolTip("Moves slowly inside the framed picture over the clip: a zoom in or out, or a pan across it "
+                     "(the Ken Burns effect). Brings life to photos and steady shots. Shown in the preview as "
+                     "exported.")
+        f = QFormLayout(g)
+        self.cb_motion = QComboBox()
+        for key, label in motion.MOTIONS.items():
+            self.cb_motion.addItem(label, key)
+        self.cb_motion.currentIndexChanged.connect(self._set_motion)
+        self.mo_amount = ParamSlider(2.0, motion.MAX_AMOUNT * 100, motion.DEFAULT_AMOUNT * 100, 1.0, 0, " %")
+        self.mo_amount.setToolTip("How much it zooms in (a pan zooms in this much to have room to move). "
+                                  "Slight (5-15 %) looks natural.")
+        self.mo_amount.changed.connect(lambda val: self._set_attr("motion_amount", val / 100.0, "motion"))
+        self.cb_ease = QComboBox()
+        for key, label in motion.EASES.items():
+            self.cb_ease.addItem(label, key)
+        self.cb_ease.setToolTip("How the movement starts and stops: easing starts and / or ends it gently")
+        self.cb_ease.currentIndexChanged.connect(self._set_ease)
+        f.addRow("Movement", self.cb_motion)
+        f.addRow("Amount", self.mo_amount)
+        f.addRow("Ease", self.cb_ease)
+        self.grp_motion = g
+        lay.addWidget(g)
+
+        # --- Stabilization
+        g = QGroupBox("Stabilize")
+        g.setToolTip("Smooths a shaky handheld camera: the camera's movement is measured once (a few seconds, "
+                     "in the background) and the picture follows a steadier path, zoomed in just enough to hide "
+                     "the edges. Shown in the preview as exported.")
+        f = QFormLayout(g)
+        self.chk_stab = QCheckBox("Stabilize the camera")
+        self.chk_stab.toggled.connect(self._set_stab_on)
+        self.st_strength = ParamSlider(5.0, 100.0, 50.0, 1.0, 0, " %")
+        self.st_strength.setToolTip("Low: takes out the shake and keeps the camera's moves (a walk, a pan).\n"
+                                    "High: holds the picture almost still, as on a tripod (zooms in more).")
+        self.st_strength.changed.connect(self._set_stab_strength)
+        self.lbl_stab = QLabel("")
+        self.lbl_stab.setWordWrap(True)
+        self.lbl_stab.setStyleSheet("color: #9aa0ab;")
+        f.addRow(self.chk_stab)
+        f.addRow("Strength", self.st_strength)
+        f.addRow(self.lbl_stab)
+        self.grp_stab = g
+        lay.addWidget(g)
+
         # --- 360° footage: which way the clip looks
         g = QGroupBox("360° view")
         g.setToolTip("360° footage (Insta360, DJI Osmo 360, GoPro Max...): the clip shows a flat view of the sphere, "
@@ -394,6 +440,20 @@ class Inspector(QScrollArea):
         self.vol = ParamSlider(0, 200, 100, 1, 0, " %")
         self.vol.changed.connect(lambda val: self._set_attr("volume", val / 100.0, "audio"))
         f.addRow("Volume", self.vol)
+        self.chk_voice = QCheckBox("Clean up the voice (noise, wind)")
+        self.chk_voice.setToolTip("Takes the background noise and the rumble of wind out of the clip's sound, so "
+                                  "speech is clearer. Heard in playback as exported.")
+        self.chk_voice.toggled.connect(self._set_voice_on)
+        self.voice_amt = ParamSlider(10.0, 100.0, voice.DEFAULT * 100, 1.0, 0, " %")
+        self.voice_amt.setToolTip("How much noise is taken out: more can make a voice sound thin or watery")
+        self.voice_amt.changed.connect(self._set_voice_amount)
+        b_auto = QPushButton("🎙 Clean up every clip with wind")
+        b_auto.setToolTip("Switch the clean-up on for every clip (main track and layers) where the smarter "
+                          "analysis heard wind on the microphone")
+        b_auto.clicked.connect(lambda: self.request.emit("voice_auto"))
+        f.addRow(self.chk_voice)
+        f.addRow("Clean-up", self.voice_amt)
+        f.addRow(b_auto)
         lay.addWidget(g)
         lay.addStretch(1)
         self.reload_luts()
@@ -479,8 +539,107 @@ class Inspector(QScrollArea):
             self.rf_x.set_value(clip.offset_x)
             self.rf_y.set_value(clip.offset_y)
             self.rf_rot.set_value(clip.rotation)
+        self._show_motion(clip, f)
         self.vol.set_value(clip.volume * 100.0)
+        self.chk_voice.blockSignals(True)
+        self.chk_voice.setChecked(clip.voice_clean > 0)
+        self.chk_voice.blockSignals(False)
+        if clip.voice_clean > 0:
+            self.voice_amt.set_value(clip.voice_clean * 100.0)
+        self.voice_amt.setEnabled(clip.voice_clean > 0)
         self._show_view(clip)
+
+    def _show_motion(self, clip, f):
+        for w in (self.cb_motion, self.cb_ease, self.chk_stab):
+            w.blockSignals(True)
+        self.cb_motion.setCurrentIndex(max(0, self.cb_motion.findData(clip.motion)))
+        self.cb_ease.setCurrentIndex(max(0, self.cb_ease.findData(clip.motion_ease)))
+        self.chk_stab.setChecked(clip.stabilize > 0)
+        for w in (self.cb_motion, self.cb_ease, self.chk_stab):
+            w.blockSignals(False)
+        self.mo_amount.set_value(clip.motion_amount * 100.0)
+        self.mo_amount.setEnabled(bool(clip.motion))
+        self.cb_ease.setEnabled(bool(clip.motion))
+        if clip.stabilize > 0:
+            self.st_strength.set_value(clip.stabilize * 100.0)
+        can = not f.is_image and not spherical.is_360(f)
+        self.grp_stab.setEnabled(can)
+        self.st_strength.setEnabled(can and clip.stabilize > 0)
+        self.show_stab_state(clip)
+
+    def show_stab_state(self, clip=None):
+        """Say whether the shown clip's camera movement is measured, and how much stabilizing zooms in."""
+        clip = clip if clip is not None else self.clip
+        if clip is None:
+            return
+        f = self.project.footage.get(clip.footage_id)
+        if f is None or f.is_image or spherical.is_360(f):
+            self.lbl_stab.setText("Not for photos or 360° footage" if f is not None else "")
+            return
+        if clip.stabilize <= 0:
+            self.lbl_stab.setText("")
+            return
+        t0, t1 = clip.src_in - stabilize.HANDLE, clip.src_out + stabilize.HANDLE
+        c = stabilize.correction(f, t0, t1, clip.stabilize)
+        if c is None:
+            self.lbl_stab.setText("Measuring the camera's movement…")
+        else:
+            self.lbl_stab.setText(f"Stabilized: zoomed in {(c.zoom - 1) * 100:.0f} % to hide the edges")
+
+    def _set_motion(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("motion:kind")
+        key = self.cb_motion.currentData() or ""
+        for c in self.graded:
+            c.motion = key
+            if key in motion.FACE_KINDS:
+                c.motion_face = None          # found again, in the clip's moment as it is now
+        self.mo_amount.setEnabled(bool(key))
+        self.cb_ease.setEnabled(bool(key))
+        self.changed.emit("motion")
+
+    def _set_ease(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("motion:ease")
+        for c in self.graded:
+            c.motion_ease = self.cb_ease.currentData() or "both"
+        self.changed.emit("motion")
+
+    def _set_stab_on(self, on: bool):
+        if self.clip is None:
+            return
+        self.before_change.emit("stabilize:on")
+        val = self.st_strength.value() / 100.0 if on else 0.0
+        for c in self.graded:
+            c.stabilize = val
+        self.st_strength.setEnabled(on)
+        self.show_stab_state()
+        self.changed.emit("stabilize")
+
+    def _set_stab_strength(self, val: float):
+        if self.clip is None or not self.chk_stab.isChecked():
+            return
+        self.before_change.emit("stabilize:strength")
+        for c in self.graded:
+            c.stabilize = float(val) / 100.0
+        self.show_stab_state()
+        self.changed.emit("stabilize")
+
+    def _set_voice_on(self, on: bool):
+        if self.clip is None:
+            return
+        self.before_change.emit("audio:voice_clean")
+        for c in self.graded:
+            c.voice_clean = self.voice_amt.value() / 100.0 if on else 0.0
+        self.voice_amt.setEnabled(on)
+        self.changed.emit("audio")
+
+    def _set_voice_amount(self, val: float):
+        if self.clip is None or not self.chk_voice.isChecked():
+            return
+        self._set_attr("voice_clean", val / 100.0, "audio")
 
     def _show_view(self, clip):
         tiny = clip.view_tiny
@@ -629,6 +788,6 @@ class Inspector(QScrollArea):
         if self.clip is None:
             return
         self.before_change.emit(kind + ":" + key)
-        for c in (self.graded if key == "volume" else self.targets):
+        for c in (self.graded if key in ("volume", "motion_amount", "voice_clean") else self.targets):
             setattr(c, key, float(val))
         self.changed.emit(kind)

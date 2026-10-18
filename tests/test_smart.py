@@ -244,7 +244,7 @@ def test_transcripts_are_kept_for_every_project_and_silent_footage_is_skipped(tm
     monkeypatch.setattr(captions, "_load_audio_16k", lambda path, *a: _bursts([(1.0, 3.0)]))
     monkeypatch.setattr(captions, "speech_seconds", lambda audio: 2.0)
     monkeypatch.setattr(captions, "transcribe_audio",
-                        lambda audio, model, lang, progress=None, cancel=None: ([{"s": 1.0, "e": 1.5, "w": "halo"}], "id"))
+                        lambda audio, model, lang, progress=None, cancel=None, **kw: ([{"s": 1.0, "e": 1.5, "w": "halo"}], "id"))
     assert captions.transcribe(f, "large-v3", "")[0]["w"] == "halo" and loads == ["large-v3"]
     g = Footage(f.path, 6.0, 1920, 1080, 30.0, True)                 # the same file in another project
     assert captions.transcribe(g, "large-v3", "")[0]["w"] == "halo" and loads == ["large-v3"]   # no model
@@ -266,6 +266,7 @@ def test_speech_seconds_on_silence():
 
 
 def test_the_speech_model_suits_the_computer(monkeypatch):
+    monkeypatch.setattr(captions, "qwen_suits", lambda: False)      # a modest computer: Whisper
     monkeypatch.setattr(captions, "_cuda", False)
     assert captions.resolve_model("auto") == "large-v3-turbo" and captions.resolve_model("small") == "small"
     monkeypatch.setattr(captions, "_cuda", True)
