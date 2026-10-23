@@ -6,6 +6,15 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- **Gaming moments** (✨ Auto Edit → *Prioritize*): picks the plays of a game recording, a kill, a
+  multi-kill or teamfight, a gacha reveal, a goal, for any game: bursts of sound and picture measured against
+  what is usual in that recording, more for several close together or after a calm stretch, and the
+  player's reaction. Clips start before the moment and show how it ends; the hook is the best play.
+- **Voice-over captions**: right-click a sound on the sound layer → *Caption its speech (voice-over)*: a
+  voice-over recorded on its own is transcribed and captioned where it plays, next to the clips' own speech
+  (the voice-over wins where both speak). *Generate captions* and the export check include it.
+
 ### Fixed
 - First start on Windows: after *Yes* to downloading FFmpeg nothing seemed to happen (the progress window
   could stay behind Explorer, showing nothing until the first data arrived, and a slow or blocked GitHub
