@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-23
+
 ### Added
 - **Gaming moments** (✨ Auto Edit → *Prioritize*): picks the plays of a game recording, a kill, a
   multi-kill or teamfight, a gacha reveal, a goal, for any game: bursts of sound and picture measured against
