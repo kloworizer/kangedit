@@ -18,7 +18,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import smart
+from . import games, smart
 from .analysis import SAMPLE_RATE, WAVE_RATE, Analysis
 from .edits import TRANSITIONS
 from .models import Footage, TimelineClip
@@ -29,6 +29,9 @@ STYLES = {
     "action":   dict(sharp=.15, color=.10, act=.35, audio=.20, face=.05, expo=.15, shake=.20),
     "people":   dict(sharp=.15, color=.05, act=.05, audio=.25, face=.35, expo=.15, shake=.35),
     "scenic":   dict(sharp=.30, color=.30, act=.00, audio=.00, face=.05, expo=.20, shake=.50),
+    # Screen recordings of games: the picture's quality matters little (no camera to shake or to blur), what
+    # happens does: the gaming moments (games.py) score most, see GAME_BONUS.
+    "gaming":   dict(sharp=.05, color=.10, act=.20, audio=.20, face=.05, expo=.05, shake=.00),
     # Not offered as a style: what makes a strong opening hook (movement, sound, faces, still sharp).
     "hook":     dict(sharp=.15, color=.10, act=.30, audio=.20, face=.25, expo=.10, shake=.30),
 }
@@ -37,6 +40,7 @@ STYLE_LABELS = {
     "action": "Action / sports (motion + loud moments)",
     "people": "People / talking (faces + speech)",
     "scenic": "Scenic / travel (colour + stable shots)",
+    "gaming": "Gaming moments (kills, multi-kills, gacha pulls)",
 }
 
 TRANSITION_MODES = {
@@ -58,6 +62,8 @@ SILENCE_PENALTY = 0.45      # score taken off dead-silent moments (less for quie
 HIGHLIGHT_BONUS = {"hook": 0.30}           # laughter, cheering, applause, whoops: a moment people enjoyed
 HIGHLIGHT_DEFAULT = 0.15
 WIND_PENALTY = 0.15                         # wind on the microphone spoils the sound
+GAME_BONUS = 0.8          # Gaming: a full gaming moment (games.moments) on top of the 0..1 quality score
+GAME_CUT_PENALTY = 0.2    # Gaming: a "scene change" is mostly a flash, a kill cam or a reveal, not a cut
 CROSS_REPEAT = (0.80, 0.92)                 # alike to a moment picked from another file: penalty from..to full
 CROSS_REPEAT_PENALTY = 0.25
 VARIETY = 0.06              # random spread between moments of about the same score (new edits differ)
@@ -260,8 +266,11 @@ def score_samples(analyses: dict[str, Analysis], footage: dict[str, Footage], st
         dur = footage[i].duration
         sc[t < 0.6] -= 0.5                 # camera bump at record start
         sc[t > dur - 0.6] -= 0.5           # and at record stop
+        gaming = style == "gaming"
         for c in analyses[i].cuts:
-            sc[np.abs(t - c) < 0.3] -= 1.0
+            sc[np.abs(t - c) < 0.3] -= GAME_CUT_PENALTY if gaming else 1.0
+        if gaming:
+            sc += GAME_BONUS * games.moments(analyses[i], footage[i].has_audio)
         if footage[i].has_audio:           # dead / silent sound makes a weak moment
             lo, hi = SILENCE_DB
             sc -= SILENCE_PENALTY * np.clip((hi - analyses[i].audio) / (hi - lo), 0.0, 1.0)
@@ -341,7 +350,7 @@ def _candidates(fid: str, a: Analysis, sc: np.ndarray, dur: float, s: AutoEditSe
         var = np.maximum(0.0, (csq[l:l + m] - csq[:m]) / l - mean ** 2)
         val = mean - 0.25 * np.sqrt(var) + 0.04 * (L - s.clip_min) / span
         ok = starts[:m] + L <= dur - 0.05
-        if cut_times.size:
+        if cut_times.size and s.style != "gaming":     # (in a game a "cut" is mostly the moment itself)
             st = starts[:m, None]
             ok &= ~np.any((cut_times[None, :] > st + 0.05) & (cut_times[None, :] < st + L - 0.05), axis=1)
         val = np.where(ok, val, -np.inf)
@@ -539,7 +548,7 @@ def hook_suggestions(project_footage: dict[str, Footage], analyses: dict[str, An
     together, not scene by scene; none of them overlapping `avoid` or repeating each other), strongest first,
     each labelled "hook"."""
     hs = copy.copy(s)
-    hs.style = "hook"
+    hs.style = "gaming" if s.style == "gaming" else "hook"    # (a gaming video opens on its best play)
     hs.target_duration = count * length
     hs.clip_min = hs.clip_max = length
     hs.use_every_footage = False
@@ -563,7 +572,7 @@ def find_hook(project_footage: dict[str, Footage], analyses: dict[str, Analysis]
     """A strong opening moment (movement, sound, faces) of about `length` seconds that overlaps none of
     the `avoid` clips (the timeline and hooks already tried)."""
     hs = copy.copy(s)
-    hs.style = "hook"
+    hs.style = "gaming" if s.style == "gaming" else "hook"    # (a gaming video opens on its best play)
     hs.target_duration = length
     hs.clip_min = hs.clip_max = length
     hs.use_every_footage = False

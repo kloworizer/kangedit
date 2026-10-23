@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -13,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .ffmpeg_setup import local_binary
+from .ffmpeg_setup import installed_binary, local_binary
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -27,12 +26,13 @@ class FFmpegError(RuntimeError):
 
 
 def ffmpeg_bin() -> Optional[str]:
-    """The FFmpeg downloaded next to the app (see ffmpeg_setup), else the one on PATH."""
-    return local_binary("ffmpeg") or shutil.which("ffmpeg")
+    """The FFmpeg downloaded next to the app (see ffmpeg_setup), else one installed on the computer that is new
+    enough (on PATH, or in an installer's folder)."""
+    return local_binary("ffmpeg") or installed_binary("ffmpeg")
 
 
 def ffprobe_bin() -> Optional[str]:
-    return local_binary("ffprobe") or shutil.which("ffprobe")
+    return local_binary("ffprobe") or installed_binary("ffprobe")
 
 
 def _check_program(args: list[str]) -> None:

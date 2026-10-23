@@ -14,7 +14,6 @@ from __future__ import annotations
 import ctypes.util
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 import venv
@@ -73,8 +72,9 @@ def ensure_ffmpeg() -> None:
     from kangedit import ffmpeg_setup
     if ffmpeg_setup.local_binary("ffmpeg") and ffmpeg_setup.local_binary("ffprobe"):
         return
-    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
-        say(f"Using FFmpeg from PATH: {shutil.which('ffmpeg')}")
+    found = ffmpeg_setup.installed()
+    if found.usable:
+        say(f"Using the installed FFmpeg: {found.ffmpeg}")
         return
     last = [-1]
 
@@ -84,7 +84,7 @@ def ensure_ffmpeg() -> None:
             last[0] = pct
             print(f"\r[KangEdit] {msg} ({pct}%)   ", end="", flush=True)
 
-    say("FFmpeg not found: downloading a static build...")
+    say(f"{ffmpeg_setup.missing_note()} Downloading a static build...")
     try:
         path = ffmpeg_setup.install(show)
         print()

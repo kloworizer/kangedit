@@ -1269,6 +1269,13 @@ class TimelineView(QWidget):
             a.setToolTip("Turn this sound (music) down automatically while the clips have speech or sound")
             a.triggered.connect(lambda on: self.context_action.emit(f"sound_duck:{int(on)}", sound_id))
             m.addAction(a)
+            a = QAction("Caption its speech (voice-over)", m)
+            a.setCheckable(True)
+            a.setChecked(x.caption)
+            a.setToolTip("A voice-over recorded on its own: what is said in it goes into the captions too "
+                         "(transcribed with the speech model set in the Captions panel)")
+            a.triggered.connect(lambda on: self.context_action.emit(f"sound_caption:{int(on)}", sound_id))
+            m.addAction(a)
             for key, label, cur in (("sound_fade_in", "Fade in", x.fade_in), ("sound_fade_out", "Fade out", x.fade_out)):
                 sub = m.addMenu(f"{label} ({cur:g} s)" if cur > 0 else label)
                 for v in (0.0, 0.5, 1.0, 2.0, 3.0, 5.0):

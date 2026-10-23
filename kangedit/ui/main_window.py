@@ -2819,6 +2819,8 @@ class MainWindow(QMainWindow):
         todo = list(dict.fromkeys(c.footage_id for c in self.project.clips
                                   if (f := self.project.footage.get(c.footage_id)) is not None and f.has_audio
                                   and not f.is_image and f.transcript is None))
+        todo += [v.id for x in self.project.voice_sounds()
+                 if (v := self.project.voice_for(x.path)).transcript is None and v.id not in todo]
         if todo:
             self.queue_transcription(todo)
 
@@ -3140,6 +3142,15 @@ class MainWindow(QMainWindow):
             x.fade_in = max(0.0, float(action.split(":", 1)[1]))
         elif action.startswith("sound_fade_out:"):
             x.fade_out = max(0.0, float(action.split(":", 1)[1]))
+        elif action.startswith("sound_caption:"):
+            x.caption = action.endswith(":1")
+            if x.caption:
+                v = self.project.voice_for(x.path)
+                if v.transcript is None:
+                    self.queue_transcription([v.id])
+                else:
+                    self.lbl_status.setText(f"“{x.name or os.path.basename(x.path)}” is captioned (voice-over)")
+            self.update_captions()
         elif action.startswith("sound_duck:"):
             x.duck = action.endswith(":1")
             if x.duck:
@@ -4062,9 +4073,9 @@ class MainWindow(QMainWindow):
         """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
         then the files are transcribed one after the other. A file that fails doesn't stop the others."""
         s = self.project.settings
-        todo = [self.project.footage[fid] for fid in dict.fromkeys(ids) if fid in self.project.footage
-                and not self.project.footage[fid].is_image
-                and (force or self.project.footage[fid].transcript is None)]
+        src = self.project.transcript_source        # footage, or a voice-over sound file (Project.voices)
+        todo = [src(fid) for fid in dict.fromkeys(ids) if src(fid) is not None and not src(fid).is_image
+                and (force or src(fid).transcript is None)]
         if not todo:
             if ids:
                 self.lbl_status.setText("Already transcribed. To transcribe again (with another speech model): "
@@ -4100,7 +4111,7 @@ class MainWindow(QMainWindow):
             if cancelled:
                 self.lbl_status.setText(f"Transcription cancelled: {len(done)} of {len(todo)} file(s) done")
             for fid, words in done:
-                ff = self.project.footage.get(fid)
+                ff = self.project.transcript_source(fid)
                 if ff is not None:
                     ff.transcript = words
                     self.viewer.update_source(ff)
@@ -4196,15 +4207,20 @@ class MainWindow(QMainWindow):
         self.queue_transcription(todo, force=True, use_cache=True)
 
     def generate_captions(self):
-        used = list(dict.fromkeys(c.footage_id for c in self.project.clips))
+        p = self.project
+        used = list(dict.fromkeys(c.footage_id for c in p.clips))
+        # Voice-over clips on the sound layer (right-click → Caption its speech) are captioned too.
+        voices = list(dict.fromkeys(p.voice_for(x.path).id for x in p.voice_sounds()))
         if not used:
             QMessageBox.information(self, APP_NAME, "Put some clips on the timeline first.")
             return
-        if all(self.project.footage[fid].is_image for fid in used):
-            QMessageBox.information(self, APP_NAME, "The timeline only has images: there is no speech to caption.")
+        if all(p.footage[fid].is_image for fid in used) and not voices:
+            QMessageBox.information(self, APP_NAME, "The timeline only has images: there is no speech to caption. "
+                                                    "A voice-over on the sound layer is captioned when you right-click "
+                                                    "it → Caption its speech.")
             return
-        used = [fid for fid in used if not self.project.footage[fid].is_image]
-        todo = [fid for fid in used if self.project.footage[fid].transcript is None]
+        used = [fid for fid in used if not p.footage[fid].is_image] + voices
+        todo = [fid for fid in used if p.transcript_source(fid).transcript is None]
         force = False
         if not todo:
             r = QMessageBox.question(self, APP_NAME, "All footage on the timeline is already transcribed.\n"
@@ -4212,10 +4228,10 @@ class MainWindow(QMainWindow):
             if r != QMessageBox.Yes:
                 return
             todo, force = used, True
-        if not any(self.project.footage[fid].has_audio for fid in todo):
+        if not any(p.transcript_source(fid).has_audio for fid in todo):
             QMessageBox.information(self, APP_NAME, "The footage on the timeline has no audio.")
             return
-        self.project.settings.captions.enabled = True
+        p.settings.captions.enabled = True
         self._sync_project_controls()
         self.right_tabs.setCurrentWidget(self.caps_panel)
         self.queue_transcription(todo, force)

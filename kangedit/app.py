@@ -23,40 +23,78 @@ def _set_app_id() -> None:
             pass
 
 
+def _front(w) -> None:
+    """Show a window (there is no main window yet) in front: behind the Explorer window it was started from it
+    looks as if nothing happens."""
+    w.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    w.show()
+    w.raise_()
+    w.activateWindow()
+
+
 def _download_ffmpeg() -> bool:
     """Offer to download FFmpeg next to the app; True once it is there."""
-    from . import ffmpeg_setup
-    if QMessageBox.question(None, APP_NAME, "KangEdit needs FFmpeg, which was not found.\n\nDownload it now "
-                                            "(about 80-160 MB, into the app's ffmpeg folder)?") != QMessageBox.Yes:
-        QMessageBox.information(None, APP_NAME, "Install FFmpeg and make sure 'ffmpeg' and 'ffprobe' are on your "
-                                                "PATH, or start KangEdit again to download it.")
+    from . import crashlog, ffmpeg_setup
+    note = ffmpeg_setup.missing_note()
+    crashlog.log.warning("No usable FFmpeg: %s (%s)", note, ffmpeg_setup.installed())
+    ask = QMessageBox(QMessageBox.Question, APP_NAME,
+                      f"{note}\n\nDownload FFmpeg {ffmpeg_setup.MIN_VERSION}+ now (about 80-200 MB, into "
+                      f"{ffmpeg_setup.bin_dir()})?", QMessageBox.Yes | QMessageBox.No)
+    _front(ask)
+    if ask.exec() != QMessageBox.Yes:
+        QMessageBox.information(None, APP_NAME, f"Install FFmpeg {ffmpeg_setup.MIN_VERSION} or newer and make "
+                                                "sure 'ffmpeg' and 'ffprobe' are on your PATH, or start KangEdit "
+                                                "again to download it.")
         return False
     dlg = QProgressDialog("Downloading FFmpeg…", "Cancel", 0, 1000)
     dlg.setWindowTitle(APP_NAME)
     dlg.setWindowModality(Qt.ApplicationModal)
     dlg.setMinimumDuration(0)
+    dlg.setMinimumWidth(460)
+    dlg.setAutoClose(False)
+    dlg.setAutoReset(False)
     cancel = threading.Event()
     dlg.canceled.connect(cancel.set)
     state = {"p": 0.0, "msg": "Downloading FFmpeg…", "error": None, "done": False}
 
+    def say(p, m):
+        state.update(p=p, msg=m)
+        if p == 0.0:
+            crashlog.log.info("FFmpeg download: %s", m)
+
     def work():
         try:
-            ffmpeg_setup.install(lambda p, m: state.update(p=p, msg=m), cancel)
+            path = ffmpeg_setup.install(say, cancel)
+            crashlog.log.info("FFmpeg downloaded into %s", path)
         except Exception as e:  # noqa: BLE001
             state["error"] = str(e)
+            crashlog.log.error("FFmpeg download failed: %s", e)
         state["done"] = True
 
-    threading.Thread(target=work, daemon=True).start()
+    _front(dlg)
+    threading.Thread(target=work, daemon=True, name="ffmpeg download").start()
+    t0 = time.monotonic()
+    last = (None, 0.0, t0)
     while not state["done"]:
         dlg.setValue(int(state["p"] * 1000))
-        dlg.setLabelText(state["msg"])
+        msg = state["msg"]
+        if (msg, state["p"]) != last[:2]:          # (the seconds count while nothing changes: it isn't stuck)
+            last = (msg, state["p"], time.monotonic())
+        waited = time.monotonic() - last[2]
+        dlg.setLabelText(msg + (f" ({waited:.0f} s)" if waited >= 2 else ""))
         QApplication.processEvents()
         time.sleep(0.03)
+    crashlog.log.info("FFmpeg download ended after %.0f s", time.monotonic() - t0)
     dlg.close()
     if state["error"] or not (ffmpeg_bin() and ffprobe_bin()):
         if not cancel.is_set():
-            QMessageBox.critical(None, APP_NAME, f"FFmpeg could not be downloaded:\n{state['error']}\n\n"
-                                                 "Install FFmpeg and put it on your PATH instead.")
+            box = QMessageBox(QMessageBox.Critical, APP_NAME,
+                              f"FFmpeg could not be downloaded:\n{state['error']}\n\nDownload it yourself "
+                              "(Windows: gyan.dev/ffmpeg/builds, \"release essentials\") and put ffmpeg and ffprobe "
+                              f"into\n{ffmpeg_setup.bin_dir()}\nor on your PATH, then start KangEdit again.")
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            _front(box)
+            box.exec()
         return False
     return True
 

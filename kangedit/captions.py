@@ -622,6 +622,13 @@ def build_captions(project: Project, style: Optional[CaptionStyle] = None, aspec
             if cur is not None:
                 out.append(cur)
         t0 += clip.duration
+    voice = _voice_captions(project, lay, max_chars_total)
+    if voice:
+        # A voice-over is the edit's speech: the clips' own words where it speaks are left out (two captions
+        # at once), elsewhere both are captioned.
+        spans = [(c.start, c.end) for c in voice]
+        out = [c for c in out if not any(c.start < b and a < c.end for a, b in spans)]
+        out = sorted(out + voice, key=lambda c: c.start)
     # Hold each caption a little after the last word, without overlapping the next one.
     for a, b in zip(out, out[1:]):
         if b.start > a.end:
@@ -632,6 +639,46 @@ def build_captions(project: Project, style: Optional[CaptionStyle] = None, aspec
         for c in out:
             c.text = c.text.upper()
             c.words = [(a, b, w.upper()) for a, b, w in c.words]
+    return out
+
+
+def _voice_captions(project: Project, lay: CaptionLayout, max_chars_total: int) -> list[Caption]:
+    """Captions of the sound layer's voice-over clips (SoundClip.caption), from their files' transcripts: where
+    each clip plays its words (a looping clip: its first play only), muted ones left out."""
+    out: list[Caption] = []
+    end = project.duration
+    for x in sorted(project.voice_sounds(), key=lambda x: x.start):
+        f = next((v for v in project.voices.values() if v.path == x.path), None)
+        if f is None or not f.transcript or x.volume <= 0.0:
+            continue
+        s_end = x.src_in + (min(x.loop, x.duration) if x.looping else x.duration)
+        cur: Optional[Caption] = None
+        last_end = None
+        for idx, w in enumerate(f.transcript):
+            mid = (w["s"] + w["e"]) / 2
+            if mid < x.src_in or mid >= s_end:
+                continue
+            ts = x.start + max(w["s"], x.src_in) - x.src_in
+            te = x.start + min(w["e"], s_end) - x.src_in
+            if ts >= end:
+                break
+            text = w["w"]
+            if cur is not None:
+                gap = ts - last_end if last_end is not None else 0
+                if (len(cur.text) + 1 + len(text) > max_chars_total or te - cur.start > lay.max_duration
+                        or gap > 0.7 or (_SENT_END.search(cur.text) and len(cur.word_idx) >= 3)):
+                    out.append(cur)
+                    cur = None
+            if cur is None:
+                cur = Caption(ts, te, text, f.id, [idx], x.id, [(ts, te, text)])
+            else:
+                cur.text += " " + text
+                cur.end = te
+                cur.word_idx.append(idx)
+                cur.words.append((ts, te, text))
+            last_end = te
+        if cur is not None:
+            out.append(cur)
     return out
 
 
@@ -675,7 +722,7 @@ def wrap(text: str, max_chars: int, max_lines: int) -> list[str]:
 
 
 def edit_caption(project: Project, cap: Caption, new_text: str) -> None:
-    f = project.footage.get(cap.footage_id)
+    f = project.transcript_source(cap.footage_id)
     if not f or not f.transcript or not cap.word_idx:
         return
     idx = sorted(cap.word_idx)
@@ -706,7 +753,7 @@ def delete_captions(project: Project, caps: list[Caption]) -> int:
         by_footage.setdefault(cap.footage_id, set()).update(cap.word_idx)
     removed = 0
     for fid, idx in by_footage.items():
-        f = project.footage.get(fid)
+        f = project.transcript_source(fid)
         if not f or not f.transcript:
             continue
         for k in sorted(idx, reverse=True):
