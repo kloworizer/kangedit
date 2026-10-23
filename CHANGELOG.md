@@ -6,6 +6,16 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+- First start on Windows: after *Yes* to downloading FFmpeg nothing seemed to happen (the progress window
+  could stay behind Explorer, showing nothing until the first data arrived, and a slow or blocked GitHub
+  download only gave up after a minute of silence). The window now comes to the front and says it is
+  connecting, with the seconds counting; a server that sends nothing for 30 s is given up and the next one
+  tried (gyan.dev on Windows, johnvansickle.com on Linux); a failed download says where to put FFmpeg by hand.
+- An FFmpeg already installed is found also where winget, Chocolatey or Scoop put it (not on PATH yet), and
+  only used when it is FFmpeg 7 or newer (the export needs it). The first-start message says what was found:
+  nothing, FFmpeg without FFprobe, or an FFmpeg too old (with its version and where it is).
+
 ## [0.7.0] - 2026-10-18
 
 ### Added
