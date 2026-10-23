@@ -51,7 +51,7 @@ class Footage:
     transcript: Optional[list] = None
     transcript_lang: str = ""
     transcript_model: str = ""     # what made it: "speech model|language" (see captions.transcript_key)
-    kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF)
+    kind: str = "video"            # "video" | "image" (a still, or a looping animated GIF) | "audio" (a voice-over)
     bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
     projection: str = ""           # 360° footage: "equirect" | "dfisheye" ("" = a normal picture; see spherical.py)
     lens_fov: float = 195.0        # dual fisheye: each lens's field of view, degrees
@@ -286,6 +286,7 @@ class SoundClip:
     # Looping (fit to timeline): > 0 repeats the source from src_in for this many seconds, again and again with
     # a LOOP_CROSSFADE between repeats, for as long as the clip lasts (src_out may then run past the file's end).
     loop: float = 0.0
+    caption: bool = False          # a voice-over: its speech goes into the captions (see captions.build_captions)
     id: str = field(default_factory=new_id)
 
     @property
@@ -444,6 +445,9 @@ class Project:
         self.sounds: list[SoundClip] = []
         self.texts: list[TextClip] = []
         self.overlays: list[OverlayClip] = []
+        # Sound files on the sound layer captioned as voice-over: {id: Footage holding the file's transcript}
+        # (not media: not in the Media panel; see voice_for).
+        self.voices: dict[str, Footage] = {}
         self.settings = ProjectSettings()
         self.path: Optional[str] = None
         self.dirty = False
@@ -461,6 +465,23 @@ class Project:
         for c in list(self.clips) + list(self.overlays):
             out[c.footage_id] = out.get(c.footage_id, 0) + 1
         return out
+
+    def voice_for(self, path: str) -> Footage:
+        """The transcript holder of a sound file captioned as voice-over (made the first time)."""
+        for f in self.voices.values():
+            if f.path == path:
+                return f
+        f = Footage(path, 0.0, 0, 0, 0.0, True, kind="audio")
+        self.voices[f.id] = f
+        return f
+
+    def transcript_source(self, fid: str) -> Optional[Footage]:
+        """The footage, or the voice-over sound file, whose transcript has this id."""
+        return self.footage.get(fid) or self.voices.get(fid)
+
+    def voice_sounds(self) -> list["SoundClip"]:
+        """The sound layer's clips captioned as voice-over."""
+        return [x for x in self.sounds if x.caption and x.duration > 0.01]
 
     def clip_starts(self) -> list[float]:
         starts, t = [], 0.0
@@ -518,6 +539,7 @@ class Project:
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap, "bin": f.bin,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
+            "voices": {fid: copy.deepcopy(f.transcript) for fid, f in self.voices.items()},
         }
 
     def _restore(self, snap: dict) -> None:
@@ -537,6 +559,9 @@ class Project:
                 f.tonemap = d["tonemap"]
                 f.bin = d.get("bin", f.bin)
                 f.transcript = d["transcript"]
+        for fid, words in snap.get("voices", {}).items():
+            if fid in self.voices:
+                self.voices[fid].transcript = words
 
     def set_detected_profile(self, footage_id: str, profile: str, note: str) -> None:
         """Apply an automatically detected log profile.
@@ -598,6 +623,7 @@ class Project:
             "sounds": [x.to_dict() for x in self.sounds],
             "texts": [x.to_dict() for x in self.texts],
             "overlays": [x.to_dict() for x in self.overlays],
+            "voices": [f.to_dict() for f in self.voices.values()],
         }
 
     def save(self, path: str) -> None:
@@ -621,5 +647,8 @@ class Project:
         p.sounds = [SoundClip.from_dict(x) for x in data.get("sounds", [])]
         p.texts = [TextClip.from_dict(x) for x in data.get("texts", [])]
         p.overlays = [OverlayClip.from_dict(x) for x in data.get("overlays", []) if x.get("footage_id") in p.footage]
+        for fd in data.get("voices", []):
+            f = Footage.from_dict(fd)
+            p.voices[f.id] = f
         p.path = path
         return p

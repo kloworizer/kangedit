@@ -45,6 +45,7 @@ def check(project: Project, captions: str = "none", use_proxies: bool = False) -
     if captions != "none":
         todo = {c.footage_id for c in project.clips if _speaks(project.footage.get(c.footage_id))
                 and project.footage[c.footage_id].transcript is None}
+        todo |= {x.path for x in project.voice_sounds() if project.voice_for(x.path).transcript is None}
         if todo:
             out.append(Issue(WARNING, f"Captions are on, but {len(todo)} file(s) in the edit have no transcript "
                                       "yet: their speech gets no captions.", "transcribe", "Transcribe them"))
