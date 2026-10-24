@@ -35,9 +35,12 @@ from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import health, motion, polish, scenes, stabilize, voice
-from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
-                        load_model, model_note, project_layout, resolve_model, shift_captions, shift_group,
-                        transcribe, transcribed_with, write_srt)
+from ..captions import (Caption, apply_sync, build_captions, cached_transcript, delete_captions, edit_caption,
+                        listen, load_model, measure_sync, model_note, project_layout, resolve_model,
+                        set_caption_speaker, shift_captions, shift_group, sync_jobs, transcribe, transcribed_with,
+                        write_srt)
+from .. import caption_templates
+from .. import speakers as speakerlib
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -698,6 +701,11 @@ class MainWindow(QMainWindow):
         self.caps_panel.delete_requested.connect(self._delete_captions)
         self.caps_panel.seek.connect(self._timeline_seek)
         self.caps_panel.toggled.connect(self._toggle_captions)
+        self.caps_panel.template_chosen.connect(self.apply_caption_template)
+        self.caps_panel.speakers_changed.connect(self._set_speakers)
+        self.caps_panel.detect_speakers.connect(self.detect_speakers)
+        self.caps_panel.auto_sync.connect(lambda: self.auto_sync_captions())
+        self.caps_panel.set_templates(list(caption_templates.all_templates()))
 
         self.audio_ready.connect(self._on_audio_ready)
         self.audio_failed.connect(self._on_audio_failed)
@@ -3562,6 +3570,13 @@ class MainWindow(QMainWindow):
                 self.caps_panel.table.editItem(item)
         elif key == "caption_delete":
             self._delete_captions([int(payload)])
+        elif key == "caption_sync":
+            i = int(payload)
+            if 0 <= i < len(self.captions):
+                self.auto_sync_captions([self.captions[i].clip_id])
+        elif key == "caption_speaker":
+            i, k = (int(v) for v in payload.split(":"))
+            self.set_speaker(i, k)
         elif key == "caption_delete_all":
             self._delete_captions(list(range(len(self.captions))))
         else:
@@ -4078,6 +4093,7 @@ class MainWindow(QMainWindow):
         self.tl.update()
         self.viewer.set_captions(self.captions)
         self.caps_panel.set_captions(self.captions)
+        self.caps_panel.set_speakers(self.project.settings.captions.speakers)
 
     def queue_transcription(self, ids: list[str], force: bool = False, use_cache: Optional[bool] = None):
         """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
@@ -4276,12 +4292,138 @@ class MainWindow(QMainWindow):
 
     def caption_style_dialog(self):
         dlg = CaptionStyleDialog(self.project, self)
-        if dlg.exec() == CaptionStyleDialog.Accepted:
+        accepted = dlg.exec() == CaptionStyleDialog.Accepted
+        self.caps_panel.set_templates(list(caption_templates.all_templates()))   # saved / deleted there
+        if accepted:
+            self.project_checkpoint()                    # the new look is undoable
             dlg.apply()
             self.project.dirty = True
             self.caps_panel.set_model(self.project.settings.whisper_model, self.project.settings.speech_cleanup)
             self.update_captions()
+            self.viewer.refresh()
             self._update_title()
+
+    def apply_caption_template(self, name: str):
+        """Captions panel → Look: a template's caption look on the project (undoable)."""
+        values = caption_templates.all_templates().get(name)
+        if not values:
+            return
+        self.project_checkpoint()
+        caption_templates.apply_template(self.project.settings.captions, values)
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText(f"Caption look: {name} · Undo puts the previous look back")
+
+    def auto_sync_captions(self, clip_ids: Optional[list[str]] = None):
+        """Line captions up with the speech (right-click a caption → Auto-sync, or the Captions panel's
+        Auto-sync timing for every clip): the offset between each clip's word times and the voice in its sound
+        is measured in the background, then the words moved by it in one undoable step."""
+        jobs = sync_jobs(self.project, clip_ids)
+        if not jobs:
+            self.lbl_status.setText("No captions to sync: generate captions first")
+            return
+        name = "Auto-sync captions"
+
+        def job(progress, cancel):
+            out = []
+            for k, j in enumerate(jobs):
+                if cancel.is_set():
+                    raise Cancelled()
+                progress(k / len(jobs), f"{name}: listening to clip {k + 1}/{len(jobs)}")
+                try:
+                    out.append(measure_sync(j))
+                except (RuntimeError, OSError):
+                    out.append(None)               # its file can't be read: left as it is
+            progress(1.0, name)
+            return out
+
+        def done(offsets: list):
+            moves = [(j, off) for j, off in zip(jobs, offsets) if off]
+            if moves:
+                self.project_checkpoint()
+            moved = [m for m in ((j, apply_sync(self.project, j, off)) for j, off in moves) if abs(m[1]) >= 1e-3]
+            unsure = sum(1 for off in offsets if off is None)
+            if moved:
+                self.project.dirty = True
+                self.update_captions()
+                self.viewer.refresh()
+                self._update_title()
+                parts = [f"{abs(dt):.2f} s {'later' if dt > 0 else 'earlier'}" for _j, dt in moved]
+                what = (f"Captions moved {parts[0]}" if len(moved) == 1 else
+                        f"Captions of {len(moved)} clips moved ({', '.join(parts[:4])}"
+                        f"{', …' if len(parts) > 4 else ''})")
+                rest = len(jobs) - len(moved) - unsure
+                self.lbl_status.setText(what + (f"; {rest} already in sync" if rest else "")
+                                        + (f"; {unsure} couldn't be measured" if unsure else "")
+                                        + " · Undo puts them back")
+            elif unsure == len(jobs):
+                self.lbl_status.setText("Auto-sync: the speech couldn't be told apart from the rest of the sound "
+                                        "(nothing moved)")
+            else:
+                self.lbl_status.setText("The captions are already in sync with the speech"
+                                        if len(jobs) == 1 else f"All {len(jobs) - unsure} clips' captions are "
+                                        "already in sync with the speech")
+
+        self.lbl_status.setText(f"{name}…")
+        self.tasks.submit(name, job, done, self._task_error(name))
+
+    def _set_speakers(self, mode: str):
+        """Captions panel → Speakers: speaker colours on or off (Detect speakers uses the number chosen)."""
+        st = self.project.settings.captions
+        if st.speakers == mode:
+            return
+        self.project_checkpoint()
+        st.speakers = mode
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        if mode != "off" and not any(c.speaker >= 0 for c in self.captions):
+            self.lbl_status.setText("Click Detect speakers to tell the voices apart")
+
+    def detect_speakers(self):
+        """Captions panel → Detect speakers: who speaks each caption, from the voices (in the background), then
+        written onto the words in one undoable step."""
+        units = speakerlib.speaker_units(self.project)
+        if not units:
+            self.lbl_status.setText("No captions to tell the speakers of: generate captions first")
+            return
+        mode = self.project.settings.captions.speakers
+        mode = "auto" if mode == "off" else mode
+        name = "Detect speakers"
+
+        def done(found: list):
+            self.project_checkpoint()
+            self.project.settings.captions.speakers = mode
+            n = speakerlib.apply_speakers(self.project, units, found)
+            self.project.dirty = True
+            self.update_captions()
+            self.viewer.refresh()
+            self._update_title()
+            self.lbl_status.setText(f"{n} speaker(s) found · right-click a caption → Speaker to fix one · "
+                                    "Undo takes it back" if n else "No voices heard to tell apart")
+
+        self.lbl_status.setText(f"{name}…")
+        self.tasks.submit(name, lambda p, c: speakerlib.detect(units, mode, progress=p, cancel=c), done,
+                          self._task_error(name))
+
+    def set_speaker(self, index: int, speaker: int):
+        """Right-click a caption → Speaker: who says it, by hand (-1: nobody in particular). Undoable."""
+        if not 0 <= index < len(self.captions):
+            return
+        self.project_checkpoint()
+        set_caption_speaker(self.project, [self.captions[index]], speaker)
+        st = self.project.settings.captions
+        if speaker >= 0 and st.speakers == "off":
+            st.speakers = "auto"                   # the colours show
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText((f"Caption said by speaker {speaker + 1}" if speaker >= 0 else
+                                 "Caption has no speaker now") + " · Undo puts it back")
 
     def _set_speech_cleanup(self, key: str):
         """Captions panel → Background noise: for the transcriptions from now on (Transcribe again for the files
