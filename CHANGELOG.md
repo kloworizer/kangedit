@@ -6,6 +6,22 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-24
+
+### Changed
+- The transcript shown while trimming or slipping a clip is one slim row (about two sentences), so the
+  timeline's lanes stay in view.
+- Trimming a clip shows its new length and the change (for example "6.60 s -1.40") on the clip, at the edge
+  being dragged, and beside the transcript.
+
+### Fixed
+- After a slip, trim or move the preview kept playing the sound from before the edit until the new mix was
+  ready, so the captions (and the picture) seemed out of step with it. That sound is now silenced until the
+  new mix plays (♪ updating shows it is coming); volume, fade and ducking changes still keep the old mix
+  playing meanwhile.
+- Go to start / end and previous / next clip in the player moved the timeline's playhead off screen: the
+  timeline now scrolls to show it.
+
 ## [0.7.1] - 2026-10-23
 
 ### Added

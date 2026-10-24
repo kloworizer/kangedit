@@ -618,3 +618,69 @@ def test_more_suggestions_shows_every_moment_in_turn(qapp):
         seen |= set(new)
     assert seen == {c.src_in for c in pool}             # none skipped
     dlg.deleteLater()
+
+
+def test_trim_shows_the_length_and_the_panel_stays_slim(window):
+    from PySide6.QtGui import QImage, QPainter
+
+    from kangedit.ui.slip_transcript import SLIM_HEIGHT
+    clip = _project_with_clip(window, start=1.0, dur=4.0)
+    f = window.project.footage[clip.footage_id]
+    f.has_audio = True
+    f.transcript = [{"s": 1.0, "e": 1.6, "w": "Hello."}, {"s": 3.0, "e": 3.6, "w": "Again."}]
+    window.refresh_all()
+    panel, tl = window.timeline.slip_text, window.tl
+    tl.resize(1200, 300)
+    # a trim from the right edge as the mouse makes it: the drag, the clip 1 s shorter
+    tl._drag = {"kind": "trim_r", "clip": clip.id, "x0": 0.0, "in0": 1.0, "out0": 5.0, "active": True,
+                "dur0": clip.duration}
+    clip.src_out = 4.0
+    window._slip_follow(clip.id, 3.9)
+    assert not panel.isHidden() and not panel.length.isHidden()
+    assert panel.length.text() == "⏱ 3.00 s (-1.00)"
+    assert panel.maximumHeight() <= SLIM_HEIGHT + 4                 # the lanes stay in view
+    img = QImage(1200, 300, QImage.Format_ARGB32)
+    p = QPainter(img)
+    tl._paint_trim_length(p, tl._drag)                              # the length on the clip itself
+    p.end()
+    tl._drag = None
+    tl.slip_end.emit()
+    assert panel.length.isHidden()
+
+
+def test_viewer_jumps_move_the_timeline_playhead_into_view(window):
+    footage, _analyses = two_files()
+    fid = next(iter(footage))
+    window.project.footage = footage
+    window.project.clips = [TimelineClip(fid, 0.0, 10.0) for _ in range(12)]          # 2 minutes
+    window.refresh_all()
+    tl, v = window.tl, window.viewer
+    tl.resize(600, 200)
+    tl.pps, tl.scroll_x = 40.0, 0.0                                                  # 15 s in view
+
+    def seen():
+        return 0 <= tl.t_to_x(tl.playhead) <= tl.width()
+
+    for want in (10.0, 20.0):
+        v.next_clip()
+        assert tl.playhead == pytest.approx(want) and seen()
+    v.seek(window.project.duration)                                                  # End
+    assert v.t > 119.0 and tl.playhead == pytest.approx(v.t) and seen()
+    v.prev_clip()
+    assert tl.playhead == pytest.approx(110.0) and seen()
+    v.seek(0.0)                                                                      # Home
+    assert tl.playhead == 0.0 and seen() and tl.scroll_x == 0.0
+
+
+def test_a_slip_silences_the_old_mix_until_the_new_one(window, tmp_path):
+    from PySide6.QtCore import QUrl
+    v = window.viewer
+    old = tmp_path / "old.wav"
+    old.write_bytes(b"RIFF")
+    v.player.setSource(QUrl.fromLocalFile(str(old)))
+    v.audio_valid = True
+    window._schedule_audio(keep_old=True)                  # a volume change: the old mix is still in time
+    assert not v.player.source().isEmpty()
+    window._schedule_audio()                               # a slip / trim: its sound is from other moments
+    assert v.player.source().isEmpty() and not v.audio_valid
+    window._audio_timer.stop()
