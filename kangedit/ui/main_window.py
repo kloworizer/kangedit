@@ -36,8 +36,8 @@ from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import health, motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
-                        load_model, model_note, project_layout, resolve_model, transcribe, transcribed_with,
-                        write_srt)
+                        load_model, model_note, project_layout, resolve_model, shift_captions, shift_group,
+                        transcribe, transcribed_with, write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
@@ -661,6 +661,7 @@ class MainWindow(QMainWindow):
         self.text_panel.before_change.connect(self.project_checkpoint)
         self.text_panel.changed.connect(lambda: self._texts_changed(panel=False))
         self.text_panel.delete_requested.connect(lambda tid: self._text_action("text_delete", tid))
+        self.tl.captions_shifted.connect(self._captions_shifted)
         self.tl.caption_clicked.connect(lambda i: (self.right_tabs.setCurrentWidget(self.caps_panel),
                                                    self.caps_panel.select(i)))
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
@@ -2334,6 +2335,8 @@ class MainWindow(QMainWindow):
             self.queue_analysis(ids, force=True)
         elif action == "transcribe":
             self.transcribe_media(ids)
+        elif action == "transcribe_force":
+            self.transcribe_again(ids)
         elif action == "transcript":
             self.transcript_dialog(ids)
         elif action == "detect_log":
@@ -3021,6 +3024,8 @@ class MainWindow(QMainWindow):
             self.split_at_playhead()
         elif action == "alt_moment":
             self._replace_moments(targets)
+        elif action == "transcribe_force":
+            self.transcribe_again(list(dict.fromkeys(x.footage_id for x in targets)))
         elif action == "face_zoom":
             self._face_zoom(targets)
         elif action.startswith(("speed:", "ramp:", "audio:")) or action == "speed_custom":
@@ -4210,6 +4215,34 @@ class MainWindow(QMainWindow):
                                     f"({kept} already transcribed with it, kept)")
         # (from the transcript cache when the file was transcribed with this model before: no waiting)
         self.queue_transcription(todo, force=True, use_cache=True)
+
+    def transcribe_again(self, ids: list[str]):
+        """Right-click → Transcribe again from scratch: the files transcribed anew with the speech model and
+        language set now, the saved transcripts (this project's and the cache's) not used. Undo brings the
+        old transcript back."""
+        media = [fid for fid in dict.fromkeys(ids) if fid in self.project.footage
+                 and not self.project.footage[fid].is_image and self.project.footage[fid].has_audio]
+        if not media:
+            self.lbl_status.setText("Nothing to transcribe: no sound in the selected footage")
+            return
+        self.project_checkpoint()
+        self.queue_transcription(media, force=True, use_cache=False)
+
+    def _captions_shifted(self, index: int, dt: float):
+        """A caption dragged (or nudged) left / right on the timeline: it and its clip's later captions move."""
+        if not 0 <= index < len(self.captions):
+            return
+        self.project_checkpoint()
+        moved = shift_captions(self.project, self.captions, index, dt)
+        if abs(moved) < 1e-3:
+            self.lbl_status.setText("The captions can't move that way: the words before or after them are in the way")
+            return
+        self.project.dirty = True
+        self.update_captions()
+        n = len(shift_group(self.captions, index))
+        self.lbl_status.setText(f"Moved {n} caption(s) {abs(moved):.2f} s {'later' if moved > 0 else 'earlier'}"
+                                + (" (as far as the words around them allow)" if abs(moved - dt) > 0.005 else "")
+                                + " · Undo puts them back")
 
     def generate_captions(self):
         p = self.project

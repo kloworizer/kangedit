@@ -6,6 +6,15 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+- **Move captions in time**: drag a caption left or right on the timeline's caption lane (or right-click it →
+  *Move this and the clip's later captions*, 0.1 or 0.5 s): it and the clip's later captions move together,
+  for speech whose words are right but whose timing is off. Undo puts them back; the change stays through
+  trims and slips.
+- **Transcribe again from scratch** (right-click footage in the Media panel, or a clip on the timeline): the
+  speech model runs again, ignoring the saved transcripts.
+- A project website (GitHub Pages, from `site/`), with the latest downloads.
+
 ## [0.7.2] - 2026-10-24
 
 ### Changed

@@ -745,6 +745,49 @@ def edit_caption(project: Project, cap: Caption, new_text: str) -> None:
     f.transcript[idx[0]:idx[0]] = new
 
 
+def shift_group(caps: list[Caption], index: int) -> list[int]:
+    """The captions a drag of caption `index` moves: it and the ones after it from the same clip."""
+    if not 0 <= index < len(caps):
+        return []
+    cap = caps[index]
+    return [k for k, c in enumerate(caps) if c.clip_id == cap.clip_id and c.footage_id == cap.footage_id
+            and c.start >= cap.start - 1e-6]
+
+
+def shift_captions(project: Project, caps: list[Caption], index: int, dt: float) -> float:
+    """Move caption `index` and the later ones of its clip `dt` timeline seconds (right: later), for speech
+    whose words are right but timed wrong. Their words' times in the transcript move (so the change stays
+    through trims, slips and undo), as far as the words around them allow (the transcript keeps its order).
+    Returns the timeline seconds actually moved."""
+    group = shift_group(caps, index)
+    if not group or abs(dt) < 1e-4:
+        return 0.0
+    cap = caps[index]
+    f = project.transcript_source(cap.footage_id)
+    idx = sorted({k for g in group for k in caps[g].word_idx})
+    if f is None or not f.transcript or not idx:
+        return 0.0
+    words = f.transcript
+    first, last = idx[0], min(idx[-1], len(words) - 1)
+    # source seconds per timeline second: the clip's sound speed (a voice-over plays at its own speed)
+    rate = 1.0
+    i = project.index_of(cap.clip_id)
+    if i >= 0:
+        c = project.clips[i]
+        t0 = cap.start - project.clip_starts()[i]
+        a, b = c.sound_src_at(max(0.0, t0)), c.sound_src_at(max(0.0, t0) + 1.0)
+        rate = max(0.05, b - a) if c.audio_mode != "normal" else 1.0
+    sdt = dt * rate
+    lo = (words[first - 1]["e"] if first > 0 else 0.0) - words[first]["s"]
+    hi = (words[last + 1]["s"] - words[last]["e"]) if last + 1 < len(words) else float("inf")
+    sdt = min(max(sdt, lo), hi)
+    if abs(sdt) < 1e-4:
+        return 0.0
+    for w in words[first:last + 1]:
+        w["s"], w["e"] = round(w["s"] + sdt, 3), round(w["e"] + sdt, 3)
+    return sdt / rate
+
+
 def delete_captions(project: Project, caps: list[Caption]) -> int:
     """Remove these captions' words from the transcripts (so they stay gone after re-trims). Returns how
     many words were removed. "Generate captions" can transcribe the footage again."""

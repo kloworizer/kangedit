@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KangEdit · Video editor that edits for you</title>
+<meta name="description" content="KangEdit is a free desktop video editor for Windows, macOS and Linux. It analyses your footage, picks the best moments and builds the edit, with offline captions, colour, stabilisation and sound. Everything runs on your computer.">
+<meta property="og:title" content="KangEdit: a video editor that edits for you">
+<meta property="og:description" content="Auto Edit, offline captions (Whisper, Qwen3-ASR), colour, stabilisation, multicam and more. Windows, macOS, Linux.">
+<meta property="og:image" content="assets/screenshot.jpg">
+<link rel="icon" href="assets/icon.png">
+<style>
+  :root {
+    --bg: #f7f7f9; --surface: #ffffff; --text: #17181c; --muted: #5b5f6a; --line: #e3e4e9;
+    --accent: #2f6fe4; --accent-text: #ffffff; --accent-soft: #e8efff; --gold: #b7791f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121317; --surface: #1b1d22; --text: #eceef3; --muted: #a1a6b2; --line: #2b2e36;
+      --accent: #5b8ff5; --accent-text: #0d1220; --accent-soft: #1e2a44; --gold: #f2c14e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #121317; --surface: #1b1d22; --text: #eceef3; --muted: #a1a6b2; --line: #2b2e36;
+    --accent: #5b8ff5; --accent-text: #0d1220; --accent-soft: #1e2a44; --gold: #f2c14e;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.55;
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--text);
+           text-decoration: none; }
+  .brand img { width: 32px; height: 32px; }
+  nav a { color: var(--muted); text-decoration: none; margin-left: 18px; font-size: 15px; }
+  nav a:hover { color: var(--text); }
+  .hero { text-align: center; padding: 40px 0 24px; }
+  .hero h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.02em; }
+  .hero p.lead { font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); max-width: 720px; margin: 0 auto 26px; }
+  .downloads { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px;
+         border: 1px solid var(--line); background: var(--surface); color: var(--text); text-decoration: none;
+         font-weight: 600; font-size: 15px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .btn small { font-weight: 400; opacity: 0.8; }
+  .version { margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .shot { margin: 34px auto 10px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line);
+          box-shadow: 0 18px 50px rgba(0,0,0,0.18); }
+  .shot img { display: block; width: 100%; height: auto; }
+  .caption-note { text-align: center; color: var(--muted); font-size: 13px; margin: 0 0 30px; }
+  section { padding: 34px 0; }
+  section h2 { font-size: clamp(24px, 3.2vw, 30px); margin: 0 0 8px; letter-spacing: -0.01em; }
+  section p.sub { color: var(--muted); margin: 0 0 22px; max-width: 760px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  .card .em { font-size: 22px; display: block; margin-bottom: 6px; }
+  .steps { counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
+  .step { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .step::before { counter-increment: step; content: counter(step); display: inline-grid; place-items: center;
+                  width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+                  font-weight: 700; margin-bottom: 8px; }
+  .step h3 { margin: 0 0 4px; font-size: 16px; }
+  .step p { margin: 0; color: var(--muted); font-size: 15px; }
+  .privacy { background: var(--accent-soft); border-radius: 14px; padding: 22px; }
+  .privacy h2 { margin-top: 0; }
+  table.req { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line);
+              border-radius: 12px; overflow: hidden; font-size: 15px; }
+  table.req th, table.req td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line);
+                               vertical-align: top; }
+  table.req tr:last-child th, table.req tr:last-child td { border-bottom: 0; }
+  table.req th { width: 30%; font-weight: 600; }
+  .scroll-x { overflow-x: auto; }
+  code { background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
+  footer { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+  @media (max-width: 640px) {
+    nav a:not(.gh) { display: none; }
+    .hero { padding-top: 20px; }
+    table.req th { width: 40%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#"><img src="assets/icon.png" alt="" width="32" height="32">KangEdit</a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#requirements">Requirements</a>
+      <a class="gh" href="https://github.com/kloworizer/kangedit">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="hero">
+    <h1>A video editor that edits for you</h1>
+    <p class="lead">KangEdit analyses your footage, picks the best moments and builds a short-form or long-form
+      edit. Then you fine-tune the cut, colour, captions and sound, and export. Free and open source, for Windows,
+      macOS and Linux.</p>
+    <div class="downloads" id="downloads">
+      <a class="btn" data-os="windows" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ Windows <small>64-bit</small></a>
+      <a class="btn" data-os="macos" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ macOS <small>Apple silicon</small></a>
+      <a class="btn" data-os="linux" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ Linux <small>x64</small></a>
+    </div>
+    <div class="version" id="version">Latest release on <a href="https://github.com/kloworizer/kangedit/releases/latest">GitHub Releases</a></div>
+  </div>
+
+  <div class="shot"><img src="assets/screenshot.jpg" alt="KangEdit: the media list, the viewer with a caption, the timeline and the Refine panel" width="1600" height="960"></div>
+  <p class="caption-note">The viewer, the timeline and the Refine panel, with captions from the footage's speech.</p>
+
+  <section id="features">
+    <h2>What it does</h2>
+    <p class="sub">The editing a vlog, a trip or a talking video needs, done for you, and every part of it yours to change.</p>
+    <div class="grid">
+      <div class="card"><span class="em">✨</span><h3>Auto Edit</h3><p>Picks the sharpest, liveliest moments of all your footage (faces, movement, people laughing or cheering) and lays them out for Reels / Shorts / TikTok or a long YouTube video, with transitions and J / L cuts.</p></div>
+      <div class="card"><span class="em">🎣</span><h3>Hooks that grab</h3><p>Opens on the strongest moments of the whole video. Pick them from thumbnails, in the order you tick them, or let it choose.</p></div>
+      <div class="card"><span class="em">💬</span><h3>Offline captions</h3><p>Speech recognition on your computer with Whisper or Qwen3-ASR, cleaned of road and wind noise. Animated, styled captions that follow every trim, and voice-overs captioned too.</p></div>
+      <div class="card"><span class="em">🎮</span><h3>Gaming moments</h3><p>Finds the plays in a game recording: a kill, a multi-kill or a teamfight, a gacha reveal, in any game.</p></div>
+      <div class="card"><span class="em">🎨</span><h3>Colour</h3><p>Auto colour per clip, camera log profiles and official LUTs, grading, and a look that matches across clips.</p></div>
+      <div class="card"><span class="em">🔍</span><h3>Movement</h3><p>Dynamic zoom and pan (on a face too), and stabilisation for shaky handheld shots, in the preview as in the export.</p></div>
+      <div class="card"><span class="em">🎙</span><h3>Sound</h3><p>Voice clean-up, music that ducks under speech, sound effects, even loudness, and fades.</p></div>
+      <div class="card"><span class="em">🗒</span><h3>Edit by what is said</h3><p>The transcript of the whole edit: find a clip by its words, drag it to reorder, slip a clip to a sentence, edit from a script.</p></div>
+      <div class="card"><span class="em">🎥</span><h3>Multicam and layers</h3><p>Several cameras synced by their sound, picture in picture, titles and video layers.</p></div>
+      <div class="card"><span class="em">📺</span><h3>Ready to post</h3><p>A thumbnail maker, YouTube chapters, a check before export, and exports up to 4K with your graphics card.</p></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p class="sub">Four steps, top to bottom of the window.</p>
+    <div class="steps">
+      <div class="step"><h3>Import</h3><p>Drop in your videos and photos. KangEdit analyses them in the background and can transcribe their speech.</p></div>
+      <div class="step"><h3>Auto Edit</h3><p>Choose short-form or long-form and what to prioritise. The edit is built in seconds; ask for shorter, longer or other moments.</p></div>
+      <div class="step"><h3>Refine</h3><p>Trim, slip and reorder on the timeline; colour, captions, text and sound in the Refine panel. Everything can be undone.</p></div>
+      <div class="step"><h3>Export</h3><p>9:16, 16:9, 1:1 and more, H.264, H.265 or ProRes, on the graphics card when it can.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="privacy">
+      <h2>Your footage stays on your computer</h2>
+      <p>Analysis, speech recognition and rendering all run offline. The internet is used only to download FFmpeg and a speech model the first time, and for the optional sound-effect search and music download.</p>
+    </div>
+  </section>
+
+  <section id="requirements">
+    <h2>Requirements</h2>
+    <div class="scroll-x">
+      <table class="req">
+        <tr><th>Windows</th><td>Windows 10 (1809) or 11, 64-bit</td></tr>
+        <tr><th>macOS</th><td>macOS 14 Sonoma or newer, Apple silicon (M1 or newer)</td></tr>
+        <tr><th>Linux</th><td>x86-64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or newer)</td></tr>
+        <tr><th>CPU and memory</th><td>4 cores and 8 GB; 8 cores and 16 GB or more for 4K or long edits</td></tr>
+        <tr><th>Graphics</th><td>Any: preview and export work on the CPU. A GPU with a video encoder (NVIDIA, AMD, Intel, Apple) makes exports faster; an NVIDIA card with CUDA makes captions faster</td></tr>
+        <tr><th>Disk</th><td>About 1.5 GB for the app, FFmpeg and the speech model, plus room for the cache and exports</td></tr>
+      </table>
+    </div>
+    <p class="sub" style="margin-top:16px">Download the archive for your system from <a href="https://github.com/kloworizer/kangedit/releases/latest">Releases</a>, extract it and start <code>KangEdit</code>. To run from source, see the <a href="https://github.com/kloworizer/kangedit#install-and-run">README</a>.</p>
+  </section>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>KangEdit · free and open source</span>
+    <span><a href="https://github.com/kloworizer/kangedit">Source</a> · <a href="https://github.com/kloworizer/kangedit/blob/stable/CHANGELOG.md">Changelog</a> · <a href="https://github.com/kloworizer/kangedit/blob/stable/LICENSE">License</a> · <a href="https://github.com/kloworizer/kangedit/issues">Report a problem</a></span>
+  </div>
+</footer>
+
+<script>
+  // The download buttons point straight at the latest release's files (else the Releases page), the one for
+  // this computer first.
+  (function () {
+    var ua = navigator.userAgent || "";
+    var mine = /Windows/i.test(ua) ? "windows" : /Mac/i.test(ua) ? "macos" : /Linux|X11/i.test(ua) ? "linux" : "";
+    var box = document.getElementById("downloads");
+    var btns = box.querySelectorAll("a[data-os]");
+    btns.forEach(function (a) {
+      if (a.dataset.os === mine) { a.classList.add("primary"); box.insertBefore(a, box.firstChild); }
+    });
+    fetch("https://api.github.com/repos/kloworizer/kangedit/releases/latest")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel || !rel.assets) return;
+        btns.forEach(function (a) {
+          var asset = rel.assets.find(function (x) { return x.name.indexOf("-" + a.dataset.os + "-") !== -1; });
+          if (asset) {
+            a.href = asset.browser_download_url;
+            a.title = asset.name + " (" + Math.round(asset.size / 1e6) + " MB)";
+          }
+        });
+        var v = document.getElementById("version");
+        v.textContent = "";
+        v.appendChild(document.createTextNode("Version " + rel.tag_name.replace(/^v/, "") + " · "));
+        var link = document.createElement("a");
+        link.href = rel.html_url;
+        link.textContent = "what's new";
+        v.appendChild(link);
+      })
+      .catch(function () {});
+  })();
+</script>
+</body>
+</html>

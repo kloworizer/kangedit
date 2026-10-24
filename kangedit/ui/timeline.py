@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QFrame, QWi
 
 from .. import images, sfx
 from ..analysis import WAVE_RATE, Analysis
-from ..captions import Caption
+from ..captions import Caption, shift_group
 from ..edits import TRANSITIONS, edits
 from ..models import OverlayClip, Project, SoundClip
 from ..speed import RAMPS, SOUND_MODES, SPEED_PRESETS, sound_mode
@@ -79,6 +79,7 @@ class TimelineView(QWidget):
     slip_preview = Signal(str, float)
     slip_end = Signal()
     caption_clicked = Signal(int)
+    captions_shifted = Signal(int, float)   # caption index, timeline seconds: it and its clip's later ones moved
     context_action = Signal(str, str)
     view_changed = Signal()
     sound_selected = Signal(str)
@@ -392,12 +393,17 @@ class TimelineView(QWidget):
         self._paint_edits(p)
         self._paint_fades(p)
 
+        d = self._drag
+        moving, shift = set(), 0.0
+        if d and d.get("kind") == "cap_shift" and d.get("active"):
+            moving, shift = set(d["group"]), d.get("dt", 0.0)      # (drawn where the drag puts them)
         for i, cap in enumerate(self.captions):
-            x0, x1 = self.t_to_x(cap.start), self.t_to_x(cap.end)
+            dt = shift if i in moving else 0.0
+            x0, x1 = self.t_to_x(cap.start + dt), self.t_to_x(cap.end + dt)
             if x1 < 0 or x0 > self.width():
                 continue
             r = QRectF(x0 + 1, self.cap_y + 2, max(2.0, x1 - x0 - 2), CAP_H - 4)
-            p.setPen(Qt.NoPen)
+            p.setPen(QPen(QColor("#ffd34d"), 1) if i in moving else Qt.NoPen)
             p.setBrush(QColor("#5b4a8a"))
             p.drawRoundedRect(r, 3, 3)
             if r.width() > 24:
@@ -1197,6 +1203,10 @@ class TimelineView(QWidget):
         m = QMenu(self)
         if index >= 0:
             self._menu_action(m, "Edit caption…", "caption_edit", str(index))
+            sub = m.addMenu("Move this and the clip's later captions")
+            for dt in (-0.5, -0.1, 0.1, 0.5):
+                a = sub.addAction(f"{abs(dt):g} s {'earlier' if dt < 0 else 'later'}")
+                a.triggered.connect(lambda _=False, dt=dt: self.captions_shifted.emit(index, dt))
             self._menu_action(m, "Delete caption", "caption_delete", str(index))
             m.addSeparator()
         if self.captions:
@@ -1419,6 +1429,9 @@ class TimelineView(QWidget):
             for i, cap in enumerate(self.captions):
                 if cap.start <= t < cap.end:
                     self.caption_clicked.emit(i)
+                    # dragged sideways: it and the clip's later captions move in time (see captions_shifted)
+                    self._drag = {"kind": "cap_shift", "cap": i, "x0": pos.x(), "active": False,
+                                  "group": shift_group(self.captions, i)}
                     break
             self.seek.emit(t)
             return
@@ -1456,6 +1469,14 @@ class TimelineView(QWidget):
             if self._edge_at(pos.y()):
                 self.setCursor(Qt.SplitVCursor)
                 self.setToolTip("Drag to change the height of this lane (double-click: usual height)")
+                return
+            if self.cap_y <= pos.y() <= self.cap_y + CAP_H:
+                t = self.x_to_t(pos.x())
+                on = any(c.start <= t < c.end for c in self.captions)
+                self.setCursor(Qt.SizeHorCursor if on else Qt.ArrowCursor)
+                self.setToolTip("Click: go there · Drag left / right: move this caption and the clip's later "
+                                "ones in time (right words, wrong timing) · Right-click: edit, nudge, delete"
+                                if on else "")
                 return
             oc, opart = self._overlay_hit(pos)
             if oc is not None:
@@ -1497,6 +1518,15 @@ class TimelineView(QWidget):
                                 + "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
             else:
                 self.setCursor(Qt.ArrowCursor)
+            return
+        if d["kind"] == "cap_shift":
+            dx = pos.x() - d["x0"]
+            if not d["active"] and abs(dx) < 4:
+                return
+            d["active"] = True
+            d["dt"] = dx / self.pps
+            self.setCursor(Qt.SizeHorCursor)
+            self.update()
             return
         if d["kind"] == "resize":
             lane = d["lane"]
@@ -1571,6 +1601,12 @@ class TimelineView(QWidget):
         self._drag = None
         self._edge_timer.stop()
         if d is None:
+            return
+        if d["kind"] == "cap_shift":
+            self.setCursor(Qt.ArrowCursor)
+            if d["active"] and abs(d.get("dt", 0.0)) >= 0.01:
+                self.captions_shifted.emit(d["cap"], d["dt"])
+            self.update()
             return
         if d["kind"] == "resize":
             self.heights_changed.emit(dict(self.heights))
@@ -1677,6 +1713,7 @@ class TimelineView(QWidget):
                   ("face_zoom", f"Zoom{many} to face"),
                   ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
                   (None, None), ("show_media", "Show in Media panel"),
+                  ("transcribe_force", f"Transcribe its footage again from scratch{many}"),
                   ("select_all", "Select all clips\tCtrl+A"), ("delete", f"Delete{many}\tDel")]
         for key, label in items:
             if key is None:
