@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import logging
 import os
 import shutil
@@ -30,7 +31,7 @@ from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analy
                         needs_smart, quick_look, quick_path_for)
 from ..autoedit import (HOOK_SUGGESTIONS, AutoEditSettings, apply_edit_style, hook_plan, hook_suggestions,
                         natural_length, score_samples, select)
-from .. import images, multicam, music, reframe, scriptedit, sfx, updater
+from .. import facecam, games, images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
@@ -343,6 +344,13 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("YouTube chapters…", lambda: self.chapters_dialog(), None,
                               "Chapter timestamps for the video's description, from the edit's scenes and what is "
                               "said; title cards for them"))
+        m.addAction(self._act("Facecam layout", lambda: self.facecam_layout(), None,
+                              "Game recordings with the webcam in a corner: the cam big on top and the game below "
+                              "(vertical), or the cam enlarged in its corner (landscape). For the selected clips or "
+                              "the whole edit; a webcam file selected in Media is used as the cam, synced by sound"))
+        m.addAction(self._act("Label the gaming plays…", self.label_plays, None,
+                              "Titles at the edit's multi-kills: DOUBLE KILL, TRIPLE KILL, MULTI KILL ×N where "
+                              "several plays come one after another (labelling again replaces them)"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -2751,6 +2759,210 @@ class MainWindow(QMainWindow):
         if dlg.changed:
             self.refresh_all()
 
+    # ================================================================== gaming extras
+    def _ask_corner(self, title: str, question: str) -> Optional[str]:
+        """A corner of the picture (facecam.CORNERS key) picked by the user (the last one first), or None."""
+        keys = list(facecam.CORNERS)
+        last = self.qs.value("facecam/corner", "bl")
+        labels = [facecam.CORNERS[k] for k in keys]
+        choice, ok = QInputDialog.getItem(self, title, question, labels,
+                                          keys.index(last) if last in keys else 0, False)
+        if not ok:
+            return None
+        key = keys[labels.index(choice)]
+        self.qs.setValue("facecam/corner", key)
+        return key
+
+    def facecam_layout(self, clips: Optional[list] = None):
+        """Facecam layout for game recordings with the webcam in a corner (see facecam.py), for the given clips,
+        else the selected ones, else the whole edit. The webcam corner is found by its face (in the
+        background); when none is found the user picks the corner. A webcam file selected in Media (not on the
+        timeline) can be the cam instead, synced to the game by its sound."""
+        if clips is None:
+            sel = set(self.tl.selected_ids())
+            clips = [c for c in self.project.clips if c.id in sel] or list(self.project.clips)
+        clips = [c for c in clips if (f := self.project.footage.get(c.footage_id)) is not None and not f.is_image]
+        if not clips:
+            QMessageBox.information(self, APP_NAME, "Put a game recording on the timeline first.")
+            return
+        used = {c.footage_id for c in clips}
+        cams = [fid for fid in self.bin.selected_ids() if fid not in used and (f := self.project.footage.get(fid))
+                is not None and not f.is_image and f.has_audio]
+        if len(cams) == 1:
+            box = QMessageBox(QMessageBox.Question, "Facecam layout",
+                              f"Use {self.project.footage[cams[0]].name} (selected in Media) as the webcam? It is "
+                              "synced to the game by its sound.\n\nNo: find the webcam corner in the game "
+                              "recording itself.", QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, self)
+            answer = box.exec()
+            if answer == QMessageBox.Cancel:
+                return
+            if answer == QMessageBox.Yes:
+                self._facecam_from_file(clips, cams[0])
+                return
+        st = self.project.settings
+        use_proxies = st.use_proxies
+        by_fid: dict[str, list] = {}
+        for c in clips:
+            by_fid.setdefault(c.footage_id, []).append(c)
+        spans = {fid: [(c.src_in, c.src_out) for c in cs] for fid, cs in by_fid.items()}
+        footage = {fid: self.project.footage[fid] for fid in by_fid}
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=2)
+            try:
+                out = {}
+                for k, (fid, f) in enumerate(footage.items()):
+                    progress(k / len(footage), "Finding the webcam corner…")
+                    # Frames spread over the clips' ranges: the cam sits still while the game changes around it.
+                    times = [a + (b - a) * (i + 0.5) / 3 for a, b in spans[fid][:3] for i in range(3)]
+                    dec = pool.get(f, use_proxies, 720)
+                    frames = []
+                    for t in times[:FACE_SAMPLES]:
+                        if cancel.is_set():
+                            raise Cancelled()
+                        img = dec.frame_at(t)
+                        if img is not None:
+                            frames.append(img.copy())
+                    out[fid] = facecam.find(frames)
+                return out
+            finally:
+                pool.close()
+
+        def done(found: dict):
+            tw, th = frame_size(st.aspect, st.resolution)
+            rects, notes = {}, []
+            for fid, rect in found.items():
+                f = self.project.footage.get(fid)
+                if f is None:
+                    continue
+                if rect is None:
+                    corner = self._ask_corner("Facecam layout", f"No webcam face was found in {f.name}.\n"
+                                                                "Which corner is the webcam in?")
+                    if corner is None:
+                        continue
+                    rect = facecam.corner_rect(corner, f.width, f.height)
+                    notes.append(f"{f.name}: webcam in the {facecam.CORNERS[corner].lower()} corner (picked)")
+                else:
+                    notes.append(f"{f.name}: webcam found {facecam.CORNERS[facecam.corner_of(rect)].lower()}")
+                rects[fid] = rect
+            if not rects:
+                return
+            self.project_checkpoint()
+            n = sum(facecam.apply(self.project, [c for c in clips if c.footage_id == fid], rect, tw, th, st.fit_mode)
+                    for fid, rect in rects.items())
+            self._after_structure_change()
+            how = "cam on top, game below" if facecam.stacked(tw, th) else "cam enlarged in its corner"
+            self.lbl_status.setText(f"Facecam layout ({how}) on {n} clip{'s' * (n != 1)} · " + " · ".join(notes)
+                                    + " · the cam layer is linked to its clip: trims and slips keep them together")
+
+        self.tasks.submit("Facecam layout", job, done, self._task_error("Facecam layout"))
+
+    def _facecam_from_file(self, clips: list, cam_fid: str):
+        """Facecam layout with a separate webcam recording: synced to the game by sound (in the background) and
+        laid on a layer as a multicam angle (so it follows the edit), in the band on top or a corner."""
+        st = self.project.settings
+        tw, th = frame_size(st.aspect, st.resolution)
+        corner = "bl"
+        if not facecam.stacked(tw, th):
+            corner = self._ask_corner("Facecam layout", "Which corner should the webcam go in?")
+            if corner is None:
+                return
+        cam = self.project.footage[cam_fid]
+        games_f = {c.footage_id: self.project.footage[c.footage_id] for c in clips}
+        use_proxies = st.use_proxies
+
+        def job(progress, cancel):
+            hits = sync_files([f.path for f in games_f.values()], [cam.path], lambda p, m: progress(0.8 * p, m),
+                              cancel)
+            face = cam.face
+            if face is None:
+                progress(0.85, "Finding the face in the webcam…")
+                pool = DecoderPool(limit=1)
+                try:
+                    dec = pool.get(cam, use_proxies, 480)
+                    frames = [img.copy() for i in range(5) if (img := dec.frame_at(cam.duration * (i + 0.5) / 5))
+                              is not None]
+                    face = reframe.find_face(frames)
+                finally:
+                    pool.close()
+            return hits.get(cam.path), (list(face) if face is not None else [])
+
+        def done(res):
+            hit, face = res
+            if hit is None:
+                QMessageBox.warning(self, APP_NAME, f"{cam.name} could not be synced to the game by its sound (no "
+                                                    "common sound), so it was not laid out.")
+                return
+            ref_path, r = hit
+            ref = next(fid for fid, f in games_f.items() if f.path == ref_path)
+            self.project_checkpoint()
+            cam.face = face
+            angles = {**{fid: 1 for fid in games_f}, cam_fid: 2}
+            syncs = {cam_fid: (ref, r)}
+            template = "stack" if facecam.stacked(tw, th) else "pip"
+            ids = {c.id for c in clips}
+            self.project.overlays = [o for o in self.project.overlays if o.angle < 2
+                                     and not (o.role == facecam.FACECAM and o.link in ids)]
+            new = multicam.build(self.project, clips, angles, syncs, template, "main", layout_main=False)
+            for oc in new:
+                facecam.cam_overlay_place(oc, cam, tw, th, corner)
+            for c in clips:
+                facecam.game_box(c, self.project.footage[c.footage_id], tw, th)
+            self.project.overlays += new
+            top = max((o.track for o in self.project.overlays), default=0)
+            st.overlay_tracks = max(st.overlay_tracks, top + 1)
+            st.multicam = {"angles": angles, "template": template, "audio": "main", "covered": False,
+                           "whole": False, "switch": {}, "shot": [multicam.MIN_SHOT, multicam.MAX_SHOT],
+                           "syncs": {fid: [ref_id, x.offset, x.drift, x.confidence, x.overlap]
+                                     for fid, (ref_id, x) in syncs.items()},
+                           "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
+            self._after_structure_change()
+            self.lbl_status.setText(f"Facecam layout with {cam.name}: synced at {r.offset:+.3f} s, on "
+                                    f"{len(new)} clip{'s' * (len(new) != 1)} (a multicam angle: it follows the edit)")
+
+        self.tasks.submit("Facecam layout", job, done, self._task_error("Facecam layout"))
+
+    def label_plays(self):
+        """Tools → Label the gaming plays: titles at the edit's multi-kills (see games.play_labels), in one undo
+        step, replacing the labels made before. Footage not analysed yet is analysed first (in the background)."""
+        from .games_dialog import PlayLabelsDialog
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Make an edit first (✨ Auto Edit or clips on the timeline).")
+            return
+        try:
+            saved = json.loads(self.qs.value("games/words", "") or "{}")
+        except (TypeError, ValueError):
+            saved = {}
+        words = {**games.LABEL_WORDS, **{int(k): v for k, v in saved.items() if str(k).isdigit()}}
+        dlg = PlayLabelsDialog(words, self.qs.value("games/singles", False, type=bool), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        words, singles = dlg.words(), dlg.singles()
+        self.qs.setValue("games/words", json.dumps({str(k): v for k, v in words.items()}))
+        self.qs.setValue("games/singles", singles)
+        footage = {c.footage_id: self.project.footage[c.footage_id] for c in self.project.clips
+                   if c.footage_id in self.project.footage and not self.project.footage[c.footage_id].is_image}
+        have = {fid: self.analyses[fid] for fid in footage if fid in self.analyses}
+        use_gpu = self.a_gpu_analysis.isChecked()
+
+        def job(progress, cancel):
+            out = dict(have)
+            todo = [fid for fid in footage if fid not in out]
+            for k, fid in enumerate(todo):
+                progress(k / max(1, len(todo)), f"Analyzing the footage: {k + 1}/{len(todo)}")
+                out[fid] = load_or_analyze(footage[fid], cancel=cancel, use_gpu=use_gpu)
+            return out
+
+        def done(analyses: dict):
+            self.analyses.update(analyses)
+            self.project_checkpoint()
+            n = games.apply_labels(self.project, self.analyses, words, singles)
+            self.refresh_all(captions=False)
+            self.lbl_status.setText(f"Labelled {n} play{'s' * (n != 1)} on the text track (Undo takes them off)" if n
+                                    else "No multi-kills found in the edit (earlier labels taken off)")
+
+        self.tasks.submit("Label the gaming plays", job, done, self._task_error("Label the gaming plays"))
+
     def _timeline_seek(self, t: float):
         """The timeline was clicked: the viewer shows the edit again (it may be in Source mode)."""
         if self.viewer.mode == "source":
@@ -3028,6 +3240,8 @@ class MainWindow(QMainWindow):
             self.transcribe_again(list(dict.fromkeys(x.footage_id for x in targets)))
         elif action == "face_zoom":
             self._face_zoom(targets)
+        elif action == "facecam":
+            self.facecam_layout(targets)
         elif action.startswith(("speed:", "ramp:", "audio:")) or action == "speed_custom":
             self.set_speed(targets, action)
         elif action.startswith("rotate:"):

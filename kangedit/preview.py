@@ -449,10 +449,10 @@ class PreviewEngine:
         window = None
         if ov.motion is not None:
             p = reframe.overlay_place(rgba.shape[1], rgba.shape[0], look.width, look.height, c.scale, c.box_w,
-                                      c.box_h, c.pan_x, c.pan_y)
+                                      c.box_h, c.pan_x, c.pan_y, c.zoom)
             window = ov.motion.at_placement(t - c.start, c.src_at(t - c.start), p)
         layer = reframe.overlay_layer(rgba, look.width, look.height, c.scale, c.rotation, c.box_w, c.box_h,
-                                      c.pan_x, c.pan_y, window)
+                                      c.pan_x, c.pan_y, window, c.zoom)
         layer = cv2.cvtColor(layer, cv2.COLOR_RGBA2BGRA)
         reframe.composite(out, layer, c.x * look.width, c.y * look.height, c.alpha_at(t))
 

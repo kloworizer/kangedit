@@ -1483,7 +1483,8 @@ class TimelineView(QWidget):
                 self.setCursor(Qt.SizeHorCursor if opart in ("o_trim_l", "o_trim_r") else Qt.OpenHandCursor)
                 f = self.project.footage.get(oc.footage_id)
                 linked = self._linked_main(oc) is not None
-                what = f" · camera angle {oc.angle}, linked to the main clip" if linked else ""
+                what = ((" · facecam, linked to the main clip" if oc.role == "facecam" else
+                         f" · camera angle {oc.angle}, linked to the main clip") if linked else "")
                 marks = marks_text(oc)
                 self.setToolTip(f"{f.name if f else ''} on layer V{oc.track + 2}{what}\n"
                                 f"{oc.start:.2f}s, {oc.duration:.2f}s long\n" + (marks + "\n" if marks else "")
@@ -1711,6 +1712,7 @@ class TimelineView(QWidget):
                   ("alt_moment", f"Other moment{many}	R"),
                   ("link_toggle", None), ("speed", None),
                   ("face_zoom", f"Zoom{many} to face"),
+                  ("facecam", f"Facecam layout{many} (game + webcam corner)"),
                   ("rotate:-90", f"Rotate{many} 90° left"), ("rotate:90", f"Rotate{many} 90° right"),
                   (None, None), ("show_media", "Show in Media panel"),
                   ("transcribe_force", f"Transcribe its footage again from scratch{many}"),
