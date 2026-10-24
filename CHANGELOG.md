@@ -14,6 +14,35 @@ and the Release workflow uses that section as the GitHub release notes.
 - **Transcribe again from scratch** (right-click footage in the Media panel, or a clip on the timeline): the
   speech model runs again, ignoring the saved transcripts.
 - A project website (GitHub Pages, from `site/`), with the latest downloads.
+- **Auto-sync captions to the speech**: right-click a caption → *Auto-sync this clip's captions to its speech*,
+  or Captions panel → *Auto-sync timing* for every clip. Each clip's word timings are matched to the voice in
+  its sound (up to 2 s either way) and moved by the measured offset; undoable.
+- **Caption style templates**: one-click looks (Clean subtitles, Bold pop, Karaoke, Highlight box, Boxed,
+  Minimal lower, One word at a time) in *Captions → Style…* and the Captions panel's *Look* list, plus your
+  own saved looks (*Save current style as…*, *Delete*), kept for every project.
+- **Speaker labels and colours**: Captions panel → *Speakers* (Off / Auto / 2 / 3 / 4) and *Detect speakers*
+  tell voices apart offline, and each speaker's captions show in their own colour in the preview, the export
+  and the timeline. Right-click a caption → *Speaker* to fix one; undo works for all of it.
+- **Export presets per platform**: YouTube (1080p / 4K), YouTube Shorts, Instagram Reels, TikTok and
+  Instagram feed fill in the frame, format and loudness; changing a setting by hand makes it Custom, and the
+  last preset is remembered. The Reels and TikTok presets can show that app's safe area in the viewer.
+- **Loudness target on export** (Off / -14 / -16 / -23 LUFS): the final mix is normalised with its peaks kept
+  under -1.5 dBTP, so platforms don't turn it down or squash it.
+- **Batch export**: *Also export as* makes extra 16:9, 9:16, 1:1 or 4:5 versions next to the main file
+  (myvideo_9x16.mp4), each re-framed with its own caption layout, queued one after another with one summary.
+- **Version history** (*File → Version history…*): earlier versions of a saved project are kept (on each save,
+  every few minutes of auto-saving, and right before Auto Edit or a script edit replaces the timeline), with
+  when, how many clips, how long and what changed since. *Restore* brings one back (keeping the current state
+  as a version first), *Open as copy* opens it as a new project. The newest 50 per project are kept.
+- **Facecam layout** (*Tools → Facecam layout*, or right-click clips): for game recordings with the webcam in
+  a corner. KangEdit finds the webcam by its face (or you pick the corner) and lays it out: cam on top and
+  game below for vertical videos, cam enlarged in its corner for landscape, linked to its clip through trims,
+  slips and splits. A separate webcam file selected in Media can be the cam, synced by sound.
+- **Label the gaming plays** (*Tools*): DOUBLE KILL, TRIPLE KILL and MULTI KILL ×N titles where several plays
+  come one after another in the edit; the words can be changed, and labelling again replaces the old ones.
+- **Smooth 4K preview without proxies**: big footage (4K, 10-bit HEVC, anything above 1080p without a proxy)
+  is decoded on the graphics card (NVIDIA, Direct3D on Windows, VideoToolbox on Mac, VA-API on Linux), with
+  the CPU taking over when the card can't. *Tools → GPU video decoding for the preview*: Auto / Off.
 
 ## [0.7.2] - 2026-10-24
 
