@@ -187,6 +187,8 @@ class OverlayClip:
     box_h: float = 0.0
     pan_x: float = 0.0
     pan_y: float = 0.0
+    zoom: float = 1.0              # > 1: the box shows a smaller part of the picture, magnified (a facecam corner)
+    role: str = ""                 # "facecam": the webcam corner of its main clip's own recording (see facecam.py)
     angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
     link: str = ""                 # multicam: id of the main-track clip it follows
     linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
@@ -370,6 +372,10 @@ class TextClip:
         return TextClip(**{k: v for k, v in d.items() if k in TextClip.__dataclass_fields__})
 
 
+# Speaker colours, in the order of the broadcast subtitle convention: white, cyan, yellow, green.
+SPEAKER_COLORS = ("#FFFFFF", "#5CE1FF", "#FFE14D", "#7CFC8A")
+
+
 @dataclass
 class CaptionStyle:
     enabled: bool = True
@@ -386,6 +392,10 @@ class CaptionStyle:
     animation: str = "none"        # see captions.ANIMATIONS
     highlight: str = "#FFD400"     # active-word color for the animations
     auto_layout: bool = True       # size / position / line length chosen from the frame ratio and format
+    # Speakers (captions.detect_speakers): "off" | "auto" | "2" | "3" | "4". Off: every caption in `color`;
+    # else a caption whose words carry a speaker ("p" in the transcript) is drawn in that speaker's colour.
+    speakers: str = "off"
+    speaker_colors: list = field(default_factory=lambda: list(SPEAKER_COLORS))
 
 
 @dataclass
@@ -413,6 +423,7 @@ class ProjectSettings:
     multicam: dict = field(default_factory=dict)
     bins: list = field(default_factory=list)   # Media panel bins made by hand (kept even when empty)
     script: dict = field(default_factory=dict)  # the last auto edit from a script (see ScriptEditDialog.settings)
+    facecam: dict = field(default_factory=dict)  # Facecam layout: {"clips": main clip ids it was laid out over}
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -535,11 +546,14 @@ class Project:
             "overlays": [x.to_dict() for x in self.overlays],
             "overlay_tracks": self.settings.overlay_tracks,
             "multicam": copy.deepcopy(self.settings.multicam),   # its layout follows the angles' clips
+            "facecam": copy.deepcopy(self.settings.facecam),
             "bins": list(self.settings.bins),
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap, "bin": f.bin,
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
             "voices": {fid: copy.deepcopy(f.transcript) for fid, f in self.voices.items()},
+            # the caption look (templates, speakers), not whether captions are shown
+            "captions": {k: copy.deepcopy(v) for k, v in asdict(self.settings.captions).items() if k != "enabled"},
         }
 
     def _restore(self, snap: dict) -> None:
@@ -550,6 +564,8 @@ class Project:
         self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
         if "multicam" in snap:
             self.settings.multicam = copy.deepcopy(snap["multicam"])
+        if "facecam" in snap:
+            self.settings.facecam = copy.deepcopy(snap["facecam"])
         if "bins" in snap:
             self.settings.bins = list(snap["bins"])
         for fid, d in snap["footage"].items():
@@ -562,6 +578,9 @@ class Project:
         for fid, words in snap.get("voices", {}).items():
             if fid in self.voices:
                 self.voices[fid].transcript = words
+        for k, v in snap.get("captions", {}).items():
+            if k in CaptionStyle.__dataclass_fields__:
+                setattr(self.settings.captions, k, copy.deepcopy(v))
 
     def set_detected_profile(self, footage_id: str, profile: str, note: str) -> None:
         """Apply an automatically detected log profile.

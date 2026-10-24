@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from . import keying, motion, reframe, spherical, stabilize, voice
@@ -58,6 +58,75 @@ class ExportSettings:
     # used here: copying full-size frames back for the CPU filters measured slower than CPU decoding.)
     use_gpu: bool = True
     blend_slowmo: bool = True   # slow motion: blend neighbouring frames instead of repeating them (smoother)
+    # Loudness the whole mix is brought to, in LUFS (None = left as mixed). Platforms turn louder videos down
+    # to their own target, so mixing to it keeps the sound as punchy as the editor heard it.
+    loudness: Optional[float] = None
+
+
+# Loudness targets offered in the export dialog (LUFS, integrated).
+LOUDNESS_TARGETS = {
+    None: "Off (as mixed)",
+    -14.0: "-14 LUFS (YouTube, TikTok, Instagram)",
+    -16.0: "-16 LUFS (podcasts, Apple)",
+    -23.0: "-23 LUFS (TV broadcast, EBU R128)",
+}
+TRUE_PEAK = -1.5   # dBTP ceiling kept by the loudness normalisation (room for the AAC encoder's overshoot)
+
+
+@dataclass(frozen=True)
+class Preset:
+    """What a platform wants: its frame, codec and loudness. fps None keeps the project's frame rate (every
+    platform here takes 24 to 60 fps as shot). overlay: the platform_overlay key of its app's screen layout."""
+    label: str
+    aspect: str
+    resolution: str
+    codec: str = "h264"
+    quality: str = "High"
+    loudness: Optional[float] = -14.0
+    fps: Optional[float] = None
+    overlay: str = ""
+
+
+CUSTOM = "custom"
+PRESETS = {
+    "youtube": Preset("YouTube (16:9, 1080p)", "16:9 (Landscape)", "1080p"),
+    "youtube_4k": Preset("YouTube 4K (16:9)", "16:9 (Landscape)", "4K (2160p)"),
+    "shorts": Preset("YouTube Shorts (9:16)", "9:16 (Vertical)", "1080p"),
+    "reels": Preset("Instagram Reels (9:16)", "9:16 (Vertical)", "1080p", overlay="reels"),
+    "tiktok": Preset("TikTok (9:16)", "9:16 (Vertical)", "1080p", overlay="tiktok"),
+    "instagram_feed": Preset("Instagram feed (4:5)", "4:5 (Portrait)", "1080p"),
+}
+
+
+def apply_preset(s: ExportSettings, key: str) -> ExportSettings:
+    """Settings `s` with the platform preset `key` filled in (Custom, or an unknown key, leaves them as they are)."""
+    p = PRESETS.get(key)
+    if p is None:
+        return s
+    return replace(s, aspect=p.aspect, resolution=p.resolution, codec=p.codec, quality=p.quality,
+                   loudness=p.loudness, fps=p.fps or s.fps,
+                   output=os.path.splitext(s.output)[0] + CODECS[p.codec][1])
+
+
+# Aspect ratios offered as extra files of a batch export ("Also export as").
+BATCH_ASPECTS = ["16:9 (Landscape)", "9:16 (Vertical)", "1:1 (Square)", "4:5 (Portrait)"]
+
+
+def aspect_suffix(aspect: str) -> str:
+    """File-name suffix for an aspect ratio: "9:16 (Vertical)" -> "9x16"."""
+    return aspect.split(" ")[0].replace(":", "x").replace(".", "")
+
+
+def batch_settings(s: ExportSettings, aspects) -> list[ExportSettings]:
+    """The main export `s` followed by one more for each other aspect ratio in `aspects`, saved next to it with
+    the ratio as a suffix (myvideo.mp4 -> myvideo_9x16.mp4). Each is a full export of its own: the clips'
+    framing (fill / fit, zoom, offsets) is re-fitted to its frame and captions get that frame's layout."""
+    base, ext = os.path.splitext(s.output)
+    out = [s]
+    for a in dict.fromkeys(aspects):
+        if a != s.aspect:
+            out.append(replace(s, aspect=a, output=f"{base}_{aspect_suffix(a)}{ext}"))
+    return out
 
 
 _cubes: dict[str, dict[tuple, str]] = {}      # export folder -> {grade key: .cube already written there}
@@ -297,7 +366,7 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
             elif not f.is_image:
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,"
-            pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
+            pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y, c.zoom)
             mv = motion.of_clip(c, f, pl.crop_w / max(1, pl.crop_h))
             if mv is not None:           # a dynamic zoom / stabilization inside its picture, by command
                 ss = 2 if pl.crop_w * 2 <= 4096 else 1
@@ -347,6 +416,16 @@ def _fade_audio(project: Project, graph: list[str], aout: str) -> str:
         fades.append(f"afade=t=out:st={max(0.0, dur - fo):.4f}:d={fo:.4f}")
     graph.append(f"[{aout}]{','.join(fades)}[afaded]")
     return "afaded"
+
+
+def _loudness(graph: list[str], aout: str, target: Optional[float]) -> str:
+    """Bring the final mix to `target` LUFS (None: unchanged), its peaks kept under TRUE_PEAK. One pass:
+    loudnorm follows the loudness as it plays (it works at 192 kHz: resampled back after). Returns the label."""
+    if target is None:
+        return aout
+    graph.append(f"[{aout}]loudnorm=I={target:.1f}:TP={TRUE_PEAK:.1f}:LRA=11,"
+                 f"aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aloud]")
+    return "aloud"
 
 
 def _join(graph: list[str], plans: list[ClipPlan], fps: float, video: bool) -> None:
@@ -482,6 +561,7 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
     k, vout, ov_audio = _overlays(project, s.use_proxies, s.fps, inputs, graph, k, (tw, th, workdir, "vcat"),
                                   items=rest)
     aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
+    aout = _loudness(graph, aout, s.loudness)      # after the mix and its fades: the level of what is heard
     fonts_dir = os.path.join(workdir, "fonts")
     texts = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
     if texts:

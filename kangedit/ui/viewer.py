@@ -15,7 +15,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QStyle
 
 from .. import motion, reframe, spherical
-from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_layout, wrap_words
+from ..captions import POP_MS, POP_SCALE, WORD_SCALE, Caption, caption_color, caption_layout, wrap_words
 from ..color import Grade
 from ..config import frame_size
 from ..decoder import DecoderPool
@@ -265,6 +265,7 @@ class Canvas(QWidget):
         y0 = {"bottom": y - block_h, "center": y - block_h / 2}.get(lay.anchor, y)
         p.setRenderHint(QPainter.Antialiasing)
         boxed = st.box and anim != "box"
+        text_color = caption_color(st, cap)          # the speaker's colour when speakers are shown
         for li, line in enumerate(lines):
             widths = [fm.horizontalAdvance(words[i]) for i in line]
             tw = sum(widths) + space * (len(line) - 1)
@@ -289,7 +290,7 @@ class Canvas(QWidget):
                         p.fillPath(path, QColor(st.highlight))
                     elif st.outline and not boxed:
                         p.strokePath(path, QPen(QColor(0, 0, 0, 230), max(2.0, px / 7), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-                    color = st.highlight if anim == "highlight" and k == active else st.color
+                    color = st.highlight if anim == "highlight" and k == active else text_color
                     p.fillPath(path, QColor(color))
                 x += wdt + space
 

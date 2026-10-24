@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.kgproj.tmp
 # downloaded by install.py / the app
-ffmpeg/
+/ffmpeg
 # default cache folder (proxies, analysis, temporary files)
 cache/
 # written by scripts/build.py for packaged builds

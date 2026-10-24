@@ -192,12 +192,13 @@ def ffmpeg_tilt(deg: float, fill: str = "black") -> str:
 
 # ----------------------------------------------------------------------------- overlay layers
 def overlay_place(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float = 0.0, box_h: float = 0.0,
-                  pan_x: float = 0.0, pan_y: float = 0.0) -> Placement:
+                  pan_x: float = 0.0, pan_y: float = 0.0, zoom: float = 1.0) -> Placement:
     """How an overlay picture is scaled and cropped for a tw x th frame: fitted inside the frame and scaled,
-    or (with a box) scaled to fill a box_w x box_h part of the frame (times scale) and cropped to it."""
+    or (with a box) scaled to fill a box_w x box_h part of the frame (times scale) and cropped to it (zoom > 1:
+    to a smaller part of the picture, such as a facecam corner)."""
     if box_w > 0 and box_h > 0:
         bw, bh = _even(box_w * scale * tw), _even(box_h * scale * th)
-        return place(sw, sh, bw, bh, "fill", 1.0, pan_x, pan_y)
+        return place(sw, sh, bw, bh, "fill", zoom, pan_x, pan_y)
     s = min(tw / max(1, sw), th / max(1, sh)) * max(0.01, scale)
     w, h = _even(sw * s), _even(sh * s)
     return Placement(w, h, 0, 0, w, h, 0, 0)
@@ -212,11 +213,11 @@ def overlay_size(sw: int, sh: int, tw: int, th: int, scale: float, box_w: float 
 
 def overlay_layer(rgba: np.ndarray, tw: int, th: int, scale: float, rotation: float, box_w: float = 0.0,
                   box_h: float = 0.0, pan_x: float = 0.0, pan_y: float = 0.0,
-                  window: Optional[tuple] = None) -> np.ndarray:
+                  window: Optional[tuple] = None, zoom: float = 1.0) -> np.ndarray:
     """The overlay picture (RGBA) scaled (and cropped to its box) for a tw x th frame and rotated clockwise on
     a transparent canvas just big enough for it. window: the part of its picture shown (see render)."""
     sh, sw = rgba.shape[:2]
-    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h, pan_x, pan_y)
+    p = overlay_place(sw, sh, tw, th, scale, box_w, box_h, pan_x, pan_y, zoom)
     if not is_still(window):
         img = cv2.warpAffine(rgba, window_matrix(sw, sh, p, window), (p.crop_w, p.crop_h),
                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)

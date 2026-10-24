@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import logging
 import os
 import shutil
@@ -23,22 +24,26 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
                                QTabWidget, QTextEdit, QToolButton, QWidget)
 
-from .. import APP_NAME, autosave, camera, version_string
+from .. import APP_NAME, autosave, camera, history, version_string
 from .. import lut as lutlib
 from .. import keying, smart, spherical
 from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analyze, load_plain, make_smart,
                         needs_smart, quick_look, quick_path_for)
 from ..autoedit import (HOOK_SUGGESTIONS, AutoEditSettings, apply_edit_style, hook_plan, hook_suggestions,
                         natural_length, score_samples, select)
-from .. import images, multicam, music, reframe, scriptedit, sfx, updater
+from .. import facecam, games, images, multicam, music, reframe, scriptedit, sfx, updater
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
 from .. import health, motion, polish, scenes, stabilize, voice
-from ..captions import (Caption, build_captions, cached_transcript, delete_captions, edit_caption, listen,
-                        load_model, model_note, project_layout, resolve_model, transcribe, transcribed_with,
+from ..captions import (Caption, apply_sync, build_captions, cached_transcript, delete_captions, edit_caption,
+                        listen, load_model, measure_sync, model_note, project_layout, resolve_model,
+                        set_caption_speaker, shift_captions, shift_group, sync_jobs, transcribe, transcribed_with,
                         write_srt)
+from .. import caption_templates
+from .. import speakers as speakerlib
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
+from .. import decoder as decoderlib
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
                       frame_size,
@@ -58,6 +63,7 @@ from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog
                       ProxyDialog, TranscriptDialog)
 from .edit_transcript import EditTranscript
 from .flow import FlowBar
+from .history_dialog import HistoryDialog
 from .inspector import Inspector, wrap_angle
 from .layer_panel import PLACEMENTS, LayerPanel
 from .media_bin import MediaBin
@@ -277,6 +283,8 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_autosave)
         m.addAction(self._act("Restore a backup…", self.restore_backup, None,
                               "Open an earlier version of this project from its automatic backups"))
+        m.addAction(self._act("Version history…", self.version_history, None,
+                              "Go back to a version kept at an earlier save (further back than Undo)"))
         m.addSeparator()
         self.a_import = self._act("Import footage && images…", self.import_dialog, "Ctrl+I")
         m.addAction(self.a_import)
@@ -343,6 +351,13 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("YouTube chapters…", lambda: self.chapters_dialog(), None,
                               "Chapter timestamps for the video's description, from the edit's scenes and what is "
                               "said; title cards for them"))
+        m.addAction(self._act("Facecam layout", lambda: self.facecam_layout(), None,
+                              "Game recordings with the webcam in a corner: the cam big on top and the game below "
+                              "(vertical), or the cam enlarged in its corner (landscape). For the selected clips or "
+                              "the whole edit; a webcam file selected in Media is used as the cam, synced by sound"))
+        m.addAction(self._act("Label the gaming plays…", self.label_plays, None,
+                              "Titles at the edit's multi-kills: DOUBLE KILL, TRIPLE KILL, MULTI KILL ×N where "
+                              "several plays come one after another (labelling again replaces them)"))
         self.a_proxies = self._act("Generate proxies…", self.proxy_dialog, None,
                                    "Create small copies of the footage for faster editing")
         m.addAction(self.a_proxies)
@@ -356,6 +371,22 @@ class MainWindow(QMainWindow):
         self.a_gpu_analysis.setChecked(self.qs.value("gpu_analysis", True, type=bool))
         self.a_gpu_analysis.toggled.connect(lambda v: self.qs.setValue("gpu_analysis", v))
         m.addAction(self.a_gpu_analysis)
+        sub = m.addMenu("GPU video decoding for the preview")
+        sub.setToolTipsVisible(True)
+        group = QActionGroup(self)
+        self.a_gpu_preview: dict[str, QAction] = {}
+        for key, label, tip in (
+                ("auto", "Auto", "4K, 10-bit HEVC and other big footage without a proxy decodes on the graphics "
+                                 "card, so it plays smoothly without proxies; smaller footage stays on the CPU"),
+                ("off", "Off", "Always decode the preview on the CPU")):
+            a = QAction(label, self, checkable=True)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda _=False, k=key: self._set_gpu_preview(k))
+            group.addAction(a)
+            sub.addAction(a)
+            self.a_gpu_preview[key] = a
+        decoderlib.set_gpu_mode(self.qs.value("gpu_preview", "auto", type=str))
+        self.a_gpu_preview[decoderlib.gpu_mode()].setChecked(True)
         self.a_smart = QAction("Smarter analysis (AI: what shots show, what is heard)", self, checkable=True)
         self.a_smart.setToolTip("Two small neural networks describe what each shot shows (repeated views are found "
                                 "across files) and what is heard (speech, laughter, cheering, music, wind…), "
@@ -661,6 +692,7 @@ class MainWindow(QMainWindow):
         self.text_panel.before_change.connect(self.project_checkpoint)
         self.text_panel.changed.connect(lambda: self._texts_changed(panel=False))
         self.text_panel.delete_requested.connect(lambda tid: self._text_action("text_delete", tid))
+        self.tl.captions_shifted.connect(self._captions_shifted)
         self.tl.caption_clicked.connect(lambda i: (self.right_tabs.setCurrentWidget(self.caps_panel),
                                                    self.caps_panel.select(i)))
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
@@ -697,6 +729,11 @@ class MainWindow(QMainWindow):
         self.caps_panel.delete_requested.connect(self._delete_captions)
         self.caps_panel.seek.connect(self._timeline_seek)
         self.caps_panel.toggled.connect(self._toggle_captions)
+        self.caps_panel.template_chosen.connect(self.apply_caption_template)
+        self.caps_panel.speakers_changed.connect(self._set_speakers)
+        self.caps_panel.detect_speakers.connect(self.detect_speakers)
+        self.caps_panel.auto_sync.connect(lambda: self.auto_sync_captions())
+        self.caps_panel.set_templates(list(caption_templates.all_templates()))
 
         self.audio_ready.connect(self._on_audio_ready)
         self.audio_failed.connect(self._on_audio_failed)
@@ -1074,6 +1111,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Could not save project:\n{e}")
             return False
+        self._keep_version()
         autosave.clear_recovery()
         self._update_title()
         self._add_recent(path)
@@ -1087,6 +1125,57 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _keep_version(self, label: str = "", min_interval: float = 0.0):
+        """Add the project as it is now to its version history (a failure never stops the work)."""
+        try:
+            history.record(self.project, label, min_interval)
+        except (OSError, ValueError) as e:
+            log.warning("Could not keep a version of the project: %s", e)
+
+    def version_history(self):
+        """File → Version history: restore an earlier version here, or open it as an untitled copy."""
+        dlg = HistoryDialog(self.project, self)
+        if dlg.exec() != QDialog.Accepted or not dlg.choice:
+            return
+        what, entry = dlg.choice
+        if what == HistoryDialog.RESTORE:
+            self.restore_version(entry)
+        else:
+            self.open_version_copy(entry)
+
+    def restore_version(self, entry: dict) -> bool:
+        """Bring a version back as the current project, keeping the file path (the next save overwrites the
+        file). The current state is kept as a version first, so restoring can itself be undone."""
+        path = self.project.path
+        if not path:
+            return False
+        try:
+            p = history.load(path, entry)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, APP_NAME, f"Could not open that version:\n{e}")
+            return False
+        self._keep_version("Before restoring an earlier version")
+        p.path, p.dirty = path, True
+        self.set_project(p)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.get("time", 0.0)))
+        self.lbl_status.setText(f"Restored the version of {when}: save to keep it")
+        return True
+
+    def open_version_copy(self, entry: dict) -> bool:
+        """Open a version as a new untitled project (the project file and its history stay as they are)."""
+        path = self.project.path
+        if not path or not self._confirm_discard():
+            return False
+        try:
+            p = history.load(path, entry)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, APP_NAME, f"Could not open that version:\n{e}")
+            return False
+        p.path, p.dirty = None, True
+        self.set_project(p)
+        self.lbl_status.setText("Opened an earlier version as an untitled project: save it to keep it")
+        return True
+
     def _autosave(self):
         """Save a changed project by itself: in place when it has a file, else as a recovery copy."""
         if not self.a_autosave.isChecked() or not self.project.dirty:
@@ -1095,6 +1184,7 @@ class MainWindow(QMainWindow):
             if self.project.path:
                 self._backup(self.project.path)
                 self.project.save(self.project.path)
+                self._keep_version(min_interval=history.AUTOSAVE_EVERY)
                 self._update_title()
                 self.lbl_status.setText(f"Auto-saved {os.path.basename(self.project.path)} "
                                         f"at {time.strftime('%H:%M')}")
@@ -1404,6 +1494,12 @@ class MainWindow(QMainWindow):
         if not self.tasks.busy:
             self.lbl_status.setText(msg)
 
+    def _set_gpu_preview(self, mode: str):
+        self.qs.setValue("gpu_preview", mode)
+        decoderlib.set_gpu_mode(mode)
+        self.viewer.drop_decoders()   # reopen the footage on the CPU or the card
+        self.viewer.refresh()
+
     def _set_smart(self, on: bool):
         self.qs.setValue("smart_analysis", on)
         smart.set_enabled(on)
@@ -1655,6 +1751,8 @@ class MainWindow(QMainWindow):
                                                     "the similarity threshold, or check the footage's language "
                                                     "(Captions settings).")
             return
+        if st.get("replace", True) and self.project.clips:
+            self._keep_version("Before script edit")
         self.project_checkpoint()
         if st.get("replace", True):
             self.project.clips = result.clips
@@ -1856,6 +1954,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, "No suitable moments were found. Try shorter clip lengths "
                                                         "or a smaller gap.")
                 return
+            if s.replace_timeline and self.project.clips:
+                self._keep_version("Before auto edit")
             self.project_checkpoint()
             self._tried_hooks = []
             self._tried_alts = {}
@@ -2334,6 +2434,8 @@ class MainWindow(QMainWindow):
             self.queue_analysis(ids, force=True)
         elif action == "transcribe":
             self.transcribe_media(ids)
+        elif action == "transcribe_force":
+            self.transcribe_again(ids)
         elif action == "transcript":
             self.transcript_dialog(ids)
         elif action == "detect_log":
@@ -2748,6 +2850,210 @@ class MainWindow(QMainWindow):
         if dlg.changed:
             self.refresh_all()
 
+    # ================================================================== gaming extras
+    def _ask_corner(self, title: str, question: str) -> Optional[str]:
+        """A corner of the picture (facecam.CORNERS key) picked by the user (the last one first), or None."""
+        keys = list(facecam.CORNERS)
+        last = self.qs.value("facecam/corner", "bl")
+        labels = [facecam.CORNERS[k] for k in keys]
+        choice, ok = QInputDialog.getItem(self, title, question, labels,
+                                          keys.index(last) if last in keys else 0, False)
+        if not ok:
+            return None
+        key = keys[labels.index(choice)]
+        self.qs.setValue("facecam/corner", key)
+        return key
+
+    def facecam_layout(self, clips: Optional[list] = None):
+        """Facecam layout for game recordings with the webcam in a corner (see facecam.py), for the given clips,
+        else the selected ones, else the whole edit. The webcam corner is found by its face (in the
+        background); when none is found the user picks the corner. A webcam file selected in Media (not on the
+        timeline) can be the cam instead, synced to the game by its sound."""
+        if clips is None:
+            sel = set(self.tl.selected_ids())
+            clips = [c for c in self.project.clips if c.id in sel] or list(self.project.clips)
+        clips = [c for c in clips if (f := self.project.footage.get(c.footage_id)) is not None and not f.is_image]
+        if not clips:
+            QMessageBox.information(self, APP_NAME, "Put a game recording on the timeline first.")
+            return
+        used = {c.footage_id for c in clips}
+        cams = [fid for fid in self.bin.selected_ids() if fid not in used and (f := self.project.footage.get(fid))
+                is not None and not f.is_image and f.has_audio]
+        if len(cams) == 1:
+            box = QMessageBox(QMessageBox.Question, "Facecam layout",
+                              f"Use {self.project.footage[cams[0]].name} (selected in Media) as the webcam? It is "
+                              "synced to the game by its sound.\n\nNo: find the webcam corner in the game "
+                              "recording itself.", QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, self)
+            answer = box.exec()
+            if answer == QMessageBox.Cancel:
+                return
+            if answer == QMessageBox.Yes:
+                self._facecam_from_file(clips, cams[0])
+                return
+        st = self.project.settings
+        use_proxies = st.use_proxies
+        by_fid: dict[str, list] = {}
+        for c in clips:
+            by_fid.setdefault(c.footage_id, []).append(c)
+        spans = {fid: [(c.src_in, c.src_out) for c in cs] for fid, cs in by_fid.items()}
+        footage = {fid: self.project.footage[fid] for fid in by_fid}
+
+        def job(progress, cancel):
+            pool = DecoderPool(limit=2)
+            try:
+                out = {}
+                for k, (fid, f) in enumerate(footage.items()):
+                    progress(k / len(footage), "Finding the webcam corner…")
+                    # Frames spread over the clips' ranges: the cam sits still while the game changes around it.
+                    times = [a + (b - a) * (i + 0.5) / 3 for a, b in spans[fid][:3] for i in range(3)]
+                    dec = pool.get(f, use_proxies, 720)
+                    frames = []
+                    for t in times[:FACE_SAMPLES]:
+                        if cancel.is_set():
+                            raise Cancelled()
+                        img = dec.frame_at(t)
+                        if img is not None:
+                            frames.append(img.copy())
+                    out[fid] = facecam.find(frames)
+                return out
+            finally:
+                pool.close()
+
+        def done(found: dict):
+            tw, th = frame_size(st.aspect, st.resolution)
+            rects, notes = {}, []
+            for fid, rect in found.items():
+                f = self.project.footage.get(fid)
+                if f is None:
+                    continue
+                if rect is None:
+                    corner = self._ask_corner("Facecam layout", f"No webcam face was found in {f.name}.\n"
+                                                                "Which corner is the webcam in?")
+                    if corner is None:
+                        continue
+                    rect = facecam.corner_rect(corner, f.width, f.height)
+                    notes.append(f"{f.name}: webcam in the {facecam.CORNERS[corner].lower()} corner (picked)")
+                else:
+                    notes.append(f"{f.name}: webcam found {facecam.CORNERS[facecam.corner_of(rect)].lower()}")
+                rects[fid] = rect
+            if not rects:
+                return
+            self.project_checkpoint()
+            n = sum(facecam.apply(self.project, [c for c in clips if c.footage_id == fid], rect, tw, th, st.fit_mode)
+                    for fid, rect in rects.items())
+            self._after_structure_change()
+            how = "cam on top, game below" if facecam.stacked(tw, th) else "cam enlarged in its corner"
+            self.lbl_status.setText(f"Facecam layout ({how}) on {n} clip{'s' * (n != 1)} · " + " · ".join(notes)
+                                    + " · the cam layer is linked to its clip: trims and slips keep them together")
+
+        self.tasks.submit("Facecam layout", job, done, self._task_error("Facecam layout"))
+
+    def _facecam_from_file(self, clips: list, cam_fid: str):
+        """Facecam layout with a separate webcam recording: synced to the game by sound (in the background) and
+        laid on a layer as a multicam angle (so it follows the edit), in the band on top or a corner."""
+        st = self.project.settings
+        tw, th = frame_size(st.aspect, st.resolution)
+        corner = "bl"
+        if not facecam.stacked(tw, th):
+            corner = self._ask_corner("Facecam layout", "Which corner should the webcam go in?")
+            if corner is None:
+                return
+        cam = self.project.footage[cam_fid]
+        games_f = {c.footage_id: self.project.footage[c.footage_id] for c in clips}
+        use_proxies = st.use_proxies
+
+        def job(progress, cancel):
+            hits = sync_files([f.path for f in games_f.values()], [cam.path], lambda p, m: progress(0.8 * p, m),
+                              cancel)
+            face = cam.face
+            if face is None:
+                progress(0.85, "Finding the face in the webcam…")
+                pool = DecoderPool(limit=1)
+                try:
+                    dec = pool.get(cam, use_proxies, 480)
+                    frames = [img.copy() for i in range(5) if (img := dec.frame_at(cam.duration * (i + 0.5) / 5))
+                              is not None]
+                    face = reframe.find_face(frames)
+                finally:
+                    pool.close()
+            return hits.get(cam.path), (list(face) if face is not None else [])
+
+        def done(res):
+            hit, face = res
+            if hit is None:
+                QMessageBox.warning(self, APP_NAME, f"{cam.name} could not be synced to the game by its sound (no "
+                                                    "common sound), so it was not laid out.")
+                return
+            ref_path, r = hit
+            ref = next(fid for fid, f in games_f.items() if f.path == ref_path)
+            self.project_checkpoint()
+            cam.face = face
+            angles = {**{fid: 1 for fid in games_f}, cam_fid: 2}
+            syncs = {cam_fid: (ref, r)}
+            template = "stack" if facecam.stacked(tw, th) else "pip"
+            ids = {c.id for c in clips}
+            self.project.overlays = [o for o in self.project.overlays if o.angle < 2
+                                     and not (o.role == facecam.FACECAM and o.link in ids)]
+            new = multicam.build(self.project, clips, angles, syncs, template, "main", layout_main=False)
+            for oc in new:
+                facecam.cam_overlay_place(oc, cam, tw, th, corner)
+            for c in clips:
+                facecam.game_box(c, self.project.footage[c.footage_id], tw, th)
+            self.project.overlays += new
+            top = max((o.track for o in self.project.overlays), default=0)
+            st.overlay_tracks = max(st.overlay_tracks, top + 1)
+            st.multicam = {"angles": angles, "template": template, "audio": "main", "covered": False,
+                           "whole": False, "switch": {}, "shot": [multicam.MIN_SHOT, multicam.MAX_SHOT],
+                           "syncs": {fid: [ref_id, x.offset, x.drift, x.confidence, x.overlap]
+                                     for fid, (ref_id, x) in syncs.items()},
+                           "clips": [c.id for c in self.project.clips if angles.get(c.footage_id) == 1]}
+            self._after_structure_change()
+            self.lbl_status.setText(f"Facecam layout with {cam.name}: synced at {r.offset:+.3f} s, on "
+                                    f"{len(new)} clip{'s' * (len(new) != 1)} (a multicam angle: it follows the edit)")
+
+        self.tasks.submit("Facecam layout", job, done, self._task_error("Facecam layout"))
+
+    def label_plays(self):
+        """Tools → Label the gaming plays: titles at the edit's multi-kills (see games.play_labels), in one undo
+        step, replacing the labels made before. Footage not analysed yet is analysed first (in the background)."""
+        from .games_dialog import PlayLabelsDialog
+        if not self.project.clips:
+            QMessageBox.information(self, APP_NAME, "Make an edit first (✨ Auto Edit or clips on the timeline).")
+            return
+        try:
+            saved = json.loads(self.qs.value("games/words", "") or "{}")
+        except (TypeError, ValueError):
+            saved = {}
+        words = {**games.LABEL_WORDS, **{int(k): v for k, v in saved.items() if str(k).isdigit()}}
+        dlg = PlayLabelsDialog(words, self.qs.value("games/singles", False, type=bool), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        words, singles = dlg.words(), dlg.singles()
+        self.qs.setValue("games/words", json.dumps({str(k): v for k, v in words.items()}))
+        self.qs.setValue("games/singles", singles)
+        footage = {c.footage_id: self.project.footage[c.footage_id] for c in self.project.clips
+                   if c.footage_id in self.project.footage and not self.project.footage[c.footage_id].is_image}
+        have = {fid: self.analyses[fid] for fid in footage if fid in self.analyses}
+        use_gpu = self.a_gpu_analysis.isChecked()
+
+        def job(progress, cancel):
+            out = dict(have)
+            todo = [fid for fid in footage if fid not in out]
+            for k, fid in enumerate(todo):
+                progress(k / max(1, len(todo)), f"Analyzing the footage: {k + 1}/{len(todo)}")
+                out[fid] = load_or_analyze(footage[fid], cancel=cancel, use_gpu=use_gpu)
+            return out
+
+        def done(analyses: dict):
+            self.analyses.update(analyses)
+            self.project_checkpoint()
+            n = games.apply_labels(self.project, self.analyses, words, singles)
+            self.refresh_all(captions=False)
+            self.lbl_status.setText(f"Labelled {n} play{'s' * (n != 1)} on the text track (Undo takes them off)" if n
+                                    else "No multi-kills found in the edit (earlier labels taken off)")
+
+        self.tasks.submit("Label the gaming plays", job, done, self._task_error("Label the gaming plays"))
+
     def _timeline_seek(self, t: float):
         """The timeline was clicked: the viewer shows the edit again (it may be in Source mode)."""
         if self.viewer.mode == "source":
@@ -3021,8 +3327,12 @@ class MainWindow(QMainWindow):
             self.split_at_playhead()
         elif action == "alt_moment":
             self._replace_moments(targets)
+        elif action == "transcribe_force":
+            self.transcribe_again(list(dict.fromkeys(x.footage_id for x in targets)))
         elif action == "face_zoom":
             self._face_zoom(targets)
+        elif action == "facecam":
+            self.facecam_layout(targets)
         elif action.startswith(("speed:", "ramp:", "audio:")) or action == "speed_custom":
             self.set_speed(targets, action)
         elif action.startswith("rotate:"):
@@ -3557,6 +3867,13 @@ class MainWindow(QMainWindow):
                 self.caps_panel.table.editItem(item)
         elif key == "caption_delete":
             self._delete_captions([int(payload)])
+        elif key == "caption_sync":
+            i = int(payload)
+            if 0 <= i < len(self.captions):
+                self.auto_sync_captions([self.captions[i].clip_id])
+        elif key == "caption_speaker":
+            i, k = (int(v) for v in payload.split(":"))
+            self.set_speaker(i, k)
         elif key == "caption_delete_all":
             self._delete_captions(list(range(len(self.captions))))
         else:
@@ -4073,6 +4390,7 @@ class MainWindow(QMainWindow):
         self.tl.update()
         self.viewer.set_captions(self.captions)
         self.caps_panel.set_captions(self.captions)
+        self.caps_panel.set_speakers(self.project.settings.captions.speakers)
 
     def queue_transcription(self, ids: list[str], force: bool = False, use_cache: Optional[bool] = None):
         """Transcribe footage as one background task: the speech model is loaded once (downloaded on first use),
@@ -4211,6 +4529,34 @@ class MainWindow(QMainWindow):
         # (from the transcript cache when the file was transcribed with this model before: no waiting)
         self.queue_transcription(todo, force=True, use_cache=True)
 
+    def transcribe_again(self, ids: list[str]):
+        """Right-click → Transcribe again from scratch: the files transcribed anew with the speech model and
+        language set now, the saved transcripts (this project's and the cache's) not used. Undo brings the
+        old transcript back."""
+        media = [fid for fid in dict.fromkeys(ids) if fid in self.project.footage
+                 and not self.project.footage[fid].is_image and self.project.footage[fid].has_audio]
+        if not media:
+            self.lbl_status.setText("Nothing to transcribe: no sound in the selected footage")
+            return
+        self.project_checkpoint()
+        self.queue_transcription(media, force=True, use_cache=False)
+
+    def _captions_shifted(self, index: int, dt: float):
+        """A caption dragged (or nudged) left / right on the timeline: it and its clip's later captions move."""
+        if not 0 <= index < len(self.captions):
+            return
+        self.project_checkpoint()
+        moved = shift_captions(self.project, self.captions, index, dt)
+        if abs(moved) < 1e-3:
+            self.lbl_status.setText("The captions can't move that way: the words before or after them are in the way")
+            return
+        self.project.dirty = True
+        self.update_captions()
+        n = len(shift_group(self.captions, index))
+        self.lbl_status.setText(f"Moved {n} caption(s) {abs(moved):.2f} s {'later' if moved > 0 else 'earlier'}"
+                                + (" (as far as the words around them allow)" if abs(moved - dt) > 0.005 else "")
+                                + " · Undo puts them back")
+
     def generate_captions(self):
         p = self.project
         used = list(dict.fromkeys(c.footage_id for c in p.clips))
@@ -4243,12 +4589,138 @@ class MainWindow(QMainWindow):
 
     def caption_style_dialog(self):
         dlg = CaptionStyleDialog(self.project, self)
-        if dlg.exec() == CaptionStyleDialog.Accepted:
+        accepted = dlg.exec() == CaptionStyleDialog.Accepted
+        self.caps_panel.set_templates(list(caption_templates.all_templates()))   # saved / deleted there
+        if accepted:
+            self.project_checkpoint()                    # the new look is undoable
             dlg.apply()
             self.project.dirty = True
             self.caps_panel.set_model(self.project.settings.whisper_model, self.project.settings.speech_cleanup)
             self.update_captions()
+            self.viewer.refresh()
             self._update_title()
+
+    def apply_caption_template(self, name: str):
+        """Captions panel → Look: a template's caption look on the project (undoable)."""
+        values = caption_templates.all_templates().get(name)
+        if not values:
+            return
+        self.project_checkpoint()
+        caption_templates.apply_template(self.project.settings.captions, values)
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText(f"Caption look: {name} · Undo puts the previous look back")
+
+    def auto_sync_captions(self, clip_ids: Optional[list[str]] = None):
+        """Line captions up with the speech (right-click a caption → Auto-sync, or the Captions panel's
+        Auto-sync timing for every clip): the offset between each clip's word times and the voice in its sound
+        is measured in the background, then the words moved by it in one undoable step."""
+        jobs = sync_jobs(self.project, clip_ids)
+        if not jobs:
+            self.lbl_status.setText("No captions to sync: generate captions first")
+            return
+        name = "Auto-sync captions"
+
+        def job(progress, cancel):
+            out = []
+            for k, j in enumerate(jobs):
+                if cancel.is_set():
+                    raise Cancelled()
+                progress(k / len(jobs), f"{name}: listening to clip {k + 1}/{len(jobs)}")
+                try:
+                    out.append(measure_sync(j))
+                except (RuntimeError, OSError):
+                    out.append(None)               # its file can't be read: left as it is
+            progress(1.0, name)
+            return out
+
+        def done(offsets: list):
+            moves = [(j, off) for j, off in zip(jobs, offsets) if off]
+            if moves:
+                self.project_checkpoint()
+            moved = [m for m in ((j, apply_sync(self.project, j, off)) for j, off in moves) if abs(m[1]) >= 1e-3]
+            unsure = sum(1 for off in offsets if off is None)
+            if moved:
+                self.project.dirty = True
+                self.update_captions()
+                self.viewer.refresh()
+                self._update_title()
+                parts = [f"{abs(dt):.2f} s {'later' if dt > 0 else 'earlier'}" for _j, dt in moved]
+                what = (f"Captions moved {parts[0]}" if len(moved) == 1 else
+                        f"Captions of {len(moved)} clips moved ({', '.join(parts[:4])}"
+                        f"{', …' if len(parts) > 4 else ''})")
+                rest = len(jobs) - len(moved) - unsure
+                self.lbl_status.setText(what + (f"; {rest} already in sync" if rest else "")
+                                        + (f"; {unsure} couldn't be measured" if unsure else "")
+                                        + " · Undo puts them back")
+            elif unsure == len(jobs):
+                self.lbl_status.setText("Auto-sync: the speech couldn't be told apart from the rest of the sound "
+                                        "(nothing moved)")
+            else:
+                self.lbl_status.setText("The captions are already in sync with the speech"
+                                        if len(jobs) == 1 else f"All {len(jobs) - unsure} clips' captions are "
+                                        "already in sync with the speech")
+
+        self.lbl_status.setText(f"{name}…")
+        self.tasks.submit(name, job, done, self._task_error(name))
+
+    def _set_speakers(self, mode: str):
+        """Captions panel → Speakers: speaker colours on or off (Detect speakers uses the number chosen)."""
+        st = self.project.settings.captions
+        if st.speakers == mode:
+            return
+        self.project_checkpoint()
+        st.speakers = mode
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        if mode != "off" and not any(c.speaker >= 0 for c in self.captions):
+            self.lbl_status.setText("Click Detect speakers to tell the voices apart")
+
+    def detect_speakers(self):
+        """Captions panel → Detect speakers: who speaks each caption, from the voices (in the background), then
+        written onto the words in one undoable step."""
+        units = speakerlib.speaker_units(self.project)
+        if not units:
+            self.lbl_status.setText("No captions to tell the speakers of: generate captions first")
+            return
+        mode = self.project.settings.captions.speakers
+        mode = "auto" if mode == "off" else mode
+        name = "Detect speakers"
+
+        def done(found: list):
+            self.project_checkpoint()
+            self.project.settings.captions.speakers = mode
+            n = speakerlib.apply_speakers(self.project, units, found)
+            self.project.dirty = True
+            self.update_captions()
+            self.viewer.refresh()
+            self._update_title()
+            self.lbl_status.setText(f"{n} speaker(s) found · right-click a caption → Speaker to fix one · "
+                                    "Undo takes it back" if n else "No voices heard to tell apart")
+
+        self.lbl_status.setText(f"{name}…")
+        self.tasks.submit(name, lambda p, c: speakerlib.detect(units, mode, progress=p, cancel=c), done,
+                          self._task_error(name))
+
+    def set_speaker(self, index: int, speaker: int):
+        """Right-click a caption → Speaker: who says it, by hand (-1: nobody in particular). Undoable."""
+        if not 0 <= index < len(self.captions):
+            return
+        self.project_checkpoint()
+        set_caption_speaker(self.project, [self.captions[index]], speaker)
+        st = self.project.settings.captions
+        if speaker >= 0 and st.speakers == "off":
+            st.speakers = "auto"                   # the colours show
+        self.project.dirty = True
+        self.update_captions()
+        self.viewer.refresh()
+        self._update_title()
+        self.lbl_status.setText((f"Caption said by speaker {speaker + 1}" if speaker >= 0 else
+                                 "Caption has no speaker now") + " · Undo puts it back")
 
     def _set_speech_cleanup(self, key: str):
         """Captions panel → Background noise: for the transcriptions from now on (Transcribe again for the files
@@ -4316,24 +4788,75 @@ class MainWindow(QMainWindow):
         dlg = ExportDialog(self.project, bool(self.captions), self, self.qs.value("gpu_export", True, type=bool))
         if dlg.exec() != ExportDialog.Accepted:
             return
-        es = dlg.settings()
+        batch = dlg.all_settings()
+        es = batch[0]
         self.qs.setValue("gpu_export", es.use_gpu)
+        overlay = dlg.platform_overlay()
+        if overlay is not None:
+            self._set_platform_overlay(overlay)
         if not self.health_check(es):
             return
+        for extra in batch[1:]:      # a fix from the health check (original footage) goes for all of them
+            extra.use_proxies = es.use_proxies
         proj = self._clone_project()
+        if len(batch) == 1:
+            def done(path):
+                self._exported = True
+                self._update_flow()
+                if self.tray:
+                    self.tray.notify("Export finished", os.path.basename(path), lambda: open_path(path))
+                r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
+                                            QMessageBox.Open | QMessageBox.Ok)
+                if r == QMessageBox.Open:
+                    open_path(path)
 
-        def done(path):
-            self._exported = True
-            self._update_flow()
+            self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
+                              lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
+            return
+        self._export_batch(proj, batch)
+
+    def _export_batch(self, proj: Project, batch: list):
+        """Queue the exports one after another; one summary once all have finished. A failed one doesn't stop
+        the others; cancelling stops the rest (the task queue drops them)."""
+        results: list[tuple[str, str]] = []      # (file, "" when made, else why not)
+        state = {"over": False}
+
+        def summary(cancelled: bool = False):
+            if state["over"]:
+                return
+            state["over"] = True
+            made = [f for f, err in results if not err]
+            if made:
+                self._exported = True
+                self._update_flow()
+            lines = [f"✓ {f}" if not err else f"✗ {os.path.basename(f)}: {err.strip().splitlines()[-1][:200]}"
+                     for f, err in results if err != "cancelled"]
+            if cancelled:
+                lines.append(f"Cancelled: {len(batch) - len(made)} file(s) not made.")
+            head = f"Exported {len(made)} of {len(batch)} files:"
             if self.tray:
-                self.tray.notify("Export finished", os.path.basename(path), lambda: open_path(path))
-            r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
-                                        QMessageBox.Open | QMessageBox.Ok)
-            if r == QMessageBox.Open:
-                open_path(path)
+                self.tray.notify("Export finished", head, lambda: open_path(os.path.dirname(batch[0].output)))
+            box = QMessageBox.warning if len(made) < len(batch) and not cancelled else QMessageBox.information
+            r = box(self, APP_NAME, head + "\n\n" + "\n".join(lines), QMessageBox.Open | QMessageBox.Ok)
+            if r == QMessageBox.Open and made:
+                open_path(os.path.dirname(os.path.abspath(made[0])))
 
-        self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
-                          lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
+        def report(es, err: str = ""):
+            results.append((es.output, err))
+            if err == "cancelled":
+                summary(cancelled=True)
+            elif len(results) == len(batch):
+                summary()
+
+        for n, es in enumerate(batch):
+            of = f"({n + 1} of {len(batch)})"
+
+            def job(p, c, es=es, of=of):      # the progress text keeps saying which file of the batch it is
+                return export(proj, es, lambda f, m="": p(f, f"{m} {of}" if m else ""), c)
+
+            self.tasks.submit(f"Exporting {os.path.basename(es.output)} {of}", job,
+                              lambda _path, es=es: report(es),
+                              lambda msg, es=es: report(es, msg or "cancelled"))
 
     def health_check(self, es) -> bool:
         """Check the project before exporting with settings `es`: when there are issues, show them with their
