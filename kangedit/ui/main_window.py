@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QCombo
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
                                QTabWidget, QTextEdit, QToolButton, QWidget)
 
-from .. import APP_NAME, autosave, camera, version_string
+from .. import APP_NAME, autosave, camera, history, version_string
 from .. import lut as lutlib
 from .. import keying, smart, spherical
 from ..analysis import (Analysis, analysis_path_for, analyze_many, load_or_analyze, load_plain, make_smart,
@@ -58,6 +58,7 @@ from .dialogs import (FIT_MODES, AutoEditDialog, CacheDialog, CaptionStyleDialog
                       ProxyDialog, TranscriptDialog)
 from .edit_transcript import EditTranscript
 from .flow import FlowBar
+from .history_dialog import HistoryDialog
 from .inspector import Inspector, wrap_angle
 from .layer_panel import PLACEMENTS, LayerPanel
 from .media_bin import MediaBin
@@ -277,6 +278,8 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_autosave)
         m.addAction(self._act("Restore a backup…", self.restore_backup, None,
                               "Open an earlier version of this project from its automatic backups"))
+        m.addAction(self._act("Version history…", self.version_history, None,
+                              "Go back to a version kept at an earlier save (further back than Undo)"))
         m.addSeparator()
         self.a_import = self._act("Import footage && images…", self.import_dialog, "Ctrl+I")
         m.addAction(self.a_import)
@@ -1075,6 +1078,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, APP_NAME, f"Could not save project:\n{e}")
             return False
+        self._keep_version()
         autosave.clear_recovery()
         self._update_title()
         self._add_recent(path)
@@ -1088,6 +1092,57 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _keep_version(self, label: str = "", min_interval: float = 0.0):
+        """Add the project as it is now to its version history (a failure never stops the work)."""
+        try:
+            history.record(self.project, label, min_interval)
+        except (OSError, ValueError) as e:
+            log.warning("Could not keep a version of the project: %s", e)
+
+    def version_history(self):
+        """File → Version history: restore an earlier version here, or open it as an untitled copy."""
+        dlg = HistoryDialog(self.project, self)
+        if dlg.exec() != QDialog.Accepted or not dlg.choice:
+            return
+        what, entry = dlg.choice
+        if what == HistoryDialog.RESTORE:
+            self.restore_version(entry)
+        else:
+            self.open_version_copy(entry)
+
+    def restore_version(self, entry: dict) -> bool:
+        """Bring a version back as the current project, keeping the file path (the next save overwrites the
+        file). The current state is kept as a version first, so restoring can itself be undone."""
+        path = self.project.path
+        if not path:
+            return False
+        try:
+            p = history.load(path, entry)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, APP_NAME, f"Could not open that version:\n{e}")
+            return False
+        self._keep_version("Before restoring an earlier version")
+        p.path, p.dirty = path, True
+        self.set_project(p)
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry.get("time", 0.0)))
+        self.lbl_status.setText(f"Restored the version of {when}: save to keep it")
+        return True
+
+    def open_version_copy(self, entry: dict) -> bool:
+        """Open a version as a new untitled project (the project file and its history stay as they are)."""
+        path = self.project.path
+        if not path or not self._confirm_discard():
+            return False
+        try:
+            p = history.load(path, entry)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, APP_NAME, f"Could not open that version:\n{e}")
+            return False
+        p.path, p.dirty = None, True
+        self.set_project(p)
+        self.lbl_status.setText("Opened an earlier version as an untitled project: save it to keep it")
+        return True
+
     def _autosave(self):
         """Save a changed project by itself: in place when it has a file, else as a recovery copy."""
         if not self.a_autosave.isChecked() or not self.project.dirty:
@@ -1096,6 +1151,7 @@ class MainWindow(QMainWindow):
             if self.project.path:
                 self._backup(self.project.path)
                 self.project.save(self.project.path)
+                self._keep_version(min_interval=history.AUTOSAVE_EVERY)
                 self._update_title()
                 self.lbl_status.setText(f"Auto-saved {os.path.basename(self.project.path)} "
                                         f"at {time.strftime('%H:%M')}")
@@ -1656,6 +1712,8 @@ class MainWindow(QMainWindow):
                                                     "the similarity threshold, or check the footage's language "
                                                     "(Captions settings).")
             return
+        if st.get("replace", True) and self.project.clips:
+            self._keep_version("Before script edit")
         self.project_checkpoint()
         if st.get("replace", True):
             self.project.clips = result.clips
@@ -1857,6 +1915,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, APP_NAME, "No suitable moments were found. Try shorter clip lengths "
                                                         "or a smaller gap.")
                 return
+            if s.replace_timeline and self.project.clips:
+                self._keep_version("Before auto edit")
             self.project_checkpoint()
             self._tried_hooks = []
             self._tried_alts = {}
