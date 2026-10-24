@@ -187,6 +187,8 @@ class OverlayClip:
     box_h: float = 0.0
     pan_x: float = 0.0
     pan_y: float = 0.0
+    zoom: float = 1.0              # > 1: the box shows a smaller part of the picture, magnified (a facecam corner)
+    role: str = ""                 # "facecam": the webcam corner of its main clip's own recording (see facecam.py)
     angle: int = 0                 # multicam: camera angle shown (1 = the main angle, 2...), 0 = not multicam
     link: str = ""                 # multicam: id of the main-track clip it follows
     linked: bool = True            # False: unlinked by the user, edited on its own (no longer kept in sync)
@@ -413,6 +415,7 @@ class ProjectSettings:
     multicam: dict = field(default_factory=dict)
     bins: list = field(default_factory=list)   # Media panel bins made by hand (kept even when empty)
     script: dict = field(default_factory=dict)  # the last auto edit from a script (see ScriptEditDialog.settings)
+    facecam: dict = field(default_factory=dict)  # Facecam layout: {"clips": main clip ids it was laid out over}
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -535,6 +538,7 @@ class Project:
             "overlays": [x.to_dict() for x in self.overlays],
             "overlay_tracks": self.settings.overlay_tracks,
             "multicam": copy.deepcopy(self.settings.multicam),   # its layout follows the angles' clips
+            "facecam": copy.deepcopy(self.settings.facecam),
             "bins": list(self.settings.bins),
             "footage": {fid: {"log_profile": f.log_profile, "tonemap": f.tonemap, "bin": f.bin,
                               "transcript": copy.deepcopy(f.transcript)}
@@ -550,6 +554,8 @@ class Project:
         self.settings.overlay_tracks = snap.get("overlay_tracks", self.settings.overlay_tracks)
         if "multicam" in snap:
             self.settings.multicam = copy.deepcopy(snap["multicam"])
+        if "facecam" in snap:
+            self.settings.facecam = copy.deepcopy(snap["facecam"])
         if "bins" in snap:
             self.settings.bins = list(snap["bins"])
         for fid, d in snap["footage"].items():

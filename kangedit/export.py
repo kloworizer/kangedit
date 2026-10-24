@@ -366,7 +366,7 @@ def _overlays(project: Project, use_proxies: bool, fps: float, inputs: list[str]
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,lut3d=file={lut}:interp=tetrahedral,"
             elif not f.is_image:
                 chain += f"scale=in_color_matrix={matrix}:in_range=auto,format=rgba64le,"
-            pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y)
+            pl = reframe.overlay_place(fw, fh, tw, th, c.scale, c.box_w, c.box_h, c.pan_x, c.pan_y, c.zoom)
             mv = motion.of_clip(c, f, pl.crop_w / max(1, pl.crop_h))
             if mv is not None:           # a dynamic zoom / stabilization inside its picture, by command
                 ss = 2 if pl.crop_w * 2 <= 4096 else 1
