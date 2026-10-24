@@ -39,6 +39,7 @@ from ..captions import (Caption, build_captions, cached_transcript, delete_capti
                         load_model, model_note, project_layout, resolve_model, transcribe, transcribed_with,
                         write_srt)
 from ..color import Grade, auto_correct, lut_profile, missing_lut, profile_label
+from .. import decoder as decoderlib
 from ..decoder import DecoderPool, FrameDecoder
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, VIDEO_EXTENSIONS, cache_dir, cache_root,
                       frame_size,
@@ -356,6 +357,22 @@ class MainWindow(QMainWindow):
         self.a_gpu_analysis.setChecked(self.qs.value("gpu_analysis", True, type=bool))
         self.a_gpu_analysis.toggled.connect(lambda v: self.qs.setValue("gpu_analysis", v))
         m.addAction(self.a_gpu_analysis)
+        sub = m.addMenu("GPU video decoding for the preview")
+        sub.setToolTipsVisible(True)
+        group = QActionGroup(self)
+        self.a_gpu_preview: dict[str, QAction] = {}
+        for key, label, tip in (
+                ("auto", "Auto", "4K, 10-bit HEVC and other big footage without a proxy decodes on the graphics "
+                                 "card, so it plays smoothly without proxies; smaller footage stays on the CPU"),
+                ("off", "Off", "Always decode the preview on the CPU")):
+            a = QAction(label, self, checkable=True)
+            a.setToolTip(tip)
+            a.triggered.connect(lambda _=False, k=key: self._set_gpu_preview(k))
+            group.addAction(a)
+            sub.addAction(a)
+            self.a_gpu_preview[key] = a
+        decoderlib.set_gpu_mode(self.qs.value("gpu_preview", "auto", type=str))
+        self.a_gpu_preview[decoderlib.gpu_mode()].setChecked(True)
         self.a_smart = QAction("Smarter analysis (AI: what shots show, what is heard)", self, checkable=True)
         self.a_smart.setToolTip("Two small neural networks describe what each shot shows (repeated views are found "
                                 "across files) and what is heard (speech, laughter, cheering, music, wind…), "
@@ -1403,6 +1420,12 @@ class MainWindow(QMainWindow):
     def _on_refine_status(self, msg: str):
         if not self.tasks.busy:
             self.lbl_status.setText(msg)
+
+    def _set_gpu_preview(self, mode: str):
+        self.qs.setValue("gpu_preview", mode)
+        decoderlib.set_gpu_mode(mode)
+        self.viewer.drop_decoders()   # reopen the footage on the CPU or the card
+        self.viewer.refresh()
 
     def _set_smart(self, on: bool):
         self.qs.setValue("smart_analysis", on)

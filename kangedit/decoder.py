@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import threading
 from typing import Callable, Optional
 
@@ -14,6 +16,83 @@ from .models import Footage
 
 
 _local = threading.local()
+log = logging.getLogger("kangedit.decoder")
+
+try:   # PyAV 13+: decoding on the graphics card
+    from av.codec.hwaccel import HWAccel, hwdevices_available
+except Exception:  # noqa: BLE001 — older PyAV: the preview decodes on the CPU only
+    HWAccel = None
+    hwdevices_available = None
+
+# Graphics-card decoders to try, best first. cuda (NVIDIA) works on Windows and Linux alike.
+_HW_CANDIDATES = {
+    "win32": ["cuda", "d3d11va", "dxva2"],
+    "darwin": ["videotoolbox"],
+    "linux": ["cuda", "vaapi"],
+}
+
+GPU_MODES = ("auto", "off")
+_gpu_mode = "auto"
+_hw_lock = threading.Lock()
+_hw_failed: set[tuple[str, str]] = set()   # (codec, device) that failed this session: not tried again
+_hw_logged: set[tuple[str, str]] = set()
+
+
+def hwaccel_supported() -> bool:
+    """Whether this PyAV can decode on the graphics card at all."""
+    return HWAccel is not None
+
+
+def set_gpu_mode(mode: str) -> None:
+    """The app option "GPU video decoding for the preview": "auto" or "off"."""
+    global _gpu_mode
+    _gpu_mode = mode if mode in GPU_MODES else "auto"
+
+
+def gpu_mode() -> str:
+    return _gpu_mode
+
+
+def hw_devices() -> list[str]:
+    """This platform's graphics-card decoders that this PyAV / FFmpeg build knows, best first."""
+    if not hwaccel_supported():
+        return []
+    plat = "linux" if sys.platform.startswith("linux") else sys.platform
+    try:
+        built = set(hwdevices_available())
+    except Exception:  # noqa: BLE001
+        return []
+    return [d for d in _HW_CANDIDATES.get(plat, []) if d in built]
+
+
+def wants_gpu(footage: Footage, using_proxy: bool) -> bool:
+    """The Auto rule: big or heavy footage decodes on the graphics card; small footage stays on the CPU,
+    where copying each frame back from the card would cost more than it saves. A proxy in use is small
+    by design, so it never needs the card."""
+    if _gpu_mode == "off" or using_proxy or footage.is_image:
+        return False
+    short = min(footage.width or 0, footage.height or 0)
+    codec = (footage.codec or "").lower()
+    if short >= 2160:                                           # 4K and up
+        return True
+    if short >= 1080 and footage.bit_depth >= 10 and codec in ("hevc", "h265", "av1"):
+        return True                                             # 10-bit HEVC / AV1: slow in software
+    return short > 1080 and not footage.has_proxy()             # 1440p etc. with nothing smaller to use
+
+
+def _hw_failure(codec: str, device: str, err: Exception) -> None:
+    """Remember a graphics-card decoder that didn't work, logging it once."""
+    with _hw_lock:
+        _hw_failed.add((codec, device))
+        if (codec, device) in _hw_logged:
+            return
+        _hw_logged.add((codec, device))
+    log.info("GPU decoding (%s) unavailable for %s, using the CPU: %s", device, codec or "this video", err)
+
+
+def _hw_ok(codec: str, device: str) -> bool:
+    with _hw_lock:
+        return (codec, device) not in _hw_failed
 
 
 def _reformatter() -> VideoReformatter:
@@ -39,12 +118,14 @@ def _colorspace(cs: str, height: int) -> str:
 class FrameDecoder:
     """Sequential-friendly decoder: reads forward when possible, seeks otherwise."""
 
-    def __init__(self, path: str, rotation: int = 0, color_space: str = "", max_height: int = 720):
+    def __init__(self, path: str, rotation: int = 0, color_space: str = "", max_height: int = 720,
+                 gpu: bool = False):
+        """`gpu` asks for the graphics card's video decoder (when there is one that works); anything that
+        goes wrong with it falls back to the CPU without a word."""
         self.path = path
         self.rotation = rotation % 360
-        self.container = av.open(path)
-        self.stream = self.container.streams.video[0]
-        self.stream.thread_type = "AUTO"
+        self.hw_device: Optional[str] = None     # the graphics-card decoder in use, None = the CPU
+        self._open(gpu)
         self.tb = float(self.stream.time_base) if self.stream.time_base else 1 / 90000
         # Source time is counted from the start of the file (its earliest stream), as FFmpeg's -ss does for the
         # export, the sound and the transcripts: a video stream that starts later (audio priming, edit lists)
@@ -73,9 +154,63 @@ class FrameDecoder:
         # While catching up to a target far ahead (after a keyframe seek), non-reference frames are
         # skipped: nothing depends on them and they're about half the frames of a long GOP. Frame
         # threads keep packets in flight, so full decoding resumes this far before the target.
-        self._skip_margin = ((os.cpu_count() or 4) + 4) * self.frame_dur
+        self._skip_margin = ((1 if self.hw_device else (os.cpu_count() or 4)) + 4) * self.frame_dur
         self._skip_until: Optional[float] = None
         self.lock = threading.Lock()
+
+    def _open(self, gpu: bool):
+        """Open the file, on the graphics card when asked and it works, else on the CPU (frame and slice
+        threads on every core)."""
+        if gpu:
+            codec = ""
+            for device in hw_devices():
+                container = None
+                try:
+                    if not codec:
+                        with av.open(self.path) as probe:
+                            codec = probe.streams.video[0].codec_context.name
+                    if not _hw_ok(codec, device):
+                        continue
+                    container = _open_hw(self.path, device)
+                    stream = container.streams.video[0]
+                    if not stream.codec_context.is_hwaccel:
+                        raise RuntimeError("no hardware decoder for this codec")
+                    container.seek(0, stream=stream)   # one frame proves the card decodes it
+                    next(container.decode(stream))
+                    container.seek(0, stream=stream)
+                except Exception as e:  # noqa: BLE001 — any failure: try the next one, then the CPU
+                    if container is not None:
+                        try:
+                            container.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    _hw_failure(codec, device, e)
+                    continue
+                self.container, self.stream, self.hw_device = container, stream, device
+                return
+        self.container = av.open(self.path)
+        self.stream = self.container.streams.video[0]
+        self.stream.thread_type = "AUTO"
+        self.hw_device = None
+
+    @property
+    def decoding_on(self) -> str:
+        """"GPU (d3d11va)" or "CPU": where this file is decoded, for the viewer's note."""
+        return f"GPU ({self.hw_device})" if self.hw_device else "CPU"
+
+    def _to_software(self, err: Exception):
+        """The graphics card failed mid-stream: carry on on the CPU, positioned to seek again."""
+        _hw_failure(self.stream.codec_context.name, self.hw_device or "", err)
+        try:
+            self.container.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._open(False)
+        self._iter = None
+        self._pos_t = None
+        self._next_frame = None
+        self._skip_until = None
+        self._skip_margin = ((os.cpu_count() or 4) + 4) * self.frame_dur
 
     def close(self):
         self._closing = True   # makes a decode running in another thread bail out quickly
@@ -150,59 +285,80 @@ class FrameDecoder:
         Only decodes: convert with to_rgb, possibly on another thread, while this decoder moves on.
         """
         with self.lock:
-            if self._closing:
-                return None, False
-            if self._last_t is not None and abs(t - self._last_t) < self.frame_dur * 0.5 and self._last_frame is not None:
-                return self._last_frame, True
-            forward_ok = (self._iter is not None and self._pos_t is not None
-                          and self._pos_t - self.frame_dur * 0.5 <= t <= self._pos_t + 2.0)
-            if not forward_ok:
-                self._seek(t)
-            elif t - self._pos_t > 2 * self._skip_margin:
-                self._skip_nonref(t - self._skip_margin)
-            best = None
-            interrupted = False
+            if self.hw_device is None:
+                return self._raw_at(t, interrupt)
             try:
-                while True:
-                    frame = self._next_frame if self._next_frame is not None else next(self._iter)
-                    self._next_frame = None
-                    ft = (frame.time if frame.time is not None else 0.0) - self.start
-                    if self._skip_until is not None and ft >= self._skip_until:
-                        self._skip_nonref(None)
-                    if ft + self.frame_dur * 0.5 < t:
-                        best = frame
-                        if self._closing:
-                            return None, False
-                        if interrupt is not None and interrupt():
-                            interrupted = True
-                            break
-                        continue
-                    if ft > t + self.frame_dur * 0.5 and best is not None:
-                        self._next_frame = frame
-                        break
+                return self._raw_at(t, interrupt)
+            except Exception as e:  # noqa: BLE001 — the graphics card gave up: the CPU takes over
+                if self._closing:
+                    return None, False
+                self._to_software(e)
+                return self._raw_at(t, interrupt)
+
+    def _raw_at(self, t: float, interrupt: Optional[Callable[[], bool]]) -> tuple:
+        if self._closing:
+            return None, False
+        if self._last_t is not None and abs(t - self._last_t) < self.frame_dur * 0.5 and self._last_frame is not None:
+            return self._last_frame, True
+        forward_ok = (self._iter is not None and self._pos_t is not None
+                      and self._pos_t - self.frame_dur * 0.5 <= t <= self._pos_t + 2.0)
+        if not forward_ok:
+            self._seek(t)
+        elif t - self._pos_t > 2 * self._skip_margin:
+            self._skip_nonref(t - self._skip_margin)
+        best = None
+        interrupted = False
+        try:
+            while True:
+                frame = self._next_frame if self._next_frame is not None else next(self._iter)
+                self._next_frame = None
+                ft = (frame.time if frame.time is not None else 0.0) - self.start
+                if self._skip_until is not None and ft >= self._skip_until:
+                    self._skip_nonref(None)
+                if ft + self.frame_dur * 0.5 < t:
                     best = frame
+                    if self._closing:
+                        return None, False
+                    if interrupt is not None and interrupt():
+                        interrupted = True
+                        break
+                    continue
+                if ft > t + self.frame_dur * 0.5 and best is not None:
+                    self._next_frame = frame
                     break
-            except StopIteration:
-                self._iter = None
-            except av.error.FFmpegError:
-                self._iter = None
-            if self._skip_until is not None and (self._iter is None or interrupted):
-                self._skip_nonref(None)
-            if best is None:
-                return self._last_frame, False
-            bt = (best.time or 0.0) - self.start
-            self._pos_t = bt
-            self._last_t = bt if interrupted or abs(bt - t) < 1.0 else t
-            self._last_frame = best
-            return best, not interrupted
+                best = frame
+                break
+        except StopIteration:
+            self._iter = None
+        except av.error.FFmpegError:
+            if self.hw_device:
+                raise          # the graphics card failed: raw_at hands over to the CPU
+            self._iter = None
+        if self._skip_until is not None and (self._iter is None or interrupted):
+            self._skip_nonref(None)
+        if best is None:
+            return self._last_frame, False
+        bt = (best.time or 0.0) - self.start
+        self._pos_t = bt
+        self._last_t = bt if interrupted or abs(bt - t) < 1.0 else t
+        self._last_frame = best
+        return best, not interrupted
+
+
+def _open_hw(path: str, device: str):
+    """av.open on a graphics-card decoder; frames are copied back to system memory (is_hw_owned off)."""
+    return av.open(path, hwaccel=HWAccel(device, allow_software_fallback=True))
 
 
 class DecoderPool:
-    """Keeps one open decoder per media file (proxy or original). Safe to use from several threads."""
+    """Keeps one open decoder per media file (proxy or original). Safe to use from several threads.
 
-    def __init__(self, limit: int = 24):
+    `gpu` lets big footage decode on the graphics card (the preview's pool; see wants_gpu)."""
+
+    def __init__(self, limit: int = 24, gpu: bool = False):
         self._pool: dict[str, FrameDecoder] = {}
         self._limit = limit
+        self._gpu = gpu
         self._lock = threading.Lock()
 
     def get(self, footage: Footage, use_proxy: bool, max_height: int = 720, slot: int = 0):
@@ -221,7 +377,8 @@ class DecoderPool:
             return dec
         proxy = use_proxy and footage.has_proxy()
         path = footage.proxy_path if proxy else footage.path
-        key = f"{path}|{max_height}|{slot}"
+        gpu = self._gpu and wants_gpu(footage, proxy)
+        key = f"{path}|{max_height}|{slot}" + ("|gpu" if gpu else "")
         evicted = None
         with self._lock:
             dec = self._pool.get(key)
@@ -229,7 +386,7 @@ class DecoderPool:
                 if len(self._pool) >= self._limit:
                     evicted = self._pool.pop(next(iter(self._pool)))
                 dec = FrameDecoder(path, 0 if proxy else footage.rotation,
-                                   "bt709" if proxy else footage.color_space, max_height)
+                                   "bt709" if proxy else footage.color_space, max_height, gpu)
                 self._pool[key] = dec
             else:
                 self._pool[key] = self._pool.pop(key)  # LRU bump

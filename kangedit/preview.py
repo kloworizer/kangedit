@@ -137,7 +137,7 @@ class _Pending:
 
 class PreviewEngine:
     def __init__(self, on_still: Callable[[Rendered], None]):
-        self.decoders = DecoderPool()
+        self.decoders = DecoderPool(gpu=True)   # big footage may decode on the graphics card
         self.luts = LutCache()
         self._on_still = on_still
         self._cv = threading.Condition()
