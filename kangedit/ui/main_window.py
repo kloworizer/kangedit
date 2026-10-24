@@ -4316,24 +4316,75 @@ class MainWindow(QMainWindow):
         dlg = ExportDialog(self.project, bool(self.captions), self, self.qs.value("gpu_export", True, type=bool))
         if dlg.exec() != ExportDialog.Accepted:
             return
-        es = dlg.settings()
+        batch = dlg.all_settings()
+        es = batch[0]
         self.qs.setValue("gpu_export", es.use_gpu)
+        overlay = dlg.platform_overlay()
+        if overlay is not None:
+            self._set_platform_overlay(overlay)
         if not self.health_check(es):
             return
+        for extra in batch[1:]:      # a fix from the health check (original footage) goes for all of them
+            extra.use_proxies = es.use_proxies
         proj = self._clone_project()
+        if len(batch) == 1:
+            def done(path):
+                self._exported = True
+                self._update_flow()
+                if self.tray:
+                    self.tray.notify("Export finished", os.path.basename(path), lambda: open_path(path))
+                r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
+                                            QMessageBox.Open | QMessageBox.Ok)
+                if r == QMessageBox.Open:
+                    open_path(path)
 
-        def done(path):
-            self._exported = True
-            self._update_flow()
+            self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
+                              lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
+            return
+        self._export_batch(proj, batch)
+
+    def _export_batch(self, proj: Project, batch: list):
+        """Queue the exports one after another; one summary once all have finished. A failed one doesn't stop
+        the others; cancelling stops the rest (the task queue drops them)."""
+        results: list[tuple[str, str]] = []      # (file, "" when made, else why not)
+        state = {"over": False}
+
+        def summary(cancelled: bool = False):
+            if state["over"]:
+                return
+            state["over"] = True
+            made = [f for f, err in results if not err]
+            if made:
+                self._exported = True
+                self._update_flow()
+            lines = [f"✓ {f}" if not err else f"✗ {os.path.basename(f)}: {err.strip().splitlines()[-1][:200]}"
+                     for f, err in results if err != "cancelled"]
+            if cancelled:
+                lines.append(f"Cancelled: {len(batch) - len(made)} file(s) not made.")
+            head = f"Exported {len(made)} of {len(batch)} files:"
             if self.tray:
-                self.tray.notify("Export finished", os.path.basename(path), lambda: open_path(path))
-            r = QMessageBox.information(self, APP_NAME, f"Export finished:\n{path}",
-                                        QMessageBox.Open | QMessageBox.Ok)
-            if r == QMessageBox.Open:
-                open_path(path)
+                self.tray.notify("Export finished", head, lambda: open_path(os.path.dirname(batch[0].output)))
+            box = QMessageBox.warning if len(made) < len(batch) and not cancelled else QMessageBox.information
+            r = box(self, APP_NAME, head + "\n\n" + "\n".join(lines), QMessageBox.Open | QMessageBox.Ok)
+            if r == QMessageBox.Open and made:
+                open_path(os.path.dirname(os.path.abspath(made[0])))
 
-        self.tasks.submit(f"Exporting {os.path.basename(es.output)}",
-                          lambda p, c: export(proj, es, p, c), done, self._task_error("Export"))
+        def report(es, err: str = ""):
+            results.append((es.output, err))
+            if err == "cancelled":
+                summary(cancelled=True)
+            elif len(results) == len(batch):
+                summary()
+
+        for n, es in enumerate(batch):
+            of = f"({n + 1} of {len(batch)})"
+
+            def job(p, c, es=es, of=of):      # the progress text keeps saying which file of the batch it is
+                return export(proj, es, lambda f, m="": p(f, f"{m} {of}" if m else ""), c)
+
+            self.tasks.submit(f"Exporting {os.path.basename(es.output)} {of}", job,
+                              lambda _path, es=es: report(es),
+                              lambda msg, es=es: report(es, msg or "cancelled"))
 
     def health_check(self, es) -> bool:
         """Check the project before exporting with settings `es`: when there are issues, show them with their
