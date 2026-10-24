@@ -372,6 +372,10 @@ class TextClip:
         return TextClip(**{k: v for k, v in d.items() if k in TextClip.__dataclass_fields__})
 
 
+# Speaker colours, in the order of the broadcast subtitle convention: white, cyan, yellow, green.
+SPEAKER_COLORS = ("#FFFFFF", "#5CE1FF", "#FFE14D", "#7CFC8A")
+
+
 @dataclass
 class CaptionStyle:
     enabled: bool = True
@@ -388,6 +392,10 @@ class CaptionStyle:
     animation: str = "none"        # see captions.ANIMATIONS
     highlight: str = "#FFD400"     # active-word color for the animations
     auto_layout: bool = True       # size / position / line length chosen from the frame ratio and format
+    # Speakers (captions.detect_speakers): "off" | "auto" | "2" | "3" | "4". Off: every caption in `color`;
+    # else a caption whose words carry a speaker ("p" in the transcript) is drawn in that speaker's colour.
+    speakers: str = "off"
+    speaker_colors: list = field(default_factory=lambda: list(SPEAKER_COLORS))
 
 
 @dataclass
@@ -544,6 +552,8 @@ class Project:
                               "transcript": copy.deepcopy(f.transcript)}
                         for fid, f in self.footage.items()},
             "voices": {fid: copy.deepcopy(f.transcript) for fid, f in self.voices.items()},
+            # the caption look (templates, speakers), not whether captions are shown
+            "captions": {k: copy.deepcopy(v) for k, v in asdict(self.settings.captions).items() if k != "enabled"},
         }
 
     def _restore(self, snap: dict) -> None:
@@ -568,6 +578,9 @@ class Project:
         for fid, words in snap.get("voices", {}).items():
             if fid in self.voices:
                 self.voices[fid].transcript = words
+        for k, v in snap.get("captions", {}).items():
+            if k in CaptionStyle.__dataclass_fields__:
+                setattr(self.settings.captions, k, copy.deepcopy(v))
 
     def set_detected_profile(self, footage_id: str, profile: str, note: str) -> None:
         """Apply an automatically detected log profile.

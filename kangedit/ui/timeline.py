@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QFrame, QWi
 
 from .. import images, sfx
 from ..analysis import WAVE_RATE, Analysis
-from ..captions import Caption, shift_group
+from ..captions import Caption, caption_color, shift_group
 from ..edits import TRANSITIONS, edits
 from ..models import OverlayClip, Project, SoundClip
 from ..speed import RAMPS, SOUND_MODES, SPEED_PRESETS, sound_mode
@@ -406,6 +406,9 @@ class TimelineView(QWidget):
             p.setPen(QPen(QColor("#ffd34d"), 1) if i in moving else Qt.NoPen)
             p.setBrush(QColor("#5b4a8a"))
             p.drawRoundedRect(r, 3, 3)
+            col = caption_color(self.project.settings.captions, cap) if cap.speaker >= 0 else ""
+            if col and self.project.settings.captions.speakers != "off":
+                p.fillRect(QRectF(r.left(), r.top(), min(4.0, r.width()), r.height()), QColor(col))  # who speaks
             if r.width() > 24:
                 p.setPen(QColor("#ece8f7"))
                 f = QFont()
@@ -1207,6 +1210,16 @@ class TimelineView(QWidget):
             for dt in (-0.5, -0.1, 0.1, 0.5):
                 a = sub.addAction(f"{abs(dt):g} s {'earlier' if dt < 0 else 'later'}")
                 a.triggered.connect(lambda _=False, dt=dt: self.captions_shifted.emit(index, dt))
+            self._menu_action(m, "Auto-sync this clip's captions to its speech", "caption_sync", str(index))
+            sub = m.addMenu("Speaker")
+            current = self.captions[index].speaker if index < len(self.captions) else -1
+            for k in range(4):
+                a = self._menu_action(sub, f"Speaker {k + 1}", "caption_speaker", f"{index}:{k}")
+                a.setCheckable(True)
+                a.setChecked(current == k)
+            a = self._menu_action(sub, "None", "caption_speaker", f"{index}:-1")
+            a.setCheckable(True)
+            a.setChecked(current < 0)
             self._menu_action(m, "Delete caption", "caption_delete", str(index))
             m.addSeparator()
         if self.captions:

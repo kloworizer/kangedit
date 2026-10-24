@@ -11,10 +11,12 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu,
                                QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from .. import caption_templates
 from .. import lut as lutlib
 from ..autoedit import (FORMAT_PRESETS, MAX_HOOK_CLIPS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
                         suggest_duration)
@@ -25,7 +27,7 @@ from ..export import (BATCH_ASPECTS, CAPTION_MODES, CODECS, CUSTOM, LOUDNESS_TAR
                       ExportSettings, apply_preset, aspect_suffix, batch_settings)
 from .platform_overlay import PLATFORM_OVERLAYS
 from ..fonts import ensure_qt_font, font_files, system_fonts
-from ..models import Project
+from ..models import CaptionStyle, Project
 from .. import multicam
 from ..polish import PACING
 
@@ -860,6 +862,23 @@ class CaptionStyleDialog(QDialog):
             b.clicked.connect(lambda _=False, c=cfg: self._preset(c))
             presets.addWidget(b)
             presets_buttons.append(b)
+        # Templates: one-click looks, built in or saved by the user (in every project)
+        self.cb_template = QComboBox()
+        self.cb_template.setToolTip("A ready-made caption look: it fills in the settings below (OK applies it).\n"
+                                    "Save current style as… keeps your own look for every project.")
+        self.cb_template.activated.connect(self._template_chosen)
+        self.b_tpl_save = QPushButton("Save current style as…")
+        self.b_tpl_save.clicked.connect(self._save_template)
+        self.b_tpl_delete = QPushButton("Delete")
+        self.b_tpl_delete.setToolTip("Delete the chosen template you saved (the built-in ones stay)")
+        self.b_tpl_delete.clicked.connect(self._delete_template)
+        self.cb_template.currentIndexChanged.connect(self._sync_template_buttons)
+        tpl_row = QHBoxLayout()
+        tpl_row.addWidget(self.cb_template, 1)
+        tpl_row.addWidget(self.b_tpl_save)
+        tpl_row.addWidget(self.b_tpl_delete)
+        self._fill_templates()
+        f.addRow("Template", tpl_row)
         f.addRow("Animation", self.cb_anim)
         f.addRow("Highlight color", self.b_highlight)
         f.addRow(self.chk_auto)
@@ -916,6 +935,69 @@ class CaptionStyleDialog(QDialog):
         for b, col in ((self.b_color, self.color), (self.b_highlight, self.highlight)):
             b.setText(col)
             b.setStyleSheet(f"background: {col}; color: black;")
+
+    def _fill_templates(self, select: str = ""):
+        cb = self.cb_template
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("Choose a look…", "")
+        for name in caption_templates.all_templates():
+            cb.addItem(name if caption_templates.is_builtin(name) else f"{name} (saved)", name)
+        cb.setCurrentIndex(max(0, cb.findData(select)))
+        cb.blockSignals(False)
+        self._sync_template_buttons()
+
+    def _sync_template_buttons(self):
+        name = self.cb_template.currentData() or ""
+        self.b_tpl_delete.setEnabled(bool(name) and not caption_templates.is_builtin(name))
+
+    def _template_chosen(self, _i: int = 0):
+        values = caption_templates.all_templates().get(self.cb_template.currentData() or "")
+        if values:
+            self.set_style_fields(values)
+
+    def set_style_fields(self, values: dict):
+        """Show a template's look in the controls (applied with OK)."""
+        st = CaptionStyle(**self.style_fields())
+        caption_templates.apply_template(st, values)
+        select_font(self.cb_font, st.font)
+        self.sp_size.setValue(st.size_pct)
+        self.cb_pos.setCurrentIndex(max(0, self.cb_pos.findData(st.position)))
+        self.sp_chars.setValue(st.max_chars)
+        self.sp_lines.setValue(st.max_lines)
+        self.sp_dur.setValue(st.max_duration)
+        self.chk_upper.setChecked(st.uppercase)
+        self.chk_outline.setChecked(st.outline)
+        self.chk_box.setChecked(st.box)
+        self.color, self.highlight = st.color, st.highlight
+        self._paint_color()
+        self.cb_anim.setCurrentIndex(max(0, self.cb_anim.findData(st.animation)))
+        self.chk_auto.setChecked(st.auto_layout)
+
+    def style_fields(self) -> dict:
+        """The look set in the controls, as template fields."""
+        return dict(font=self.cb_font.currentText(), size_pct=self.sp_size.value(),
+                    position=self.cb_pos.currentData(), max_chars=self.sp_chars.value(),
+                    max_lines=self.sp_lines.value(), max_duration=self.sp_dur.value(),
+                    uppercase=self.chk_upper.isChecked(), outline=self.chk_outline.isChecked(),
+                    box=self.chk_box.isChecked(), color=self.color, highlight=self.highlight,
+                    animation=self.cb_anim.currentData(), auto_layout=self.chk_auto.isChecked())
+
+    def _save_template(self):
+        name, ok = QInputDialog.getText(self, "Save caption template", "Name for this look:")
+        if not ok or not name.strip():
+            return
+        try:
+            name = caption_templates.save_user_template(name, CaptionStyle(**self.style_fields()))
+        except ValueError as e:
+            QMessageBox.warning(self, "Save caption template", str(e))
+            return
+        self._fill_templates(name)
+
+    def _delete_template(self):
+        name = self.cb_template.currentData() or ""
+        if name and caption_templates.delete_user_template(name):
+            self._fill_templates()
 
     def apply(self):
         s = self.project.settings
