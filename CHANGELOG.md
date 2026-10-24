@@ -6,6 +6,8 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-24
+
 ### Added
 - **Move captions in time**: drag a caption left or right on the timeline's caption lane (or right-click it →
   *Move this and the clip's later captions*, 0.1 or 0.5 s): it and the clip's later captions move together,
