@@ -310,7 +310,9 @@ class TimelineView(QWidget):
     def set_playhead(self, t: float, follow: bool = False):
         old_x, old_scroll = self.t_to_x(self.playhead), self.scroll_x
         self.playhead = t
-        if follow:
+        x = self.t_to_x(t)
+        # (a jump out of view: the start, the end, the next clip... from the viewer's buttons or keys)
+        if follow or x < 0 or x > self.width():
             self.ensure_visible(t)
         if self.scroll_x != old_scroll:
             self.update()
@@ -407,11 +409,35 @@ class TimelineView(QWidget):
                            p.fontMetrics().elidedText(cap.text, Qt.ElideRight, int(r.width() - 7)))
 
         d = self._drag
+        if d and d.get("kind") in ("trim_l", "trim_r") and d.get("active") and "dur0" in d:
+            self._paint_trim_length(p, d)
         if d and d.get("kind") == "move" and d.get("active") and d.get("drop") is not None:
             starts = self.project.clip_starts() + [self.project.duration]
             x = self.t_to_x(starts[d["drop"]])
             p.setPen(QPen(QColor("#ffd34d"), 3))
             p.drawLine(QPointF(x, self.track_y - 4), QPointF(x, self.track_y + self.track_h + 4))
+
+    def _paint_trim_length(self, p: QPainter, d: dict):
+        """While a clip is trimmed: its new length and the change, at the edge being dragged."""
+        rect = next((r for c, r, _t in self._clip_rects() if c.id == d["clip"]), None)
+        c = next((c for c in self.project.clips if c.id == d["clip"]), None)
+        if rect is None or c is None:
+            return
+        diff = c.duration - d["dur0"]
+        text = f"{c.duration:.2f} s" + (f"  {diff:+.2f}" if abs(diff) >= 0.005 else "")
+        f = p.font()
+        f.setBold(True)
+        p.setFont(f)
+        w = p.fontMetrics().horizontalAdvance(text) + 12
+        h = p.fontMetrics().height() + 4
+        x = rect.left() + 4 if d["kind"] == "trim_l" else rect.right() - w - 4
+        x = min(max(2.0, x), self.width() - w - 2.0)
+        box = QRectF(x, self.track_y + 4, w, h)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 190))
+        p.drawRoundedRect(box, 4, 4)
+        p.setPen(QColor("#ffd34d"))
+        p.drawText(box, Qt.AlignCenter, text)
 
     def _paint_fades(self, p: QPainter):
         """Fade in / out at the ends of the timeline: a shaded ramp over the picture and / or the sound."""
@@ -1420,7 +1446,7 @@ class TimelineView(QWidget):
         tm = c.timemap()
         self._drag = {"kind": kind, "clip": c.id, "x0": pos.x(), "in0": c.src_in, "out0": c.src_out,
                       "active": False, "drop": None, "mods": mods, "v_in": tm.v_in, "v_out": tm.v_out,
-                      "v": tm.speed}
+                      "v": tm.speed, "dur0": c.duration}
         self.update()
 
     def mouseMoveEvent(self, e):

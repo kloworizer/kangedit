@@ -550,12 +550,19 @@ class Viewer(QWidget):
             self.player.setPosition(int((self._play_t0 + time.perf_counter() - self._play_clock) * 1000))
             self.player.play()
 
-    def invalidate_audio(self):
+    def invalidate_audio(self, keep_old: bool = False):
+        """The preview mix no longer matches the edit (a new one is being made, see set_audio). keep_old: it
+        still plays meanwhile (a volume or fade change: only louder or quieter); else it goes quiet, as after a
+        trim, slip or move its sound is from other moments than the picture and the captions."""
         if self.mode == "source" and self._timeline is not None:
             proj, t, path, _ = self._timeline
             self._timeline = (proj, t, path, False)
             return
         self.audio_valid = False
+        if not keep_old and not self.player.source().isEmpty():
+            self.player.pause()
+            self.player.setSource(QUrl())
+            self._audio_resume = False
 
     def set_audio_pending(self, on: bool):
         """Show (or hide) that the preview sound is being mixed again (the timeline's: not in Source mode)."""

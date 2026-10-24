@@ -2838,6 +2838,8 @@ class MainWindow(QMainWindow):
         """In Slip mode (or while a clip is slipped), the transcript of the selected clip's footage, under the
         timeline's buttons."""
         panel = self.timeline.slip_text
+        if not slipping:
+            panel.show_length(None)                   # (a trim ended)
         show = slipping or self.timeline.btn_slip.isChecked()
         panel.setVisible(show)
         if not show:
@@ -2862,6 +2864,9 @@ class MainWindow(QMainWindow):
             self._update_slip_text(slipping=True)
         c = self.project.clips[i]
         self.timeline.slip_text.follow(clip_id, c.src_in, c.src_out)
+        d = self.tl._drag or {}
+        trimming = d.get("clip") == clip_id and d.get("kind") in ("trim_l", "trim_r")
+        self.timeline.slip_text.show_length(c.duration if trimming else None, d.get("dur0"))
 
     def slip_clip_to(self, clip_id: str, src_in: float):
         """Slip a clip to start at source time src_in (a sentence of its transcript), keeping its length."""
@@ -3109,12 +3114,12 @@ class MainWindow(QMainWindow):
     def _selected_sound_volume(self, volume: float):
         if self.tl.selected_sound:
             self._sound_action(f"sound_volume:{volume}", self.tl.selected_sound)
-            self._schedule_audio(150)   # re-mix quickly so a volume drag is heard live
+            self._schedule_audio(150, keep_old=True)   # re-mix quickly so a volume drag is heard live
 
-    def _sounds_changed(self):
+    def _sounds_changed(self, keep_old: bool = False):
         self._sync_sound_panel()
         self.project.dirty = True
-        self._schedule_audio()
+        self._schedule_audio(keep_old=keep_old)
         self._update_title()
 
     def _sound_action(self, action: str, sound_id: str):
@@ -3157,12 +3162,12 @@ class MainWindow(QMainWindow):
                 self.lbl_status.setText(f"“{x.name or os.path.basename(x.path)}” is turned down "
                                         f"{self.project.settings.duck_db:g} dB while the clips have sound")
         self.tl.refresh()
-        self._sounds_changed()
+        self._sounds_changed(keep_old=key in ("sound_volume", "sound_fade_in", "sound_fade_out", "sound_duck"))
 
     def _duck_depth(self, db: float):
         self.project_checkpoint("duck_depth")
         self.project.settings.duck_db = float(db)
-        self._schedule_audio(300)
+        self._schedule_audio(300, keep_old=True)
         self._update_title()
 
     def _fit_sound(self, x: SoundClip):
@@ -4396,8 +4401,10 @@ class MainWindow(QMainWindow):
         return p
 
     # ================================================================== preview audio
-    def _schedule_audio(self, delay: int = 700):
-        self.viewer.invalidate_audio()
+    def _schedule_audio(self, delay: int = 700, keep_old: bool = False):
+        """Mix the preview sound again (after `delay` ms of no more changes). keep_old: the previous mix plays
+        meanwhile (volume, fades: still in time); else it is silenced (a trim or slip moved what is heard)."""
+        self.viewer.invalidate_audio(keep_old)
         self.viewer.set_audio_pending(bool(self.project.clips))
         self._audio_timer.start(delay)
 
