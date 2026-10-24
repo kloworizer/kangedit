@@ -11,19 +11,23 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMenu,
                                QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox,
                                QVBoxLayout, QWidget)
 
+from .. import caption_templates
 from .. import lut as lutlib
 from ..autoedit import (FORMAT_PRESETS, MAX_HOOK_CLIPS, ORDERS, STYLE_LABELS, TRANSITION_MODES, TRANSITION_STYLES, AutoEditSettings,
                         suggest_duration)
 from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS, merged_transcript
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
-                      fmt_bytes, folder_size, frame_size, open_path)
-from ..export import CAPTION_MODES, CODECS, QUALITIES, ExportSettings
+                      fmt_bytes, folder_size, frame_size, open_path, settings as app_settings)
+from ..export import (BATCH_ASPECTS, CAPTION_MODES, CODECS, CUSTOM, LOUDNESS_TARGETS, PRESETS, QUALITIES,
+                      ExportSettings, apply_preset, aspect_suffix, batch_settings)
+from .platform_overlay import PLATFORM_OVERLAYS
 from ..fonts import ensure_qt_font, font_files, system_fonts
-from ..models import Project
+from ..models import CaptionStyle, Project
 from .. import multicam
 from ..polish import PACING
 
@@ -570,14 +574,30 @@ class AutoEditDialog(QDialog):
 
 
 class ExportDialog(QDialog):
+    """The export's settings. A platform preset fills in the frame, format and loudness (changing any of them by
+    hand makes it Custom); "Also export as" adds the same edit in other aspect ratios, saved next to the main
+    file (all_settings)."""
+
     def __init__(self, project: Project, has_captions: bool, parent=None, use_gpu: bool = True):
         super().__init__(parent)
         self.setWindowTitle("Export video")
         self.setMinimumWidth(500)
         self.project = project
+        self._applying = False         # a preset is filling in the fields: they stay on that preset
         s = project.settings
         lay = QVBoxLayout(self)
         form = QFormLayout()
+
+        self.cb_preset = _combo({**{k: p.label for k, p in PRESETS.items()}, CUSTOM: "Custom"}, CUSTOM)
+        self.cb_preset.setToolTip("Sets the frame, format and loudness each platform recommends.\n"
+                                  "Change any of them by hand and the preset becomes Custom.")
+        form.addRow("Preset", self.cb_preset)
+        self.chk_overlay = QCheckBox()
+        self.chk_overlay.setChecked(True)
+        self.chk_overlay.setToolTip("Draws where the app's buttons and text cover the video, in the viewer "
+                                    "(a guide only: it is not exported). View > App overlay turns it off.")
+        self.chk_overlay.hide()
+        form.addRow(self.chk_overlay)
 
         self.ed_out = QLineEdit()
         base = os.path.splitext(project.path)[0] if project.path else os.path.join(os.path.expanduser("~"), "Videos", "kangedit_export")
@@ -600,6 +620,12 @@ class ExportDialog(QDialog):
         self.cb_quality = _combo({k: k for k in QUALITIES}, "High")
         self.cb_caps = _combo(CAPTION_MODES, "burn" if has_captions and s.captions.enabled else "none")
         self.cb_caps.setEnabled(has_captions)
+        self.cb_loud = QComboBox()
+        for v, label in LOUDNESS_TARGETS.items():
+            self.cb_loud.addItem(label, "" if v is None else v)
+        self.cb_loud.setToolTip("Brings the whole mix to one loudness, its peaks kept under -1.5 dB.\n"
+                                "YouTube, TikTok and Instagram turn louder videos down to about -14 LUFS:\n"
+                                "exporting at that level keeps your sound as loud as theirs, never squashed.")
         self.chk_proxy = QCheckBox("Draft export from proxies (fast, lower quality)")
         self.chk_gpu = QCheckBox("Encode on the graphics card when possible (faster)")
         self.chk_gpu.setToolTip("Uses the GPU's H.264/H.265 encoder (NVIDIA NVENC, AMD AMF or Intel Quick Sync).\n"
@@ -625,21 +651,69 @@ class ExportDialog(QDialog):
         form.addRow("Format", self.cb_codec)
         form.addRow("Quality", self.cb_quality)
         form.addRow("Captions", self.cb_caps)
+        form.addRow("Loudness", self.cb_loud)
         form.addRow(self.chk_proxy)
         form.addRow(self.chk_gpu)
         form.addRow(self.chk_blend)
         lay.addLayout(form)
+
+        g = QGroupBox("Also export as")
+        g.setToolTip("Each ratio is a separate file next to the main one (myvideo_9x16.mp4), the edit re-framed\n"
+                     "for it and its captions placed for that frame. They export one after another.")
+        grid = QGridLayout(g)
+        self.chk_batch: dict[str, QCheckBox] = {}
+        for n, a in enumerate(BATCH_ASPECTS):
+            cb = QCheckBox(f"{a}  (…_{aspect_suffix(a)})")
+            grid.addWidget(cb, n // 2, n % 2)
+            self.chk_batch[a] = cb
+        lay.addWidget(g)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Export")
         bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+        for cb in (self.cb_aspect, self.cb_res, self.cb_fps, self.cb_codec, self.cb_quality, self.cb_loud):
+            cb.currentIndexChanged.connect(self._edited)
+        self.cb_preset.currentIndexChanged.connect(self._preset_changed)
+        last = app_settings().value("export_preset", CUSTOM, type=str)
+        if last in PRESETS:
+            self.cb_preset.setCurrentIndex(self.cb_preset.findData(last))
         self._update()
+
+    def _preset_changed(self):
+        """Fill in the chosen preset's settings, and offer its app's screen layout in the viewer."""
+        key = self.cb_preset.currentData()
+        p = PRESETS.get(key)
+        overlay = p.overlay if p is not None and p.overlay in PLATFORM_OVERLAYS else ""
+        self.chk_overlay.setText(f"Show the {PLATFORM_OVERLAYS[overlay]} safe area in the viewer" if overlay else "")
+        self.chk_overlay.setVisible(bool(overlay))
+        if p is None:
+            return
+        s = apply_preset(self.settings(), key)
+        self._applying = True
+        try:
+            for cb, v in ((self.cb_aspect, s.aspect), (self.cb_res, s.resolution), (self.cb_codec, s.codec),
+                          (self.cb_quality, s.quality), (self.cb_loud, "" if s.loudness is None else s.loudness)):
+                cb.setCurrentIndex(max(0, cb.findData(v)))
+            self.cb_fps.setCurrentIndex(min(range(self.cb_fps.count()),
+                                            key=lambda i: abs(self.cb_fps.itemData(i) - s.fps)))
+        finally:
+            self._applying = False
+
+    def _edited(self):
+        """A field changed by hand: the settings are no longer the preset's."""
+        if not self._applying and self.cb_preset.currentData() != CUSTOM:
+            self.cb_preset.setCurrentIndex(self.cb_preset.findData(CUSTOM))
 
     def _update(self):
         w, h = frame_size(self.cb_aspect.currentData(), self.cb_res.currentData())
         self.lbl_size.setText(f"Output {w} × {h}, duration {self.project.duration:.1f} s")
+        for a, cb in self.chk_batch.items():      # the main file already has its own ratio
+            main = a == self.cb_aspect.currentData()
+            cb.setEnabled(not main)
+            cb.setToolTip("The main export is already in this ratio" if main else "")
 
     def _codec_changed(self):
         ext = CODECS[self.cb_codec.currentData()][1]
@@ -657,7 +731,19 @@ class ExportDialog(QDialog):
         if not self.ed_out.text().strip():
             return
         os.makedirs(os.path.dirname(os.path.abspath(self.ed_out.text())), exist_ok=True)
+        app_settings().setValue("export_preset", self.cb_preset.currentData())
         self.accept()
+
+    def platform_overlay(self) -> Optional[str]:
+        """The app overlay (PLATFORM_OVERLAYS key) to show in the viewer for the chosen preset, or None."""
+        if self.chk_overlay.isHidden() or not self.chk_overlay.isChecked():
+            return None
+        return PRESETS[self.cb_preset.currentData()].overlay
+
+    def all_settings(self) -> list[ExportSettings]:
+        """The main export followed by the "Also export as" ones (see export.batch_settings)."""
+        return batch_settings(self.settings(), [a for a, cb in self.chk_batch.items()
+                                                if cb.isChecked() and cb.isEnabled()])
 
     def settings(self) -> ExportSettings:
         return ExportSettings(
@@ -672,6 +758,7 @@ class ExportDialog(QDialog):
             use_proxies=self.chk_proxy.isChecked(),
             use_gpu=self.chk_gpu.isChecked(),
             blend_slowmo=self.chk_blend.isChecked(),
+            loudness=float(self.cb_loud.currentData()) if self.cb_loud.currentData() != "" else None,
         )
 
 
@@ -775,6 +862,23 @@ class CaptionStyleDialog(QDialog):
             b.clicked.connect(lambda _=False, c=cfg: self._preset(c))
             presets.addWidget(b)
             presets_buttons.append(b)
+        # Templates: one-click looks, built in or saved by the user (in every project)
+        self.cb_template = QComboBox()
+        self.cb_template.setToolTip("A ready-made caption look: it fills in the settings below (OK applies it).\n"
+                                    "Save current style as… keeps your own look for every project.")
+        self.cb_template.activated.connect(self._template_chosen)
+        self.b_tpl_save = QPushButton("Save current style as…")
+        self.b_tpl_save.clicked.connect(self._save_template)
+        self.b_tpl_delete = QPushButton("Delete")
+        self.b_tpl_delete.setToolTip("Delete the chosen template you saved (the built-in ones stay)")
+        self.b_tpl_delete.clicked.connect(self._delete_template)
+        self.cb_template.currentIndexChanged.connect(self._sync_template_buttons)
+        tpl_row = QHBoxLayout()
+        tpl_row.addWidget(self.cb_template, 1)
+        tpl_row.addWidget(self.b_tpl_save)
+        tpl_row.addWidget(self.b_tpl_delete)
+        self._fill_templates()
+        f.addRow("Template", tpl_row)
         f.addRow("Animation", self.cb_anim)
         f.addRow("Highlight color", self.b_highlight)
         f.addRow(self.chk_auto)
@@ -831,6 +935,69 @@ class CaptionStyleDialog(QDialog):
         for b, col in ((self.b_color, self.color), (self.b_highlight, self.highlight)):
             b.setText(col)
             b.setStyleSheet(f"background: {col}; color: black;")
+
+    def _fill_templates(self, select: str = ""):
+        cb = self.cb_template
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("Choose a look…", "")
+        for name in caption_templates.all_templates():
+            cb.addItem(name if caption_templates.is_builtin(name) else f"{name} (saved)", name)
+        cb.setCurrentIndex(max(0, cb.findData(select)))
+        cb.blockSignals(False)
+        self._sync_template_buttons()
+
+    def _sync_template_buttons(self):
+        name = self.cb_template.currentData() or ""
+        self.b_tpl_delete.setEnabled(bool(name) and not caption_templates.is_builtin(name))
+
+    def _template_chosen(self, _i: int = 0):
+        values = caption_templates.all_templates().get(self.cb_template.currentData() or "")
+        if values:
+            self.set_style_fields(values)
+
+    def set_style_fields(self, values: dict):
+        """Show a template's look in the controls (applied with OK)."""
+        st = CaptionStyle(**self.style_fields())
+        caption_templates.apply_template(st, values)
+        select_font(self.cb_font, st.font)
+        self.sp_size.setValue(st.size_pct)
+        self.cb_pos.setCurrentIndex(max(0, self.cb_pos.findData(st.position)))
+        self.sp_chars.setValue(st.max_chars)
+        self.sp_lines.setValue(st.max_lines)
+        self.sp_dur.setValue(st.max_duration)
+        self.chk_upper.setChecked(st.uppercase)
+        self.chk_outline.setChecked(st.outline)
+        self.chk_box.setChecked(st.box)
+        self.color, self.highlight = st.color, st.highlight
+        self._paint_color()
+        self.cb_anim.setCurrentIndex(max(0, self.cb_anim.findData(st.animation)))
+        self.chk_auto.setChecked(st.auto_layout)
+
+    def style_fields(self) -> dict:
+        """The look set in the controls, as template fields."""
+        return dict(font=self.cb_font.currentText(), size_pct=self.sp_size.value(),
+                    position=self.cb_pos.currentData(), max_chars=self.sp_chars.value(),
+                    max_lines=self.sp_lines.value(), max_duration=self.sp_dur.value(),
+                    uppercase=self.chk_upper.isChecked(), outline=self.chk_outline.isChecked(),
+                    box=self.chk_box.isChecked(), color=self.color, highlight=self.highlight,
+                    animation=self.cb_anim.currentData(), auto_layout=self.chk_auto.isChecked())
+
+    def _save_template(self):
+        name, ok = QInputDialog.getText(self, "Save caption template", "Name for this look:")
+        if not ok or not name.strip():
+            return
+        try:
+            name = caption_templates.save_user_template(name, CaptionStyle(**self.style_fields()))
+        except ValueError as e:
+            QMessageBox.warning(self, "Save caption template", str(e))
+            return
+        self._fill_templates(name)
+
+    def _delete_template(self):
+        name = self.cb_template.currentData() or ""
+        if name and caption_templates.delete_user_template(name):
+            self._fill_templates()
 
     def apply(self):
         s = self.project.settings

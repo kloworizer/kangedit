@@ -17,6 +17,8 @@ announcer, the result), so the clips Auto Edit picks start before the moment and
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from . import smart
@@ -97,3 +99,95 @@ def moments(a: Analysis, has_audio: bool = True) -> np.ndarray:
     m = b * (0.65 + 0.35 * many) + 0.3 * b * calm_before
     # spread over the moment: a sample scores for a burst LEAD s after it ... TAIL s before it
     return np.clip(_window(m, TAIL, LEAD), 0.0, 1.0).astype(np.float32)
+
+
+# ----------------------------------------------------------------------------- labelling the plays
+# Tools → Label the gaming plays: a title at each multi-kill of the edit ("DOUBLE KILL", "TRIPLE KILL"...).
+LABEL_PRESET = "game_label"   # TextClip.preset of the labels (so labelling again replaces them)
+LABEL_SECONDS = 1.5           # how long a label shows
+BURST_ON = 0.35               # a burst: bursts() above this (as moments() counts them)
+BURST_JOIN = 0.3              # seconds: dips shorter than this don't split a burst in two
+MULTI_GAP = 4.0               # seconds: bursts each within this of the one before are one multi-kill
+# The words for 1, 2, 3 and 4 or more bursts in a row ({n}: how many). Generic, no game's own announcer words.
+LABEL_WORDS = {1: "KILL", 2: "DOUBLE KILL", 3: "TRIPLE KILL", 4: "MULTI KILL ×{n}"}
+
+
+def burst_times(a: Analysis, has_audio: bool = True, t0: float = 0.0, t1: float = float("inf")) -> list[float]:
+    """Where each separate burst begins (seconds of the recording), between t0 and t1."""
+    b = bursts(a, has_audio)
+    if not b.size:
+        return []
+    up = b > BURST_ON
+    join = max(1, int(round(BURST_JOIN * SAMPLE_RATE)))
+    times = np.asarray(a.times, np.float64)
+    out: list[float] = []
+    last_end = -10 ** 9
+    i, n = 0, len(up)
+    while i < n:
+        if not up[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and up[j]:
+            j += 1
+        if i - last_end > join and t0 - 1e-6 <= times[i] <= t1 + 1e-6:
+            out.append(float(times[i]))          # a new burst (not a flicker of the one before)
+        last_end = j
+        i = j
+    return out
+
+
+def clusters(times: list[float], gap: float = MULTI_GAP) -> list[list[float]]:
+    """Burst times grouped into plays: each burst within `gap` seconds of the one before joins its play."""
+    out: list[list[float]] = []
+    for t in sorted(times):
+        if out and t - out[-1][-1] <= gap:
+            out[-1].append(t)
+        else:
+            out.append([t])
+    return out
+
+
+def label_text(n: int, words: Optional[dict] = None) -> str:
+    """The label for a play of n bursts ("" for none). words: {1..4: text} over LABEL_WORDS."""
+    words = {**LABEL_WORDS, **{int(k): v for k, v in (words or {}).items()}}
+    text = words.get(min(n, 4), "") or ""
+    return text.replace("{n}", str(n)).strip()
+
+
+def play_labels(project, analyses: dict, words: Optional[dict] = None, singles: bool = False) -> list:
+    """Titles (TextClips, preset LABEL_PRESET) at the edit's multi-kills: the bursts of each clip's footage
+    within the clip's range, grouped into plays; a label at the play's last burst on the timeline (where the
+    count is reached), LABEL_SECONDS long. singles: also label single bursts. analyses: footage id ->
+    Analysis (clips without one are skipped)."""
+    from .titles import make_text
+    out = []
+    total = project.duration
+    last = -10.0
+    for c, start in zip(project.clips, project.clip_starts()):
+        f = project.footage.get(c.footage_id)
+        a = analyses.get(c.footage_id)
+        if f is None or a is None or f.is_image:
+            continue
+        for play in clusters(burst_times(a, f.has_audio, c.src_in, c.src_out)):
+            if len(play) < (1 if singles else 2):
+                continue
+            text = label_text(len(play), words)
+            at = start + c.time_at(play[-1])
+            if not text or at - last < 0.5 or at >= total - 0.1:
+                continue
+            tc = make_text("callout", at, total)
+            tc.text, tc.preset = text, LABEL_PRESET
+            tc.duration = min(LABEL_SECONDS, max(0.2, total - tc.start))
+            tc.anim_dur = 0.25
+            out.append(tc)
+            last = at
+    return out
+
+
+def apply_labels(project, analyses: dict, words: Optional[dict] = None, singles: bool = False) -> int:
+    """Replace the edit's play labels with new ones (see play_labels). Returns how many were added."""
+    labels = play_labels(project, analyses, words, singles)
+    project.texts = [x for x in project.texts if x.preset != LABEL_PRESET] + labels
+    project.dirty = True
+    return len(labels)

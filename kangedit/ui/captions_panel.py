@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLay
                                QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..captions import CLEANUPS, WHISPER_MODELS, Caption
+from ..speakers import MODES as SPEAKER_MODES
 from .theme import fmt_time
 
 
@@ -21,6 +22,10 @@ class CaptionsPanel(QWidget):
     delete_requested = Signal(list)    # caption rows; every row for "Delete all"
     model_changed = Signal(str)        # the speech model chosen (captions.WHISPER_MODELS key)
     cleanup_changed = Signal(str)      # background noise clean-up before transcribing (captions.CLEANUPS key)
+    template_chosen = Signal(str)      # a caption look (caption_templates.all_templates name)
+    speakers_changed = Signal(str)     # Speakers: speakers.MODES key
+    detect_speakers = Signal()
+    auto_sync = Signal()               # line every clip's captions up with its speech
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -37,9 +42,15 @@ class CaptionsPanel(QWidget):
         self.chk_show = QCheckBox("Show")
         self.chk_show.setChecked(True)
         self.chk_show.toggled.connect(self.toggled.emit)
+        self.b_sync = QPushButton("Auto-sync timing")
+        self.b_sync.setToolTip("Line every clip's captions up with its speech: the offset between the words' "
+                               "times and the voice in the sound is measured for each clip (up to 2 s either "
+                               "way) and the captions moved by it. Undo puts them back.")
+        self.b_sync.clicked.connect(self.auto_sync.emit)
         tools = QHBoxLayout()
         tools.addWidget(b_style)
         tools.addWidget(b_srt)
+        tools.addWidget(self.b_sync)
         tools.addStretch(1)
         tools.addWidget(self.chk_show)
         self.cb_model = QComboBox()
@@ -65,10 +76,36 @@ class CaptionsPanel(QWidget):
         clean_row = QHBoxLayout()
         clean_row.addWidget(QLabel("Background noise"))
         clean_row.addWidget(self.cb_clean, 1)
+        self.cb_template = QComboBox()
+        self.cb_template.setToolTip("One-click caption looks (built in, and the ones you saved in Style…). "
+                                    "Undo puts the previous look back.")
+        self.cb_template.activated.connect(self._template_activated)
+        look_row = QHBoxLayout()
+        look_row.addWidget(QLabel("Look"))
+        look_row.addWidget(self.cb_template, 1)
+        self.set_templates([])
+        self.cb_speakers = QComboBox()
+        for key, label in SPEAKER_MODES.items():
+            self.cb_speakers.addItem(label, key)
+        self.cb_speakers.setToolTip("Podcasts and interviews: each speaker's captions in their own colour.\n"
+                                    "Detect speakers tells the voices apart (offline, by pitch and tone); fix a "
+                                    "caption by hand with right-click → Speaker on the timeline. Off: one colour.")
+        self.cb_speakers.currentIndexChanged.connect(
+            lambda: self.speakers_changed.emit(self.cb_speakers.currentData()))
+        self.b_detect = QPushButton("Detect speakers")
+        self.b_detect.setToolTip("Tell who speaks each caption from the voices (Auto: 2 or 3 speakers, or the "
+                                 "number chosen)")
+        self.b_detect.clicked.connect(self.detect_speakers.emit)
+        spk_row = QHBoxLayout()
+        spk_row.addWidget(QLabel("Speakers"))
+        spk_row.addWidget(self.cb_speakers, 1)
+        spk_row.addWidget(self.b_detect)
         top = QVBoxLayout()         # rows: fits a narrow panel
         top.addWidget(b_gen)
         top.addLayout(model_row)
         top.addLayout(clean_row)
+        top.addLayout(look_row)
+        top.addLayout(spk_row)
         top.addLayout(tools)
         self.b_delete = QPushButton("🗑 Delete selected")
         self.b_delete.setToolTip("Remove the selected captions (Del). Select several with Ctrl / Shift.")
@@ -139,9 +176,34 @@ class CaptionsPanel(QWidget):
             cb.setCurrentIndex(max(0, cb.findData(val)))
             cb.blockSignals(False)
 
+    def set_templates(self, names: list[str]) -> None:
+        """The caption looks to choose from (caption_templates.all_templates)."""
+        cb = self.cb_template
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem("Choose a look…", "")
+        for name in names:
+            cb.addItem(name, name)
+        cb.setCurrentIndex(0)
+        cb.blockSignals(False)
+
+    def _template_activated(self, _i: int):
+        name = self.cb_template.currentData() or ""
+        self.cb_template.setCurrentIndex(0)      # a one-off action: the list goes back to "Choose a look…"
+        if name:
+            self.template_chosen.emit(name)
+
+    def set_speakers(self, mode: str) -> None:
+        """Show the project's speakers setting (without saying it changed)."""
+        self.cb_speakers.blockSignals(True)
+        self.cb_speakers.setCurrentIndex(max(0, self.cb_speakers.findData(mode)))
+        self.cb_speakers.blockSignals(False)
+
     def _sync_buttons(self):
         self.b_delete.setEnabled(bool(self._selected_rows()))
         self.b_delete_all.setEnabled(bool(self.captions))
+        self.b_sync.setEnabled(bool(self.captions))
+        self.b_detect.setEnabled(bool(self.captions))
 
     def select(self, i: int):
         if 0 <= i < self.table.rowCount():

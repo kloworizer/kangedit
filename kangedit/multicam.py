@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import reframe, spherical
+from . import facecam, reframe, spherical
 from .edits import edits
 from .config import frame_size
 from .models import Footage, OverlayClip, Project, TimelineClip
@@ -516,27 +516,29 @@ def follow(project: Project) -> bool:
     """Keep the angles in step with the main track after an edit (trim, slip, split, Other moment, a new hook,
     reorder...): every angle clip is re-timed from the main clip it follows; main-angle clips that are new
     get their angles (and the layout's box); angle clips whose main clip is gone go too. An angle clip the
-    user deleted stays deleted, and placements changed by hand are kept. Returns whether anything changed."""
+    user deleted stays deleted, and placements changed by hand are kept. The facecam corners (facecam.py)
+    follow their clips too. Returns whether anything changed."""
+    moved = facecam.follow(project)
     mc = project.settings.multicam or {}
     angles = {fid: k for fid, k in (mc.get("angles") or {}).items() if fid in project.footage}
     if not angles or not mc.get("syncs"):
-        return False
+        return moved
     syncs = stored_syncs(project)
     handled = set(mc.get("clips") or [])
     before = [c.to_dict() for c in project.overlays] + [c.to_dict() for c in project.clips]
     # Earlier versions showed the main angle's box as a layer clip (angle 1): the main track does it now.
     project.overlays = [c for c in project.overlays if c.angle != 1]
     linked: dict[tuple[str, int, int], OverlayClip] = {(c.link, c.angle, c.piece): c for c in project.overlays
-                                                       if c.link and c.linked}
+                                                       if c.link and c.linked and not c.role}
     unlinked = {(c.link, c.angle, c.piece) for c in project.overlays if c.link and not c.linked}   # left alone
-    like = {c.angle: c for c in project.overlays if c.link}      # an angle's current placement, for new clips
+    like = {c.angle: c for c in project.overlays if c.link and not c.role}   # an angle's placement, for new clips
     st = project.settings
     tw, th = frame_size(st.aspect, st.resolution)
     template = mc.get("template", "pip")
     switching = template == "switch"   # shots come and go with the plan: none counts as deleted by the user
     boxed = main_in_box(template, (tw, th))
     boxed_like = next((c for c in project.clips if c.id in handled and c.box_w > 0), None)
-    out = [c for c in project.overlays if not c.link or not c.linked]
+    out = [c for c in project.overlays if not c.link or not c.linked or c.role]    # (facecams: done above)
     current = []
     for clip in project.clips:
         if angles.get(clip.footage_id) != 1:
@@ -565,7 +567,7 @@ def follow(project: Project) -> bool:
             out.append(oc)
     project.overlays = out
     project.settings.multicam = {**mc, "clips": current}
-    return [c.to_dict() for c in project.overlays] + [c.to_dict() for c in project.clips] != before
+    return [c.to_dict() for c in project.overlays] + [c.to_dict() for c in project.clips] != before or moved
 
 
 def angles_of(project: Project, clip_id: str) -> list[OverlayClip]:
@@ -605,7 +607,7 @@ def relayout(project: Project, template: str) -> int:
             if c.footage_id in main_ids:
                 place_main(c, project.footage[c.footage_id], lay0, main_in_box(template, (tw, th)), tw, th)
                 c.volume = 1.0 if template == "switch" else c.volume
-        project.overlays = [c for c in project.overlays if not c.link or not c.linked]
+        project.overlays = [c for c in project.overlays if not c.link or not c.linked or c.role]
         st.multicam = {**st.multicam, "template": template, "clips": []}
         follow(project)
         top = max((c.track for c in project.overlays), default=0)
