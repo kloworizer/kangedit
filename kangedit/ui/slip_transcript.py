@@ -14,6 +14,7 @@ from ..polish import sentence_spans
 from .theme import fmt_time
 
 SHOWN = QColor(70, 120, 200, 90)     # a sentence the clip shows
+SLIM_HEIGHT = 50                     # the panel's height: about two sentences (the timeline's lanes stay in view)
 
 
 def sentence_rows(words: list[dict]) -> list[tuple[float, float, str]]:
@@ -36,31 +37,67 @@ class SlipTranscript(QWidget):
         self.footage_id = ""
         self.rows: list[tuple[float, float, str]] = []
         self._range = (0.0, 0.0)
+        # One slim row (the lanes keep their room): what it is, the clip's length while it is trimmed and the
+        # search on the left; two sentences at a time on the right.
         self.title = QLabel("")
         self.title.setStyleSheet("font-weight: 600;")
+        self.length = QLabel("")
+        self.length.setStyleSheet("color: #ffd34d; font-weight: 600;")
+        self.length.hide()
         self.search = QLineEdit(placeholderText="Find words…")
         self.search.setClearButtonEnabled(True)
-        self.search.setMaximumWidth(220)
+        self.search.setFixedHeight(22)
         self.search.textChanged.connect(self._filter)
         self.btn_transcribe = QPushButton("Transcribe this file")
         self.btn_transcribe.clicked.connect(lambda: self.transcribe.emit(self.footage_id))
         self.btn_transcribe.hide()
-        head = QHBoxLayout()
-        head.setContentsMargins(6, 2, 6, 0)
-        head.addWidget(self.title, 1)
-        head.addWidget(self.btn_transcribe)
-        head.addWidget(self.search)
+        side = QVBoxLayout()
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(1)
+        side.addWidget(self.title)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(self.length)
+        row.addWidget(self.btn_transcribe)
+        row.addWidget(self.search, 1)
+        side.addLayout(row)
+        side.addStretch(1)
+        left = QWidget()
+        left.setLayout(side)
+        left.setFixedWidth(250)
+        f = left.font()
+        f.setPointSizeF(max(7.0, f.pointSizeF() * 0.9))
+        left.setFont(f)
         self.list = QListWidget()
         self.list.setToolTip("What is said in the clip's footage. Highlighted: what the clip shows now.\n"
                              "Click a sentence to slip the clip to start on it (its length stays).")
         self.list.setAlternatingRowColors(False)
-        self.list.setMaximumHeight(92)          # about four sentences: the lanes keep their room
+        self.list.setFixedHeight(SLIM_HEIGHT)
         self.list.itemClicked.connect(self._clicked)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 2)
-        lay.setSpacing(2)
-        lay.addLayout(head)
-        lay.addWidget(self.list)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 1, 4, 1)
+        lay.setSpacing(6)
+        lay.addWidget(left)
+        lay.addWidget(self.list, 1)
+        self.setMaximumHeight(SLIM_HEIGHT + 4)
+
+    def show_length(self, duration: Optional[float], before: Optional[float] = None) -> None:
+        """The clip's length while it is trimmed, and how much it changed (None: not trimming)."""
+        if duration is None:
+            self.length.hide()
+            return
+        text = f"⏱ {duration:.2f} s"
+        if before is not None and abs(duration - before) >= 0.005:
+            text += f" ({duration - before:+.2f})"
+            self.length.setToolTip(f"The clip is {duration:.2f} s long, was {before:.2f} s")
+        self.length.setText(text)
+        self.length.show()
+
+    def _set_title(self, text: str) -> None:
+        """One line (shortened to fit; the whole text in its tooltip)."""
+        self.title.setToolTip(text)
+        self.title.setText(self.title.fontMetrics().elidedText(text, Qt.ElideRight, 244))
 
     def show_clip(self, clip, footage) -> None:
         """Show a main-track clip's transcript (None: nothing selected)."""
@@ -70,19 +107,19 @@ class SlipTranscript(QWidget):
         self.rows = sentence_rows(words)
         self.list.clear()
         if clip is None or footage is None:
-            self.title.setText("🗣 Select a clip to see what is said in it")
+            self._set_title("🗣 Select a clip to see what is said in it")
             self.btn_transcribe.hide()
             return
         if footage.transcript is None or not footage.has_audio:
-            self.title.setText(f"🗣 {footage.name}: no transcript yet" if footage.has_audio
+            self._set_title(f"🗣 {footage.name}: no transcript yet" if footage.has_audio
                                else f"🗣 {footage.name} has no sound")
             self.btn_transcribe.setVisible(footage.has_audio and not footage.is_image)
             return
         self.btn_transcribe.hide()
         if not self.rows:
-            self.title.setText(f"🗣 {footage.name}: nobody speaks in it")
+            self._set_title(f"🗣 {footage.name}: nobody speaks in it")
             return
-        self.title.setText(f"🗣 {footage.name}: click a sentence to slip the clip to it")
+        self._set_title(f"🗣 {footage.name}: click a sentence to slip the clip to it")
         for a, b, text in self.rows:
             it = QListWidgetItem(f"{fmt_time(a, frames=False)}   {text}")
             it.setData(Qt.UserRole, a)
