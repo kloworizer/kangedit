@@ -21,7 +21,7 @@ from typing import Callable, Optional
 import cv2
 import numpy as np
 
-from . import keying, reframe, spherical
+from . import facefx, keying, reframe, spherical
 from .motion import Motion
 from .color import Grade, LutCache, apply_grade, apply_spatial, has_spatial, needs_color, profile_short
 from .decoder import DecoderPool
@@ -74,6 +74,8 @@ class Shot:
     src_len: float = 0.0         # length of its source range
     view: Optional[spherical.View] = None   # 360° footage: the view of the sphere it shows
     motion: Optional[Motion] = None          # a dynamic zoom / stabilization (see motion.py)
+    face_fx: str = ""                        # a face filter (facefx.FACE_FX key) and its strength
+    face_amount: float = 0.0
 
     def src_at(self, off: float) -> float:
         """Source time shown `off` seconds after the shot's start (also before / after it: handles)."""
@@ -465,6 +467,9 @@ class PreviewEngine:
             vw, vh = reframe.box_rect(look.width, look.height, shot.box)[2:] if shot.box else (look.width, look.height)
             img = spherical.reproject(img, shot.footage.projection, shot.view, vw, vh, shot.footage.lens_fov)
         img = reframe.rotate_quarters(img, quarters)
+        if shot.face_fx and shot.view is None:
+            img = facefx.apply_frame(img, shot.face_fx, shot.face_amount, shot.footage.id,
+                                     when[1] if when is not None else shot.src_in)
         if shot.box:   # a box of the frame, cropped to fill it, black around it
             bx, by, bw, bh = reframe.box_rect(look.width, look.height, shot.box)
             mode, tw, th = "fill", bw, bh

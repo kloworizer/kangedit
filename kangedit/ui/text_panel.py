@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBo
                                QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from ..models import Project, TextClip
-from ..titles import ALIGNS, ANIM_IN, ANIM_OUT, TEXT_PRESETS
+from ..titles import ALIGNS, ANIM_IN, ANIM_OUT, FILLS, TEXT_PRESETS
 from .dialogs import font_combo, select_font
 from .theme import fmt_time
 
@@ -77,7 +77,7 @@ class TextPanel(QScrollArea):
         self.cb_font.currentTextChanged.connect(lambda v: v.strip() and self._set("font", v.strip()))
         f.addRow("Font", self.cb_font)
         self.sp_size = QDoubleSpinBox(decimals=1, singleStep=0.5, suffix=" % of height")
-        self.sp_size.setRange(1.5, 30)
+        self.sp_size.setRange(1.5, 60)
         self.sp_size.valueChanged.connect(lambda v: self._set("size_pct", v))
         f.addRow("Size", self.sp_size)
 
@@ -107,6 +107,32 @@ class TextPanel(QScrollArea):
         row.addWidget(self.b_box_color)
         row.addWidget(self.sp_box_op)
         f.addRow("Box", row)
+
+        self.sp_opacity = QDoubleSpinBox(decimals=0, singleStep=5, suffix=" %")
+        self.sp_opacity.setRange(0, 100)
+        self.sp_opacity.setToolTip("How see-through the text is (its outline and box too): 100 % is solid")
+        self.sp_opacity.valueChanged.connect(lambda v: self._set("opacity", v))
+        f.addRow("Opacity", self.sp_opacity)
+
+        self.cb_fill = QComboBox()
+        for k, label in FILLS.items():
+            self.cb_fill.addItem(label, k)
+        self.cb_fill.setToolTip("Video inside the text: the letters show the video, the rest of the frame is "
+                                "covered in the background colour. Big, bold letters work best.")
+        self.cb_fill.currentIndexChanged.connect(lambda _: self._set("fill", self.cb_fill.currentData()))
+        f.addRow("Fill", self.cb_fill)
+        row = QHBoxLayout()
+        self.b_bg_color = QPushButton()
+        self.b_bg_color.clicked.connect(lambda: self._pick("bg_color"))
+        self.sp_bg_op = QDoubleSpinBox(decimals=0, singleStep=5, suffix=" %")
+        self.sp_bg_op.setRange(0, 100)
+        self.sp_bg_op.setToolTip("How much the background covers the video around the letters")
+        self.sp_bg_op.valueChanged.connect(lambda v: self._set("bg_opacity", v))
+        row.addWidget(self.b_bg_color)
+        row.addWidget(self.sp_bg_op)
+        row.addStretch(1)
+        self.lbl_bg = QLabel("Around")
+        f.addRow(self.lbl_bg, row)
 
         pos = QGridLayout()
         pos.setSpacing(2)
@@ -166,7 +192,7 @@ class TextPanel(QScrollArea):
         lay.addStretch(1)
         self._fields = [self.ed_text, self.cb_font, self.sp_size, self.chk_bold, self.chk_italic, self.chk_outline,
                         self.chk_box, self.sp_box_op, self.sp_x, self.sp_y, self.cb_align, self.cb_in, self.cb_out,
-                        self.sp_anim, self.sp_start, self.sp_dur]
+                        self.sp_anim, self.sp_start, self.sp_dur, self.sp_opacity, self.cb_fill, self.sp_bg_op]
         self.refresh()
 
     # ------------------------------------------------------------------ public
@@ -238,6 +264,14 @@ class TextPanel(QScrollArea):
         self.sp_box_op.setValue(tc.box_opacity)
         self.sp_box_op.setEnabled(tc.box)
         self.b_box_color.setEnabled(tc.box)
+        self.sp_opacity.setValue(tc.opacity)
+        video = tc.fill == "video"
+        self.cb_fill.setCurrentIndex(max(0, self.cb_fill.findData(tc.fill)))
+        self.sp_bg_op.setValue(tc.bg_opacity)
+        for w in (self.b_bg_color, self.sp_bg_op):
+            w.setEnabled(video)
+        for w in (self.b_color, self.chk_outline, self.chk_box):
+            w.setEnabled(not video and (w is not self.chk_outline or not tc.box))
         self.sp_x.setValue(tc.x * 100)
         self.sp_y.setValue(tc.y * 100)
         self.cb_align.setCurrentIndex(max(0, self.cb_align.findData(tc.align)))
@@ -248,7 +282,7 @@ class TextPanel(QScrollArea):
         self.sp_dur.setValue(tc.duration)
         for w in self._fields:
             w.blockSignals(False)
-        for b, col in ((self.b_color, tc.color), (self.b_box_color, tc.box_color)):
+        for b, col in ((self.b_color, tc.color), (self.b_box_color, tc.box_color), (self.b_bg_color, tc.bg_color)):
             b.setText(col)
             b.setStyleSheet(f"background: {col}; color: {'black' if QColor(col).lightness() > 128 else 'white'};")
 
@@ -258,7 +292,7 @@ class TextPanel(QScrollArea):
             return
         self.before_change.emit(f"text:{tc.id}:{key}")
         setattr(tc, key, value)
-        if key in ("box", "color", "box_color"):
+        if key in ("box", "color", "box_color", "fill", "bg_color"):
             self._load()
         if key in ("text", "start"):
             self.refresh()
@@ -277,6 +311,7 @@ class TextPanel(QScrollArea):
         tc = self.text
         if tc is None:
             return
-        c = QColorDialog.getColor(QColor(getattr(tc, key)), self, "Text colour" if key == "color" else "Box colour")
+        title = {"color": "Text colour", "bg_color": "Colour around the letters"}.get(key, "Box colour")
+        c = QColorDialog.getColor(QColor(getattr(tc, key)), self, title)
         if c.isValid():
             self._set(key, c.name())

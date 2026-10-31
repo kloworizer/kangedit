@@ -35,7 +35,7 @@ from .. import facecam, games, images, multicam, music, reframe, scriptedit, sfx
 from ..sync import SyncResult, sync_files, sync_to_longest
 from ..bookends import find_bookends, story_order
 from .. import bins as binlib
-from .. import health, motion, polish, scenes, stabilize, voice
+from .. import gaps, health, motion, polish, scenes, stabilize, voice
 from ..captions import (Caption, apply_sync, build_captions, cached_transcript, delete_captions, edit_caption,
                         listen, load_model, measure_sync, model_note, project_layout, resolve_model,
                         set_caption_speaker, shift_captions, shift_group, sync_jobs, transcribe, transcribed_with,
@@ -301,6 +301,17 @@ class MainWindow(QMainWindow):
         m.addAction(self._act("Select all", self._select_all, "Ctrl+A"))
         m.addAction(self._act("Delete selected clips / sound", self._delete_selected, "Del"))
         m.addAction(self._act("Duplicate clip", lambda: self.clip_action("duplicate", self.tl.selected), "Ctrl+D"))
+        sub = m.addMenu("Insert black at the playhead")
+        for label, length in gaps.BLACK_LENGTHS:
+            sub.addAction(self._act(label, lambda _=False, n=length: self.insert_black(n),
+                                    "B" if length == 0 else None,
+                                    "A black frame (or a few seconds of black) at the cut nearest the playhead"))
+        self.a_magnet = self._act("Magnetic timeline", lambda on: self.timeline.set_magnetic(on), "M",
+                                  "On: clips stay together. Off: drag a clip anywhere to make space (black fills "
+                                  "the gap), and deleting leaves a black gap")
+        self.a_magnet.setCheckable(True)
+        self.a_magnet.setChecked(True)
+        m.addAction(self.a_magnet)
         m.addAction(self._act("Link / unlink camera angles", lambda: self.toggle_link(), "Ctrl+L",
                               "Multicam: unlink the selected clip's camera angles to edit them on their own, or "
                               "link them again (back in sync)"))
@@ -697,6 +708,8 @@ class MainWindow(QMainWindow):
                                                    self.caps_panel.select(i)))
         self.timeline.btn_split.clicked.connect(self.split_at_playhead)
         self.timeline.fades_changed.connect(self._fades_changed)
+        self.timeline.magnet_changed.connect(self._magnet_changed)
+        self.timeline.set_magnetic(self.qs.value("magnetic", True, type=bool))
         self.timeline.btn_delete.clicked.connect(lambda: self.clip_action("delete", self.tl.selected))
         self.timeline.btn_hook.clicked.connect(lambda: self.new_hook())
         self.timeline.btn_undo.clicked.connect(self.undo)
@@ -3306,7 +3319,14 @@ class MainWindow(QMainWindow):
         if action == "delete":
             self.project_checkpoint()
             gone = {x.id for x in targets}
-            self.project.clips = [x for x in self.project.clips if x.id not in gone]
+            if self.tl.magnetic:
+                self.project.clips = [x for x in self.project.clips if x.id not in gone]
+                gaps.tidy(self.project)
+            elif all(gaps.is_black(self.project, x) for x in targets):    # a gap deleted: closed up
+                self.project.clips = [x for x in self.project.clips if x.id not in gone]
+                gaps.tidy(self.project)
+            else:                      # the magnet off: their places stay, black
+                gaps.lift(self.project, list(gone))
             layer_gone = set(self.tl.selected_overlay_ids()) if clip_id in sel else set()
             if layer_gone:                    # (Ctrl+A) the selected clips on the video layers go too
                 self.project.overlays = [o for o in self.project.overlays if o.id not in layer_gone]
@@ -3813,6 +3833,22 @@ class MainWindow(QMainWindow):
         tc.x, tc.y = x, y
         self.viewer.canvas.update()
 
+    def insert_black(self, length: float, t: Optional[float] = None):
+        """Black `length` seconds long (0: one frame) at the cut nearest t (the playhead)."""
+        t = self.viewer.timeline_time() if t is None else t
+        self.project_checkpoint()
+        clip = gaps.insert_black(self.project, t, length)
+        self.tl.selected = clip.id
+        self._after_structure_change()
+        self.lbl_status.setText(f"Black inserted ({clip.duration:.2f} s)" if length > 0 else "Black frame inserted")
+
+    def _magnet_changed(self, on: bool):
+        self.qs.setValue("magnetic", on)
+        if self.a_magnet.isChecked() != on:
+            self.a_magnet.setChecked(on)
+        self.lbl_status.setText("Magnetic timeline: clips stay together" if on else
+                                "Magnet off: drag clips anywhere — black fills the space they leave")
+
     # ================================================================== right-click menus
     def _timeline_action(self, key: str, payload: str):
         """Context-menu commands from the timeline (clips, titles, captions, empty space)."""
@@ -3827,6 +3863,9 @@ class MainWindow(QMainWindow):
             self.show_refine(self.sfx_panel)
         elif key == "seek":
             self._timeline_seek(float(payload))
+        elif key == "insert_black":
+            length, t = payload.split("@")
+            self.insert_black(float(length), float(t))
         elif key == "split_playhead":
             self.split_at_playhead()
         elif key == "fit":
@@ -5087,6 +5126,7 @@ class MainWindow(QMainWindow):
             "Space — play / pause\n←/→ — previous / next frame (Shift: 10 frames)\n"
             "↑/↓ — previous / next clip\nHome / End — start / end\n"
             "S — split at playhead\nDel — delete the selected clips (or sound)\nCtrl+D — duplicate clip\n"
+            "B — insert a black frame at the playhead · M — magnetic timeline on / off\n"
             "Ctrl+A — select all clips, video layers included (in the Media panel: all its media)\nR — other moment for the clip (best one nearby)\n"
             "Double-click footage in Media — play it in the viewer (Source) · I / O — mark in / out there\n"
             "H — choose the hook (point at a card to play it; ticked in the order it plays)\n"

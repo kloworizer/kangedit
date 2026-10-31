@@ -10,14 +10,14 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Optional
 
-from . import keying, motion, reframe, spherical, stabilize, voice
+from . import facefx, keying, motion, reframe, spherical, stabilize, voice
 from .speed import sound_mode, stretch
 from .captions import build_captions, caption_layout, write_ass, write_srt
 from .color import ffmpeg_halation, ffmpeg_sharpen, needs_color, write_cube
 from .config import cache_dir, frame_size
 from .edits import ClipPlan, edits, plan
 from .fonts import copy_family
-from .titles import write_titles_ass
+from .titles import is_video_text, write_titles_ass
 from .ffmpeg import FFmpegError, ProgressCb, ffmpeg_matrix, hw_encoder, hw_encoder_args, hw_encoder_label, run_ffmpeg
 from .models import LOOP_CROSSFADE, Footage, OverlayClip, Project
 
@@ -132,6 +132,16 @@ def batch_settings(s: ExportSettings, aspects) -> list[ExportSettings]:
 _cubes: dict[str, dict[tuple, str]] = {}      # export folder -> {grade key: .cube already written there}
 
 
+def existing_outputs(batch: list) -> list[str]:
+    """The output files of these exports (ExportSettings) that already exist: they would be replaced."""
+    out = []
+    for s in batch:
+        path = os.path.abspath(s.output)
+        if os.path.exists(path) and path not in out:
+            out.append(path)
+    return out
+
+
 def _grade_cube(workdir: str, name: str, grade, f: Footage) -> str:
     """Write the grade's .cube LUT for footage f as `name` in workdir, or return the one an earlier clip with
     the same grade and colour settings already wrote (each is a few MB, read by FFmpeg at start)."""
@@ -144,22 +154,83 @@ def _grade_cube(workdir: str, name: str, grade, f: Footage) -> str:
     return done[key]
 
 
-def _clip_inputs(project: Project, use_proxies: bool, i: int, cp: ClipPlan, fps: float) -> tuple[list[str], int, bool, float]:
+def _clip_range(cp: ClipPlan) -> tuple[float, float]:
+    """Source start and end a clip's input covers (its video and sound, handles and split edits included)."""
+    return max(0.0, min(cp.v_in, cp.a_in)), max(cp.v_end, cp.a_end)
+
+
+# export folder -> {clip id: its picture made with its face filter (see prerender_face_fx)}
+_face_files: dict[str, dict[str, str]] = {}
+
+
+def face_fx_clips(project: Project) -> list[int]:
+    """Main-track clips with a face filter (big head, funny face...) the export makes first."""
+    out = []
+    for i, c in enumerate(project.clips):
+        f = project.footage.get(c.footage_id)
+        if c.face_fx and c.face_amount > 0 and f is not None and not spherical.is_360(f) \
+                and not (f.is_image and f.codec == "gif"):
+            out.append(i)
+    return out
+
+
+def prerender_face_fx(project: Project, s: "ExportSettings", workdir: str, progress: Optional[ProgressCb] = None,
+                      cancel: Optional[threading.Event] = None) -> dict[str, str]:
+    """Make the picture of every clip with a face filter (the face found and warped frame by frame) into the
+    export folder; _clip_inputs reads these files in place of the footage."""
+    todo = face_fx_clips(project)
+    done = _face_files.setdefault(workdir, {})
+    if not todo:
+        return done
+    plans = plan(project, s.fps)
+    for n, i in enumerate(todo):
+        clip, cp = project.clips[i], plans[i]
+        f = project.footage[clip.footage_id]
+        label = f"Face filter ({n + 1} of {len(todo)}): {f.name}"
+
+        def step(p, n=n, label=label):
+            if progress is not None:
+                progress(0.0, f"{label} {p * 100:.0f} %")
+        step(0.0)
+        if f.is_image:
+            done[clip.id] = facefx.render_still(f.path, os.path.join(workdir, f"face_{i}.png"), clip.face_fx,
+                                                clip.face_amount)
+            continue
+        ss, end = _clip_range(cp)
+        quarters = reframe.split_rotation(clip.rotation)[0]
+        matrix = ffmpeg_matrix(f.color_space, min(f.width, f.height))
+        done[clip.id] = facefx.render_clip(f.path, os.path.join(workdir, f"face_{i}.mkv"), ss, end - ss + 0.25,
+                                           f.width, f.height, f.fps or s.fps, matrix, quarters, clip.face_fx,
+                                           clip.face_amount, cancel, step)
+    return done
+
+
+def _face_file(workdir: Optional[str], clip) -> Optional[str]:
+    return _face_files.get(workdir, {}).get(clip.id) if workdir else None
+
+
+def _clip_inputs(project: Project, use_proxies: bool, i: int, cp: ClipPlan, fps: float,
+                 workdir: Optional[str] = None) -> tuple[list[str], int, bool, float, int]:
     """Input args for clip i covering its video and audio ranges (handles and split edits included).
-    Returns (args, n_inputs, audio_is_silence, input start time in the source)."""
+    Returns (args, n_inputs, audio_is_silence, input start time in the source, index of the sound's input
+    after the first one). workdir: the export folder, whose face-filtered pictures replace the footage's."""
     clip = project.clips[i]
     f = project.footage[clip.footage_id]
     src = f.proxy_path if (use_proxies and f.has_proxy()) else f.path
-    ss = max(0.0, min(cp.v_in, cp.a_in))
-    end = max(cp.v_end, cp.a_end)
+    ss, end = _clip_range(cp)
+    faced = _face_file(workdir, clip)
     if f.is_image:
-        args, ss = _image_input(f, ss, end - ss + 0.25, fps)
+        args, ss = _image_input(f if not faced else replace(f, path=faced), ss, end - ss + 0.25, fps)
+    elif faced:          # the face-filtered picture (made from `ss` on), the footage's own sound
+        args = ["-i", faced]
+        if f.has_audio:
+            return args + ["-ss", f"{ss:.4f}", "-t", f"{end - ss + 0.25:.4f}", "-i", src], 2, False, ss, 1
     else:
         args = ["-ss", f"{ss:.4f}", "-t", f"{end - ss + 0.25:.4f}", "-i", src]
     if f.has_audio and not f.is_image:
-        return args, 1, False, ss
+        return args, 1, False, ss, 0
     args += ["-f", "lavfi", "-t", f"{cp.a_dur + 0.25:.4f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    return args, 2, True, ss
+    return args, 2, True, ss, 1
 
 
 def _image_input(f: Footage, ss: float, dur: float, fps: float) -> tuple[list[str], float]:
@@ -468,10 +539,11 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
     for j, i in enumerate(rng):
         clip, cp = project.clips[i], plans[i]
         f = project.footage[clip.footage_id]
-        args, n_in, silent, ss = _clip_inputs(project, s.use_proxies, i, cp, s.fps)
+        args, n_in, silent, ss, a_at = _clip_inputs(project, s.use_proxies, i, cp, s.fps, workdir)
         inputs += args
-        vi, ai = f"{k}:v:0", (f"{k + 1}:a:0" if silent else f"{k}:a:0")
+        vi, ai = f"{k}:v:0", f"{k + a_at}:a:0"
         k += n_in
+        faced = _face_file(workdir, clip) is not None and not f.is_image
 
         skip = max(0.0, cp.v_in - ss)
         trim = f"trim=start={skip:.4f},setpts=PTS-STARTPTS," if skip > 0.0005 else ""
@@ -500,7 +572,8 @@ def _main_clips(project: Project, s: ExportSettings, workdir: str, rng: range, p
         convert = ""
         # The source's colour matrix is always named (FFmpeg would take an untagged HD stream for SD BT.601
         # and shift its colours on the way to BT.709).
-        matrix = "bt709" if (s.use_proxies and f.has_proxy()) else ffmpeg_matrix(f.color_space, min(f.width, f.height))
+        matrix = "bt709" if (faced or (s.use_proxies and f.has_proxy())) else \
+            ffmpeg_matrix(f.color_space, min(f.width, f.height))
         if color or halation:
             convert = f":in_color_matrix={matrix}:in_range=auto|{GRADE_FMT}"
         mode = "fill" if box else s.fit_mode
@@ -563,11 +636,25 @@ def build_export(project: Project, s: ExportSettings, workdir: str, encoder: Opt
     aout = _fade_audio(project, graph, _mix_sounds(project, inputs, graph, k, tuple(ov_audio)))
     aout = _loudness(graph, aout, s.loudness)      # after the mix and its fades: the level of what is heard
     fonts_dir = os.path.join(workdir, "fonts")
-    texts = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
+    every = [x for x in project.texts if x.text.strip() and x.duration > 0 and x.start < project.duration]
+    found = [copy_family(f, fonts_dir) for f in {x.font for x in every}]
+    fontsdir = ':fontsdir=fonts' if any(found) else ''
+    vtexts = [x for x in every if is_video_text(x)]
+    if vtexts:
+        # Video inside the text: the background colour laid over the picture except in the letters (an
+        # alpha mask drawn by libass: see titles.write_titles_ass).
+        write_titles_ass(os.path.join(workdir, "vtext_mask.ass"), vtexts, tw, th, s.fps, mode="mask")
+        write_titles_ass(os.path.join(workdir, "vtext_cover.ass"), vtexts, tw, th, s.fps, mode="cover")
+        black = f"color=c=black:s={tw}x{th}:r={s.fps:.4f}:d={project.duration + 1.0:.4f}"
+        graph.append(f"{black},subtitles=vtext_mask.ass{fontsdir},format=gray[vtmask]")
+        graph.append(f"{black},subtitles=vtext_cover.ass{fontsdir},format=rgb24[vtcover]")
+        graph.append("[vtcover][vtmask]alphamerge[vtlayer]")
+        graph.append(f"[{vout}][vtlayer]overlay=eof_action=pass:format=auto,format={final_fmt}[vtext]")
+        vout = "vtext"
+    texts = [x for x in every if not is_video_text(x)]
     if texts:
         write_titles_ass(os.path.join(workdir, "titles.ass"), texts, tw, th, s.fps)
-        found = [copy_family(f, fonts_dir) for f in {x.font for x in texts}]
-        graph.append(f"[{vout}]subtitles=titles.ass{':fontsdir=fonts' if any(found) else ''}[vtitles]")
+        graph.append(f"[{vout}]subtitles=titles.ass{fontsdir}[vtitles]")
         vout = "vtitles"
     caps = build_captions(project, aspect=s.aspect) if s.captions != "none" else []
     cap_layout = caption_layout(project.settings.captions, tw, th, project.settings.video_format)
@@ -638,7 +725,7 @@ def _parts(project: Project, fps: float, use_proxies: bool, video: bool) -> Opti
     plans = plan(project, fps)
     n_in, chars = [], 0
     for i, cp in enumerate(plans):
-        args, n, _silent, _ss = _clip_inputs(project, use_proxies, i, cp, fps)
+        args, n, _silent, _ss, _a = _clip_inputs(project, use_proxies, i, cp, fps)
         n_in.append(n)
         chars += sum(len(a) + 3 for a in args)
     ovs = [c for c in project.overlays if c.footage_id in project.footage and c.duration > 0.01]
@@ -760,6 +847,7 @@ def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] =
     workdir = tempfile.mkdtemp(prefix="export_", dir=str(cache_dir("tmp")))
     try:
         main, rest, final = None, None, progress
+        prerender_face_fx(project, s, workdir, progress, cancel)
         split = _parts(project, s.fps, s.use_proxies, video=True)
         if split is not None:
             parts, rest = split
@@ -781,6 +869,7 @@ def export(project: Project, s: ExportSettings, progress: Optional[ProgressCb] =
                    cwd=workdir, label=f"Exporting {name}" + (" (CPU)" if s.use_gpu else ""))
     finally:
         _cubes.pop(workdir, None)
+        _face_files.pop(workdir, None)
         shutil.rmtree(workdir, ignore_errors=True)
     return s.output
 
@@ -791,9 +880,9 @@ def _main_audio(project: Project, use_proxies: bool, fps: float, rng: range, pla
     input index."""
     for j, i in enumerate(rng):
         clip, cp = project.clips[i], plans[i]
-        args, n_in, silent, ss = _clip_inputs(project, use_proxies, i, cp, fps)
+        args, n_in, silent, ss, a_at = _clip_inputs(project, use_proxies, i, cp, fps)
         inputs += args
-        ai = f"{k + 1}:a:0" if silent else f"{k}:a:0"
+        ai = f"{k + a_at}:a:0"
         k += n_in
         graph.append(_clip_audio(ai, j, clip, cp, silent, ss))
     _join(graph, [plans[i] for i in rng], fps, video=False)

@@ -55,6 +55,7 @@ class Footage:
     bin: str = ""                  # the Media panel bin it is in ("" = none; see bins.py)
     projection: str = ""           # 360° footage: "equirect" | "dfisheye" ("" = a normal picture; see spherical.py)
     lens_fov: float = 195.0        # dual fisheye: each lens's field of view, degrees
+    generated: str = ""            # made by KangEdit, not imported: "black" (black frames and gaps, see gaps.py)
     id: str = field(default_factory=new_id)
 
     @property
@@ -119,6 +120,8 @@ class TimelineClip:
     stabilize: float = 0.0
     voice_clean: float = 0.0       # take noise and wind out of the speech: 0 = off, up to 1 (see voice.py)
     voice_floor: float = 0.0       # its background noise level, dBFS (0 = not known)
+    face_fx: str = ""              # facefx.FACE_FX key: big head, funny face... ("" = off)
+    face_amount: float = 0.6       # how strong, 0..1
     id: str = field(default_factory=new_id)
 
     @property
@@ -358,6 +361,12 @@ class TextClip:
     anim_in: str = "fade"          # titles.ANIM_IN key
     anim_out: str = "fade"         # titles.ANIM_OUT key
     anim_dur: float = 0.5          # seconds of each animation
+    opacity: float = 100.0         # % (0 = invisible): the whole text, its outline and box too
+    # "color": letters in `color`; "video": the letters are windows onto the video, the rest of the frame
+    # covered in bg_color (at bg_opacity %)
+    fill: str = "color"
+    bg_color: str = "#000000"
+    bg_opacity: float = 100.0
     id: str = field(default_factory=new_id)
 
     @property
@@ -523,6 +532,9 @@ class Project:
         bad: set[str] = set()
         by_src: dict[str, list[TimelineClip]] = {}
         for c in self.clips:
+            f = self.footage.get(c.footage_id)
+            if f is not None and f.generated:      # black frames repeat nothing
+                continue
             by_src.setdefault(c.footage_id, []).append(c)
         pos = {id(c): k for k, c in enumerate(self.clips)}
         for items in by_src.values():
@@ -669,5 +681,7 @@ class Project:
         for fd in data.get("voices", []):
             f = Footage.from_dict(fd)
             p.voices[f.id] = f
+        from . import gaps
+        gaps.repair(p)          # black frames: this computer's black picture
         p.path = path
         return p

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout
                                QLabel, QMenu, QPushButton, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget)
 
 from .. import lut as lutlib
-from .. import motion, spherical, stabilize, voice
+from .. import facefx, motion, spherical, stabilize, voice
 from ..color import LOG_CHOICES, LOG_PROFILES, TONEMAPS, effective_profile, lut_profile, profile_label
 from ..edits import TRANSITIONS
 from ..models import OverlayClip, Project, TimelineClip
@@ -365,10 +365,10 @@ class Inspector(QScrollArea):
         lay.addWidget(g)
 
         # --- Dynamic zoom: a slow zoom or pan across the picture (as DaVinci Resolve's Dynamic Zoom)
-        g = QGroupBox("Dynamic zoom (slow zoom / pan)")
-        g.setToolTip("Moves slowly inside the framed picture over the clip: a zoom in or out, or a pan across it "
-                     "(the Ken Burns effect). Brings life to photos and steady shots. Shown in the preview as "
-                     "exported.")
+        g = QGroupBox("Zoom and movement effects")
+        g.setToolTip("Moves inside the framed picture: a slow zoom in or out, or a pan across it (the Ken Burns "
+                     "effect), or a quick effect: a fast zoom in or out (punch in), a zoom pulse, a crash zoom, "
+                     "a heartbeat, camera shake or a drunk wobble. Shown in the preview as exported.")
         f = QFormLayout(g)
         self.cb_motion = QComboBox()
         for key, label in motion.MOTIONS.items():
@@ -387,6 +387,24 @@ class Inspector(QScrollArea):
         f.addRow("Amount", self.mo_amount)
         f.addRow("Ease", self.cb_ease)
         self.grp_motion = g
+        lay.addWidget(g)
+
+        # --- Face filters: big head, funny faces
+        g = QGroupBox("Face filter (big head, funny face)")
+        g.setToolTip("Finds the face in every frame and warps the picture around it: a big or tiny head, big eyes, "
+                     "a big mouth, a wide or long face. Follows the face as it moves. Shown in the preview as "
+                     "exported (main track clips).")
+        f = QFormLayout(g)
+        self.cb_face = QComboBox()
+        for key, label in facefx.FACE_FX.items():
+            self.cb_face.addItem(label, key)
+        self.cb_face.currentIndexChanged.connect(self._set_face_fx)
+        self.face_amt = ParamSlider(5.0, 100.0, facefx.DEFAULT_AMOUNT * 100, 1.0, 0, " %")
+        self.face_amt.setToolTip("How strong the filter is")
+        self.face_amt.changed.connect(self._set_face_amount)
+        f.addRow("Filter", self.cb_face)
+        f.addRow("Strength", self.face_amt)
+        self.grp_face = g
         lay.addWidget(g)
 
         # --- Stabilization
@@ -559,7 +577,16 @@ class Inspector(QScrollArea):
             w.blockSignals(False)
         self.mo_amount.set_value(clip.motion_amount * 100.0)
         self.mo_amount.setEnabled(bool(clip.motion))
-        self.cb_ease.setEnabled(bool(clip.motion))
+        self.cb_ease.setEnabled(bool(clip.motion) and clip.motion not in motion.FAST_KINDS)
+        main = isinstance(clip, TimelineClip) and not spherical.is_360(f)
+        self.grp_face.setVisible(isinstance(clip, TimelineClip))
+        self.grp_face.setEnabled(main)
+        self.cb_face.blockSignals(True)
+        self.cb_face.setCurrentIndex(max(0, self.cb_face.findData(clip.face_fx if main else "")))
+        self.cb_face.blockSignals(False)
+        if main:
+            self.face_amt.set_value(clip.face_amount * 100.0)
+        self.face_amt.setEnabled(main and bool(clip.face_fx))
         if clip.stabilize > 0:
             self.st_strength.set_value(clip.stabilize * 100.0)
         can = not f.is_image and not spherical.is_360(f)
@@ -595,9 +622,33 @@ class Inspector(QScrollArea):
             c.motion = key
             if key in motion.FACE_KINDS:
                 c.motion_face = None          # found again, in the clip's moment as it is now
+            if key in motion.FAST_KINDS and c.motion_amount < motion.FAST_AMOUNT:
+                c.motion_amount = motion.FAST_AMOUNT    # a quick effect is meant to be seen
+        if key in motion.FAST_KINDS and self.clip is not None:
+            self.mo_amount.set_value(self.clip.motion_amount * 100.0)
         self.mo_amount.setEnabled(bool(key))
-        self.cb_ease.setEnabled(bool(key))
+        self.cb_ease.setEnabled(bool(key) and key not in motion.FAST_KINDS)
         self.changed.emit("motion")
+
+    def _set_face_fx(self):
+        if self.clip is None:
+            return
+        self.before_change.emit("face:kind")
+        key = self.cb_face.currentData() or ""
+        for c in self.targets:
+            if isinstance(c, TimelineClip):
+                c.face_fx = key
+        self.face_amt.setEnabled(bool(key))
+        self.changed.emit("face")
+
+    def _set_face_amount(self, val: float):
+        if self.clip is None:
+            return
+        self.before_change.emit("face:amount")
+        for c in self.targets:
+            if isinstance(c, TimelineClip):
+                c.face_amount = float(val) / 100.0
+        self.changed.emit("face")
 
     def _set_ease(self):
         if self.clip is None:
