@@ -25,8 +25,19 @@ MOTIONS = {
     "out_right": "Zoom out, pan right",
     "face": "Zoom in on the face",
     "face_out": "Zoom out from the face",
+    # Quick effects: timed in seconds (not spread over the clip), at least FAST_AMOUNT of zoom.
+    "punch_in": "Fast zoom in (punch in)",
+    "punch_out": "Fast zoom out",
+    "pulse": "Zoom pulse (in and back out)",
+    "crash": "Crash zoom at the end",
+    "heartbeat": "Heartbeat (two quick pulses, repeating)",
+    "shake": "Camera shake",
+    "wobble": "Drunk wobble",
 }
 FACE_KINDS = ("face", "face_out")
+FAST_KINDS = ("punch_in", "punch_out", "pulse", "crash", "heartbeat", "shake", "wobble")
+FAST_TIME = 0.25           # seconds a fast zoom takes
+FAST_AMOUNT = 0.3          # least zoom of the fast zooms (30 %): they are meant to be seen
 EASES = {
     "both": "Ease in and out",
     "in": "Ease in",
@@ -81,12 +92,53 @@ def _fit(c: float, z: float) -> float:
     return float(np.clip(c, half, 1.0 - half))
 
 
+def _bump(t: float, start: float, length: float) -> float:
+    """0 -> 1 -> 0 over `length` seconds from `start`: up fast, down a little slower (a punch)."""
+    u = (t - start) / max(1e-6, length)
+    if u <= 0.0 or u >= 1.0:
+        return 0.0
+    return ease(u / 0.35, "out") if u < 0.35 else 1.0 - ease((u - 0.35) / 0.65, "both")
+
+
+def fast(kind: str, amount: float, t: float, dur: float) -> tuple[float, float, float]:
+    """A quick effect's window (centre x, centre y, zoom) `t` seconds into a clip `dur` seconds long."""
+    amount = max(FAST_AMOUNT, amount)
+    z1 = 1.0 + amount
+    ft = min(FAST_TIME, dur / 2)
+    if kind == "punch_in":
+        return 0.5, 0.5, 1.0 + amount * ease(t / max(1e-6, ft), "out")
+    if kind == "punch_out":
+        return 0.5, 0.5, z1 - amount * ease(t / max(1e-6, ft), "out")
+    if kind == "pulse":
+        return 0.5, 0.5, 1.0 + amount * _bump(t, 0.0, min(0.6, dur))
+    if kind == "crash":
+        return 0.5, 0.5, 1.0 + amount * ease((t - (dur - ft)) / max(1e-6, ft), "in")
+    if kind == "heartbeat":
+        beat = 1.0                                  # one heartbeat a second: lub-dub
+        ph = t % beat
+        return 0.5, 0.5, 1.0 + amount * max(_bump(ph, 0.0, 0.22), 0.7 * _bump(ph, 0.26, 0.22))
+    z = 1.0 + amount * 0.5
+    room = 0.5 - 0.5 / z                            # how far the window can move off centre
+    if kind == "shake":                             # quick, uneven: a few sines of unrelated rates
+        dx = np.sin(t * 37.0) * 0.6 + np.sin(t * 23.0 + 1.3) * 0.4
+        dy = np.sin(t * 31.0 + 0.7) * 0.6 + np.sin(t * 19.0 + 2.1) * 0.4
+        return 0.5 + room * 0.9 * dx, 0.5 + room * 0.9 * dy, z
+    if kind == "wobble":                            # slow and swaying
+        return 0.5 + room * 0.9 * np.sin(t * 2.2), 0.5 + room * 0.6 * np.sin(t * 3.1 + 0.8), \
+            z * (1.0 + 0.04 * np.sin(t * 1.7))
+    return 0.5, 0.5, 1.0
+
+
 def dynamic(kind: str, amount: float, ease_kind: str, u: float,
-            target: tuple = (0.5, 0.5)) -> tuple[float, float, float]:
+            target: tuple = (0.5, 0.5), dur: float = 1.0) -> tuple[float, float, float]:
     """The dynamic zoom's window (centre x, centre y, zoom) at `u` (0..1) of the clip. target: the face, as parts
-    of the framed picture, for the "face" zooms."""
+    of the framed picture, for the "face" zooms; dur: the clip's length (seconds), for the quick effects."""
     if not kind:
         return 0.5, 0.5, 1.0
+    if kind in FAST_KINDS:
+        cx, cy, z = fast(kind, amount, u * dur, dur)
+        z = max(1.0, z)
+        return _fit(cx, z), _fit(cy, z), z
     (x0, y0, z0), (x1, y1, z1) = _ends(kind, amount, target)
     e = ease(u, ease_kind)
     z = z0 * (z1 / z0) ** e                     # zooms at an even pace (not faster at the wide end)
@@ -125,6 +177,8 @@ class Motion:
 
     def max_zoom(self) -> float:
         z = 1.0 + max(0.0, self.amount) if self.kind else 1.0
+        if self.kind in FAST_KINDS:
+            z = 1.0 + max(FAST_AMOUNT, self.amount)
         return z * (self.stab.zoom if self.stab is not None else 1.0)
 
     def window(self, off: float, src_t: float, kx: float = 1.0, ky: float = 1.0, x0: float = 0.0,
@@ -135,7 +189,7 @@ class Motion:
         the source moves the window as much on the picture; x0 / y0: where the crop starts, as parts of the
         framed picture (see at_placement)."""
         target = (self.face[0] * kx - x0, self.face[1] * ky - y0) if self.face else (0.5, 0.5)
-        cx, cy, z = dynamic(self.kind, self.amount, self.ease, off / max(1e-6, self.dur), target)
+        cx, cy, z = dynamic(self.kind, self.amount, self.ease, off / max(1e-6, self.dur), target, self.dur)
         turn = 0.0
         if self.stab is not None:
             sx, sy, sa = self.stab.at(src_t)

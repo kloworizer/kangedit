@@ -875,7 +875,8 @@ class Viewer(QWidget):
                     box=(clip.box_x, clip.box_y, clip.box_w, clip.box_h) if clip.box_w > 0 and clip.box_h > 0 else (),
                     speed=clip.speed, ramp=clip.ramp, src_len=clip.src_dur,
                     view=spherical.view_of(clip) if spherical.is_360(f) else None,
-                    motion=motion.of_clip(clip, f, self._aspect(clip)))
+                    motion=motion.of_clip(clip, f, self._aspect(clip)),
+                    face_fx=clip.face_fx if clip.face_amount > 0 else "", face_amount=clip.face_amount)
 
     def _aspect(self, clip) -> float:
         """Width / height of the picture a main-track clip shows in (its box, or the frame)."""

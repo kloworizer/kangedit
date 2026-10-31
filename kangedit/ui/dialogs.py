@@ -24,7 +24,7 @@ from ..captions import ANIMATIONS, LANGUAGES, WHISPER_MODELS, merged_transcript
 from ..config import (ASPECT_RATIOS, CACHE_KINDS, FRAME_RATES, RESOLUTIONS, cache_root, default_cache_root,
                       fmt_bytes, folder_size, frame_size, open_path, settings as app_settings)
 from ..export import (BATCH_ASPECTS, CAPTION_MODES, CODECS, CUSTOM, LOUDNESS_TARGETS, PRESETS, QUALITIES,
-                      ExportSettings, apply_preset, aspect_suffix, batch_settings)
+                      ExportSettings, apply_preset, aspect_suffix, batch_settings, existing_outputs)
 from .platform_overlay import PLATFORM_OVERLAYS
 from ..fonts import ensure_qt_font, font_files, system_fonts
 from ..models import CaptionStyle, Project
@@ -723,16 +723,41 @@ class ExportDialog(QDialog):
 
     def _browse(self):
         ext = CODECS[self.cb_codec.currentData()][1]
-        path, _ = QFileDialog.getSaveFileName(self, "Export video", self.ed_out.text(), f"Video (*{ext})")
+        # (replacing a file is asked about once, on Export: see confirm_overwrite)
+        path, _ = QFileDialog.getSaveFileName(self, "Export video", self.ed_out.text(), f"Video (*{ext})",
+                                              options=QFileDialog.DontConfirmOverwrite)
         if path:
             self.ed_out.setText(path)
 
     def _accept(self):
         if not self.ed_out.text().strip():
             return
+        if not self.confirm_overwrite():
+            return
         os.makedirs(os.path.dirname(os.path.abspath(self.ed_out.text())), exist_ok=True)
         app_settings().setValue("export_preset", self.cb_preset.currentData())
         self.accept()
+
+    def existing_files(self) -> list[str]:
+        """The files this export would make that are already there (the main one and the batch ones)."""
+        return existing_outputs(self.all_settings())
+
+    def confirm_overwrite(self) -> bool:
+        """Ask before replacing files that are already there; False keeps the dialog open to choose another
+        name."""
+        there = self.existing_files()
+        if not there:
+            return True
+        names = "\n".join(os.path.basename(p) for p in there[:8]) + (f"\n… and {len(there) - 8} more"
+                                                                    if len(there) > 8 else "")
+        box = QMessageBox(QMessageBox.Warning, "Export",
+                          ("This file already exists:" if len(there) == 1 else "These files already exist:")
+                          + f"\n\n{names}\n\nin {os.path.dirname(there[0])}", parent=self)
+        box.setInformativeText("Replace " + ("it" if len(there) == 1 else "them") + "?")
+        b_replace = box.addButton("Replace", QMessageBox.DestructiveRole)
+        box.addButton("Choose another name", QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is b_replace
 
     def platform_overlay(self) -> Optional[str]:
         """The app overlay (PLATFORM_OVERLAYS key) to show in the viewer for the chosen preset, or None."""
