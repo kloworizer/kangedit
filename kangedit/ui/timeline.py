@@ -1,5 +1,6 @@
-"""Timeline: the magnetic main track (reorder, trim and slip clips), video layers above it, titles,
-sound effects and captions. Lane heights can be changed by dragging their bottom edges."""
+"""Timeline: the main track (reorder, trim and slip clips; magnetic, or with the magnet off clips placed freely with
+black gaps between them, see gaps.py), video layers above it, titles, sound effects and captions. Lane heights can
+be changed by dragging their bottom edges."""
 
 from __future__ import annotations
 
@@ -8,12 +9,12 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFormLayout, QFrame, QWidgetAction, QHBoxLayout, QLabel, QMenu,
                                QPushButton, QScrollArea, QScrollBar, QSizePolicy, QSlider, QToolButton, QVBoxLayout,
                                QWidget)
 
-from .. import images, sfx
+from .. import gaps, images, sfx
 from ..analysis import WAVE_RATE, Analysis
 from ..captions import Caption, caption_color, shift_group
 from ..edits import TRANSITIONS, edits
@@ -104,6 +105,7 @@ class TimelineView(QWidget):
         self._selection: set[str] = set()  # every selected clip, including the primary one
         self._ov_selection: set[str] = set()   # selected clips on the video layers (Ctrl+A, Ctrl+click)
         self.mode = "move"       # move | slip
+        self.magnetic = True     # off: a moved clip leaves black behind and goes where it is dropped (gaps.place)
         self.min_gap = 0.0
         self._conflicts: set[str] = set()
         self._drag: Optional[dict] = None
@@ -420,7 +422,15 @@ class TimelineView(QWidget):
         d = self._drag
         if d and d.get("kind") in ("trim_l", "trim_r") and d.get("active") and "dur0" in d:
             self._paint_trim_length(p, d)
-        if d and d.get("kind") == "move" and d.get("active") and d.get("drop") is not None:
+        if d and d.get("kind") == "move" and d.get("active") and d.get("free") is not None:
+            # Magnet off: the clip drawn where it will go (a black gap stays where it was)
+            x0, x1 = self.t_to_x(d["free"]), self.t_to_x(d["free"] + d["dur0"])
+            p.setPen(QPen(QColor("#ffd34d"), 2))
+            p.setBrush(QColor(255, 211, 77, 50))
+            p.drawRoundedRect(QRectF(x0, self.track_y + 2, max(3.0, x1 - x0), self.track_h - 4), 4, 4)
+            p.setPen(QColor("#ffd34d"))
+            p.drawText(QPointF(x0 + 4, self.track_y - 2), fmt_time(d["free"]))
+        elif d and d.get("kind") == "move" and d.get("active") and d.get("drop") is not None:
             starts = self.project.clip_starts() + [self.project.duration]
             x = self.t_to_x(starts[d["drop"]])
             p.setPen(QPen(QColor("#ffd34d"), 3))
@@ -538,6 +548,9 @@ class TimelineView(QWidget):
 
     def _paint_clip(self, p: QPainter, c, r: QRectF):
         f = self.project.footage.get(c.footage_id)
+        if f is not None and f.generated == gaps.BLACK:
+            self._paint_black(p, c, r)
+            return
         col = self._footage_color(c.footage_id)
         path = QPainterPath()
         path.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
@@ -623,6 +636,22 @@ class TimelineView(QWidget):
             p.drawRect(QRectF(r.right() - 4, r.top() + 16, 4, self.track_h - 16))
 
     # ------------------------------------------------------------------ interaction
+    def _paint_black(self, p: QPainter, c, r: QRectF):
+        """A black clip (a black frame, or a gap left with the magnet off): dark, hatched, labelled."""
+        sel = c.id in self._selection
+        p.save()
+        p.setPen(QPen(QColor("#4c8dff") if sel else QColor("#3a3d44"), 2 if sel else 1, Qt.DashLine))
+        p.setBrush(QBrush(QColor("#2a2c31"), Qt.BDiagPattern))
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+        if r.width() > 30:
+            p.setPen(QColor("#8b909a"))
+            f = QFont()
+            f.setPixelSize(10)
+            p.setFont(f)
+            p.drawText(r.adjusted(4, 2, -2, 0), Qt.AlignTop | Qt.AlignLeft,
+                       p.fontMetrics().elidedText(f"Black {c.duration:.2f}s", Qt.ElideRight, int(r.width() - 6)))
+        p.restore()
+
     def _snap(self, t: float) -> float:
         fps = max(1.0, self.project.settings.fps)
         return round(t * fps) / fps
@@ -1194,6 +1223,7 @@ class TimelineView(QWidget):
             self._menu_action(m, "Add a video layer", "layer_add", "")
         m.addSeparator()
         self._menu_action(m, "Move playhead here", "seek", f"{t:.4f}")
+        self._black_menu(m, t)
         if self.project.clips:
             self._menu_action(m, "Split at playhead\tS", "split_playhead", "")
             self._menu_action(m, "Select all clips\tCtrl+A", "select_all", "")
@@ -1201,6 +1231,11 @@ class TimelineView(QWidget):
         m.addSeparator()
         self._menu_action(m, "Generate captions", "captions_generate", "")
         m.exec(gpos)
+
+    def _black_menu(self, m: QMenu, t: float, title: str = "Insert black here"):
+        sub = m.addMenu(title)
+        for label, length in gaps.BLACK_LENGTHS:
+            self._menu_action(sub, label, "insert_black", f"{length}@{t:.4f}")
 
     def _caption_menu(self, gpos, index: int, t: float):
         m = QMenu(self)
@@ -1529,7 +1564,8 @@ class TimelineView(QWidget):
                 marks = marks_text(c)
                 self.setToolTip(f"{f.name if f else ''}\nSource {c.src_in:.2f}s → {c.src_out:.2f}s"
                                 + (f" · speed {spd}" if spd else "") + "\n" + (marks + "\n" if marks else "")
-                                + "Drag: reorder · Alt/Shift+drag: slip · Edges: trim")
+                                + ("Drag: reorder" if self.magnetic else "Drag: place anywhere (magnet off)")
+                                + " · Alt/Shift+drag: slip · Edges: trim")
             else:
                 self.setCursor(Qt.ArrowCursor)
             return
@@ -1595,6 +1631,21 @@ class TimelineView(QWidget):
             if not group:
                 self.slip_preview.emit(c.id, c.src_in)
             self.setCursor(Qt.ClosedHandCursor)
+        elif d["kind"] == "move" and not self.magnetic:
+            starts = self.project.clip_starts()
+            start0 = starts[idx]
+            free = max(0.0, start0 + dt)
+            # snaps to the cuts (and the end) nearby, either edge of the moved clip
+            cuts = [s for k, s in enumerate(starts + [self.project.duration]) if k not in (idx, idx + 1)]
+            tol = 8.0 / self.pps
+            for edge in (0.0, d["dur0"]):
+                near = min(cuts, key=lambda s: abs(s - (free + edge)), default=None)
+                if near is not None and abs(near - (free + edge)) < tol:
+                    free = max(0.0, near - edge)
+                    break
+            d["free"] = free
+            self.update()
+            return
         elif d["kind"] == "move":
             t = self.x_to_t(pos.x())
             starts = self.project.clip_starts()
@@ -1656,7 +1707,14 @@ class TimelineView(QWidget):
             self.setCursor(Qt.ArrowCursor)
             self.refresh()
             return
-        if d["kind"] == "move" and d.get("active") and d.get("drop") is not None:
+        if d["kind"] == "move" and d.get("active") and d.get("free") is not None:
+            i = self.project.index_of(d["clip"])
+            if i >= 0 and abs(d["free"] - self.project.clip_starts()[i]) > 1e-3:
+                self.edit_started.emit()
+                gaps.place(self.project, d["clip"], d["free"])
+                self.edited.emit()
+                self.edit_finished.emit()
+        elif d["kind"] == "move" and d.get("active") and d.get("drop") is not None:
             i = self.project.index_of(d["clip"])
             drop = d["drop"]
             if i >= 0 and drop not in (i, i + 1):
@@ -1767,6 +1825,8 @@ class TimelineView(QWidget):
             act = QAction(label, m)
             act.triggered.connect(lambda _=False, k=key: self.context_action.emit(k, clip_id))
             m.addAction(act)
+            if key == "rotate:90":
+                self._black_menu(m, self.playhead, "Insert black at the playhead")
         m.exec(gpos)
 
 
@@ -1774,6 +1834,7 @@ class TimelinePanel(QWidget):
     """Timeline view + mode buttons, zoom and lane-height controls and scrollbars."""
 
     fades_changed = Signal()   # the fade controls edited project.settings
+    magnet_changed = Signal(bool)   # the magnetic timeline was turned on / off
 
     def __init__(self, project: Project, parent=None):
         super().__init__(parent)
@@ -1797,6 +1858,11 @@ class TimelinePanel(QWidget):
         grp.addButton(self.btn_move)
         grp.addButton(self.btn_slip)
         self.btn_move.toggled.connect(lambda on: setattr(self.view, "mode", "move" if on else "slip"))
+        self.btn_magnet = QToolButton(text="🧲 Magnetic", checkable=True, checked=True)
+        self.btn_magnet.setToolTip("Magnetic timeline: clips stay together, a moved clip goes in at a cut and "
+                                   "deleting closes the gap.\nOff: drag a clip anywhere to make space; where it was "
+                                   "stays black, and deleting leaves a black gap (M).")
+        self.btn_magnet.toggled.connect(self._magnet_toggled)
         self.btn_split = QToolButton(text="✂ Split")
         self.btn_delete = QToolButton(text="🗑 Delete")
         self.btn_fade = QToolButton(text="◐ Fade")
@@ -1847,7 +1913,8 @@ class TimelinePanel(QWidget):
             lbl.setStyleSheet("color: #45484f;")
             return lbl
 
-        top.add(self.btn_undo, self.btn_redo, sep(), self.btn_move, self.btn_slip, self.btn_split, self.btn_delete,
+        top.add(self.btn_undo, self.btn_redo, sep(), self.btn_move, self.btn_slip, self.btn_magnet, self.btn_split,
+                self.btn_delete,
                 self.btn_fade, sep(), self.btn_hook, self.btn_alt, self.btn_link)
         self.lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # Always room for the clip count and length; the overlap warning after it may be clipped (tooltip).
@@ -1882,6 +1949,15 @@ class TimelinePanel(QWidget):
         lay.addWidget(self.area, 1)
         lay.addWidget(self.scroll)
         self.view.heights_changed.connect(lambda _h: self._sync_heights())
+
+    def _magnet_toggled(self, on: bool):
+        self.view.magnetic = on
+        self.btn_magnet.setText("🧲 Magnetic" if on else "🧲 Free")
+        self.magnet_changed.emit(on)
+
+    def set_magnetic(self, on: bool):
+        self.btn_magnet.setChecked(on)
+        self._magnet_toggled(on)
 
     def _heights_menu(self) -> QMenu:
         m = QMenu(self)

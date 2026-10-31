@@ -75,6 +75,11 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **Chroma key** | A clip filmed in front of a green or blue screen, on a video layer: the **🧩 Layer** tab's *Chroma key* makes the screen see-through so the layers below show behind the subject. *Auto* reads the screen colour from the picture's edges (or pick *Green*, *Blue* or any colour); *Amount* and *Soft edge* tune the key, and the screen's green / blue spill on hair and skin is taken off. The preview shows the key as the export makes it. |
 | **360° footage** | Insta360, DJI Osmo 360, GoPro Max and other 360° cameras: each clip shows a flat view of the sphere, and the Inspector's **360° view** group sets where it looks (left / right, up / down, tilt) and how wide, or turns the whole sphere into a **tiny planet**. Different clips of the same file can look different ways, and on a video layer a 360° clip is a 16:9 view (a square tiny planet). 360° videos with spherical metadata (exported from the camera's app, or recorded as 360° video) are recognised on import, raw `.insv` / `.osv` dual-fisheye files too; right-click media → *360° footage* sets it by hand. Raw dual-fisheye files are stitched without the camera's lens calibration, so seams can show: for the cleanest picture, export a 360° video from the camera's app (Insta360 Studio, DJI Mimo / LightCut) and import that. |
 | **Dynamic zoom** | A slow zoom or pan inside a clip's picture, as DaVinci Resolve's *Dynamic Zoom* (the Ken Burns effect): **Clip** tab → *Dynamic zoom* → *Zoom in / out*, *Pan left / right / up / down* or a zoom with a pan, *Zoom in on / out from the face* (the face is found in the clip's own moment; none found: the middle), how much (5-15 % looks natural) and the easing. Brings life to photos and steady shots; works on clips on the video layers too, and the preview shows it as the export makes it. |
+| **Text: opacity and video inside the text** | The **Text** tab's *Opacity* makes a title see-through (its outline and box too; animations fade to it). *Fill → Video inside the text* (or the **Video in text** template) turns the letters into windows onto the video, with the rest of the frame covered in a colour of your choice (*Around*: colour and how much it covers). Big, bold letters work best; the preview shows it as the export makes it. |
+| **Quick zoom effects** | The same *Zoom and movement effects* list has quick ones, timed in seconds: **Fast zoom in (punch in)**, **Fast zoom out**, **Zoom pulse** (in and back out), **Crash zoom at the end**, **Heartbeat** (two quick pulses every second), **Camera shake** and **Drunk wobble**. They zoom at least 30 % so they are seen; *Amount* makes them stronger. |
+| **Face filters** | **Clip** tab → *Face filter*: **Big head**, **Tiny head** and funny faces (**big eyes**, **big mouth**, **wide face**, **long face**, **alien**). The face is found in every frame and the picture is warped smoothly around it, following it as it moves (a face lost for a moment keeps its effect, fading out). *Strength* sets how much. Main-track clips; the preview shows it as the export makes it. |
+| **Black frames and gaps** | *Edit → Insert black at the playhead* (**B**: one black frame; or 0.5 / 1 / 2 / 5 s), also in the timeline's right-click menus. Black clips show hatched on the timeline and can be trimmed, moved and given transitions like any clip. |
+| **Magnetic timeline on / off** | **🧲 Magnetic** in the timeline toolbar (*Edit → Magnetic timeline*, **M**). On, clips stay together. Off (**🧲 Free**), drag a clip anywhere to make space: where it was stays black, dropped on black it takes that space, dropped past the end black fills the space before it, and *Delete* leaves a black gap (delete the gap itself to close it). Remembered between sessions. |
 | **Stabilize** | **Clip** tab → *Stabilize the camera* smooths a shaky handheld clip. The camera's movement is measured once (in the background, a few seconds per clip, kept in the cache), the picture follows a steadier path and is zoomed in just enough to hide the edges. *Strength*: low keeps the camera's moves (a walk, a pan) and takes out the shake, high holds the picture almost still, as on a tripod. Trimming or slipping past the measured part measures the new part. Clips on the video layers can be stabilized too. |
 | **Voice clean-up** | **Clip** tab → Audio → *Clean up the voice (noise, wind)* takes background noise and the rumble of wind out of a clip's speech (a high-pass and FFT noise reduction tuned to the clip's measured noise level), heard in playback as exported; *Clean-up* sets how much. *🎙 Clean up every clip with wind* switches it on wherever the smarter analysis heard wind on the microphone. |
 | **Rotation** | Any clip (Reframe → *Rotation*, or right-click → *Rotate 90°*) and any layer clip can be rotated. Quarter turns rotate the footage before it fills the frame, so a phone clip recorded sideways fills it upright. |
@@ -118,6 +123,7 @@ Everything runs on your own computer. Analysis, speech recognition and rendering
 | **GPU preview without proxies** | With *Tools → GPU video decoding for the preview* on *Auto* (the default), big footage (4K, 10-bit HEVC, or anything above 1080p without a proxy) is decoded by the graphics card for the preview; smaller footage stays on the CPU, which is faster for it. If the card can't decode a file, the CPU takes over. Proxies, when on, are used as before. |
 | **Export presets** | The export dialog's *Preset*: YouTube (1080p / 4K), YouTube Shorts, Instagram Reels, TikTok and Instagram feed set the frame, format and a **-14 LUFS loudness target** (also Off / -16 / -23 by hand), the mix normalised with its peaks under -1.5 dBTP. Reels and TikTok can show that app's safe area in the viewer. |
 | **Batch export** | *Also export as* in the export dialog: extra 16:9, 9:16, 1:1 or 4:5 versions of the same edit next to the main file (`myvideo_9x16.mp4`), each re-framed with its own caption layout, one after another with one summary at the end. |
+| **Replacing a file** | When the file the export would write (or one of the *Also export as* files) is already there, KangEdit asks before replacing it; *Choose another name* goes back to the dialog. |
 | **Version history** | *File → Version history…*: earlier versions of a saved project are kept on each save, every few minutes of auto-saving and right before Auto Edit or a script edit replaces the timeline, with what changed since each. *Restore* one (the current state is kept as a version first) or *Open as copy*, even after closing the app. The newest 50 per project are kept. |
 | **Proxies** | Optional 360–1080p short-GOP H.264 copies for lighter editing. They are decoded and encoded on the graphics card when it can (same detection as analysis and export), and redone on the CPU for footage the GPU can't decode. Exports use the originals unless you choose *Draft export*. |
 
@@ -240,6 +246,8 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 | S | Split at the playhead |
 | Del | Delete the selected clips (or the selected sound) |
 | Ctrl+D | Duplicate clip |
+| B | Insert a black frame at the playhead (*Edit → Insert black* for longer) |
+| M | Magnetic timeline on / off |
 | Ctrl+A | Select all clips, video layers included (in the Media panel: all the media it shows) |
 | R | Other moment: swap the clip for the best moment close by (its length follows the new moment) |
 | Ctrl+Shift+− / Ctrl+Shift+= | Regenerate the auto edit shorter / longer |
@@ -253,7 +261,7 @@ To start KangEdit directly afterwards, run `.venv/bin/python main.py` (macOS/Lin
 
 | Mouse on the timeline | Action |
 |---|---|
-| Drag a clip | Reorder |
+| Drag a clip | Reorder (magnet off: place it anywhere, leaving black where it was) |
 | Drag a clip's edge | Trim |
 | Alt/Shift+drag (or *Slip* mode) | Slide the moment inside the clip |
 | Ctrl+click / Shift+click | Add to the selection / select a range |
@@ -517,7 +525,9 @@ kangedit/
   preview.py            background preview engine: decode thread + render pool, read-ahead, pre-roll, transitions
   decoder.py            PyAV frame-accurate decoding
   reframe.py            aspect-ratio crop/fit geometry (shared by preview and export)
-  motion.py             dynamic zoom / pan and the stabilized window per frame (preview warp, export sendcmd)
+  motion.py             dynamic zoom / pan, quick zoom effects and the stabilized window per frame (preview warp, export sendcmd)
+  facefx.py             face filters (big head, funny faces): per-frame face tracking and warp (preview, export pre-render)
+  gaps.py               black frames and gaps, the non-magnetic timeline's moves and deletes
   stabilize.py          camera shake: measured with optical flow, cached per file, smoothed
   voice.py              voice clean-up (high-pass + FFT noise reduction at the clip's noise level), wind found
   thumbnail.py          the edit's best stills for a thumbnail, framed on the face

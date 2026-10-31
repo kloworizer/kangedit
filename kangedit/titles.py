@@ -39,6 +39,7 @@ ANIM_OUT = {
 _SLIDE = {"slide_up": (0.0, -1.0), "slide_down": (0.0, 1.0), "slide_left": (-1.0, 0.0), "slide_right": (1.0, 0.0)}
 SLIDE_DIST = 0.12        # how far a slide travels, fraction of the frame height
 ALIGNS = {"left": "Left", "center": "Centre", "right": "Right"}
+FILLS = {"color": "Colour", "video": "Video inside the text"}
 
 # Templates: TextClip field overrides ("font" may list fallbacks, the first installed one is used).
 TEXT_PRESETS: dict[str, dict] = {
@@ -55,6 +56,9 @@ TEXT_PRESETS: dict[str, dict] = {
                     anim_in="slide_up", anim_out="slide_up"),
     "end_card": dict(label="End card", text="Thanks for watching!", size_pct=8.0, anim_in="zoom",
                      anim_out="fade", anim_dur=0.8, duration=4.0),
+    "video_text": dict(label="Video in text", text="WOW", size_pct=30.0, y=0.5, fill="video", bold=True,
+                       outline=False, font=("Impact", "Arial Black", "DejaVu Sans"), anim_in="zoom",
+                       anim_out="fade", duration=3.0),
     "text_box": dict(label="Text box", text="Add your text", size_pct=5.5, y=0.75, color="#111111",
                      outline=False, box=True, box_color="#FFFFFF", box_opacity=92.0, anim_in="slide_up",
                      anim_out="fade"),
@@ -129,7 +133,7 @@ def text_state(tc: TextClip, t: float) -> Optional[TextState]:
     lt = t - tc.start
     if lt < 0 or lt >= tc.duration or not tc.text.strip():
         return None
-    st = TextState()
+    st = TextState(alpha=max(0.0, min(1.0, tc.opacity / 100.0)))
     a_in, a_out = anim_lengths(tc)
     n = len(tc.text.replace("\n", ""))
     if a_in > 0 and lt < a_in:
@@ -180,11 +184,27 @@ def _alignment(tc: TextClip) -> int:
     return {"left": 4, "right": 6}.get(tc.align, 5)    # numpad layout, vertically centred
 
 
-def write_titles_ass(path: str, texts: list[TextClip], width: int, height: int, fps: float) -> int:
-    """Write the text clips as an ASS file for ffmpeg's subtitles filter. Returns the number of events."""
+def is_video_text(tc: TextClip) -> bool:
+    return getattr(tc, "fill", "color") == "video"
+
+
+def video_text_cover(tc: TextClip, st: TextState) -> float:
+    """How much (0..1) the background around a video-filled text covers the picture in state st: it comes and
+    goes with the text (its opacity and fades)."""
+    return max(0.0, min(1.0, st.alpha)) * max(0.0, min(1.0, tc.bg_opacity / 100.0))
+
+
+def write_titles_ass(path: str, texts: list[TextClip], width: int, height: int, fps: float,
+                     mode: str = "titles") -> int:
+    """Write the text clips as an ASS file for ffmpeg's subtitles filter. Returns the number of events.
+
+    mode "titles": the texts as they show. For texts filled with video, drawn on black and laid over the
+    picture: "mask" (white where the background covers the picture: a full-frame box at the cover's opacity
+    with the letters cut out of it in black) and "cover" (the background colour over the whole frame)."""
     fps = max(1.0, fps)
     styles: list[str] = []
     events: list[tuple[int, str]] = []     # (start in centiseconds, line)
+    rect = f"m 0 0 l {width} 0 {width} {height} 0 {height}"
     for k, tc in enumerate(texts):
         if not tc.text.strip() or tc.duration <= 0:
             continue
@@ -192,9 +212,14 @@ def write_titles_ass(path: str, texts: list[TextClip], width: int, height: int, 
         box_alpha = int(round(255 * (1.0 - max(0.0, min(100.0, tc.box_opacity)) / 100.0)))
         out_col = _color(tc.box_color, box_alpha) if tc.box else "&H00000000"
         name = f"T{k}"
-        styles.append(f"Style: {name},{tc.font},{size},{_color(tc.color)},&H000000FF,{out_col},&H00000000,"
-                      f"{-1 if tc.bold else 0},{-1 if tc.italic else 0},0,0,100,100,0,0,{border},{pad},0,"
-                      f"{_alignment(tc)},0,0,0,1")
+        if mode == "titles":
+            styles.append(f"Style: {name},{tc.font},{size},{_color(tc.color)},&H000000FF,{out_col},&H00000000,"
+                          f"{-1 if tc.bold else 0},{-1 if tc.italic else 0},0,0,100,100,0,0,{border},{pad},0,"
+                          f"{_alignment(tc)},0,0,0,1")
+        else:   # the letters alone: no outline, no box
+            styles.append(f"Style: {name},{tc.font},{size},&H00000000,&H000000FF,&H00000000,&H00000000,"
+                          f"{-1 if tc.bold else 0},{-1 if tc.italic else 0},0,0,100,100,0,0,1,0,0,"
+                          f"{_alignment(tc)},0,0,0,1")
 
         def tags(st: TextState) -> str:
             x = tc.x * width + st.dx * height
@@ -212,10 +237,29 @@ def write_titles_ass(path: str, texts: list[TextClip], width: int, height: int, 
                 parts.append(_esc(typed) + (f"{{\\alpha&HFF&}}{_esc(rest)}" if rest else ""))
             return "\\N".join(parts)
 
+        def box(color: str, cover: float) -> str:
+            a = int(round(255 * (1.0 - max(0.0, min(1.0, cover)))))
+            return (f"{{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H{_color(color)[4:]}&\\alpha&H{a:02X}&\\p1}}"
+                    f"{rect}{{\\p0}}")
+
         def event(t0: float, t1: float, st: TextState) -> None:
             c0, c1 = int(round(t0 * 100)), int(round(t1 * 100))
-            if c1 > c0 and st.alpha > 0.002 and st.scale > 0.002:
-                events.append((c0, f"Dialogue: 0,{_cs_time(c0)},{_cs_time(c1)},{name},,0,0,0,,{tags(st)}{body(st)}"))
+            if c1 <= c0:
+                return
+            span = f"{_cs_time(c0)},{_cs_time(c1)},{name},,0,0,0,,"
+            if mode == "titles":
+                if st.alpha > 0.002 and st.scale > 0.002:
+                    events.append((c0, f"Dialogue: 0,{span}{tags(st)}{body(st)}"))
+                return
+            cover = video_text_cover(tc, st)
+            if cover <= 0.002:
+                return
+            if mode == "cover":
+                events.append((c0, f"Dialogue: 0,{span}{box(tc.bg_color, 1.0)}"))
+                return
+            events.append((c0, f"Dialogue: 0,{span}{box('#FFFFFF', cover)}"))
+            if st.scale > 0.002:     # the letters, cut out: black (the picture shows through)
+                events.append((c0, f"Dialogue: 1,{span}{tags(st)}{body(st)}"))
 
         a_in, a_out = anim_lengths(tc)
         hold0, hold1 = tc.start + a_in, tc.end - a_out
@@ -231,7 +275,8 @@ def write_titles_ass(path: str, texts: list[TextClip], width: int, height: int, 
         if hold1 > hold0:
             k = math.ceil(hold0 * fps - 1e-6) / fps
             e = math.ceil(hold1 * fps - 1e-6) / fps
-            event(k, min(e, tc.end), TextState())
+            st = text_state(tc, (hold0 + hold1) / 2) or TextState()
+            event(k, min(e, tc.end), st)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("[Script Info]\nScriptType: v4.00+\nWrapStyle: 2\nScaledBorderAndShadow: yes\n")
         fh.write(f"PlayResX: {width}\nPlayResY: {height}\n\n")

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen
 
 from ..fonts import ensure_qt_font
 from ..models import TextClip
-from ..titles import TextState, ass_metrics, visible_lines
+from ..titles import TextState, ass_metrics, is_video_text, video_text_cover, visible_lines
 
 _ready_fonts: set[str] = set()
 
@@ -39,6 +39,30 @@ def text_rect(tc: TextClip, frame: QRectF, st: TextState | None = None) -> QRect
 
 def draw_text(p: QPainter, frame: QRectF, tc: TextClip, st: TextState, opacity: float = 1.0) -> None:
     """Draw one text clip in state `st` onto the frame rect (the picture's area on screen)."""
+    if is_video_text(tc):
+        _draw_video_text(p, frame, tc, st, opacity)
+        return
+    _draw_letters(p, frame, tc, st, opacity, QColor(tc.color), tc.box, bool(tc.outline))
+
+
+def _draw_video_text(p: QPainter, frame: QRectF, tc: TextClip, st: TextState, opacity: float) -> None:
+    """Video inside the text: the frame covered in the background colour, the letters cut out of it (as the
+    export's mask: see titles.write_titles_ass)."""
+    w, h = max(1, int(round(frame.width()))), max(1, int(round(frame.height())))
+    layer = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+    layer.fill(Qt.transparent)
+    bg = QColor(tc.bg_color)
+    bg.setAlphaF(max(0.0, min(1.0, video_text_cover(tc, st) * opacity)))
+    lp = QPainter(layer)
+    lp.fillRect(QRectF(0, 0, w, h), bg)
+    lp.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+    _draw_letters(lp, QRectF(0, 0, w, h), tc, st, opacity, QColor(0, 0, 0), False, False)
+    lp.end()
+    p.drawImage(QRectF(frame.left(), frame.top(), w, h), layer)
+
+
+def _draw_letters(p: QPainter, frame: QRectF, tc: TextClip, st: TextState, opacity: float, fill: QColor,
+                  with_box: bool, with_outline: bool) -> None:
     size, pad, _ = ass_metrics(tc, max(1, int(round(frame.height()))))
     font = _font(tc, size)
     fm = QFontMetricsF(font)
@@ -56,21 +80,20 @@ def draw_text(p: QPainter, frame: QRectF, tc: TextClip, st: TextState, opacity: 
     p.translate(ax, ay)
     p.scale(max(0.0, st.scale), max(0.0, st.scale))
     p.translate(-ax, -ay)
-    fill = QColor(tc.color)
     box = QColor(tc.box_color)
     box.setAlphaF(max(0.0, min(1.0, tc.box_opacity / 100.0)))
     for i, (line, (typed, _rest)) in enumerate(zip(full, shown)):
         lw = fm.horizontalAdvance(line)          # the whole line: typed letters never shift
         x = {"left": ax, "right": ax - lw}.get(tc.align, ax - lw / 2)
         top = ay - block_h / 2 + i * line_h
-        if tc.box and typed:
+        if with_box and typed:
             tw = fm.horizontalAdvance(typed)
             p.fillRect(QRectF(x - pad, top - pad / 2, tw + 2 * pad, line_h + pad), box)
         if not typed:
             continue
         path = QPainterPath()
         path.addText(QPointF(x, top + fm.ascent()), font, typed)
-        if pad and not tc.box:
+        if pad and with_outline and not tc.box:
             p.strokePath(path, QPen(QColor(0, 0, 0, 230), pad * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.fillPath(path, fill)
     p.restore()

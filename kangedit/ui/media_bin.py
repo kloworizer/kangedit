@@ -349,7 +349,7 @@ class MediaBin(QWidget):
     def _fill_bins(self):
         """The bin choices: all media, not in a bin, and each bin, with how much is in it."""
         cur = self.current_bin()
-        foot = list(self.project.footage.values())
+        foot = [f for f in self.project.footage.values() if not f.generated]   # (black: not media)
         self.cb_bin.blockSignals(True)
         self.cb_bin.clear()
         self.cb_bin.addItem(f"All media ({len(foot)})", binlib.ALL)
@@ -377,7 +377,7 @@ class MediaBin(QWidget):
         self._fill_bins()
         shown = (self.current_bin(), self.cb_kind.currentData() or "all", self.cb_ratio.currentData() or "all")
         for f in self.project.footage.values():
-            if not binlib.visible(f, *shown):
+            if f.generated or not binlib.visible(f, *shown):
                 continue
             used = self._usage.get(f.id, 0)
             in_edit = (f"Used in the edit ({used}×)" if used > 1 else "Used in the edit") if used else "Not used yet"

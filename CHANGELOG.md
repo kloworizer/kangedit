@@ -6,6 +6,27 @@ and the Release workflow uses that section as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-31
+
+### Added
+- **Text opacity**: the Text tab's *Opacity* makes a title see-through (its outline and box too); its fade
+  animations fade to that opacity. Shown in the preview as exported.
+- **Video inside the text**: *Fill → Video inside the text* (or the new *Video in text* template) makes the
+  letters windows onto the video, the rest of the frame covered in a colour you choose and how much it covers;
+  it comes and goes with the text's animations, in the preview and the export.
+- **Overwrite warning on export**: when the video file (or one of the *Also export as* files) already exists,
+  KangEdit asks before replacing it; *Choose another name* goes back to the export dialog.
+- **Quick zoom and movement effects** (Clip tab → *Zoom and movement effects*): Fast zoom in (punch in), Fast
+  zoom out, Zoom pulse, Crash zoom at the end, Heartbeat, Camera shake and Drunk wobble, alongside the slow
+  zooms and pans.
+- **Face filters** (Clip tab → *Face filter*): Big head, Tiny head, and funny faces (big eyes, big mouth, wide
+  face, long face, alien), with a strength. The face is found in every frame and followed as it moves.
+- **Insert black** (*Edit → Insert black at the playhead*, **B** for one frame, or 0.5 / 1 / 2 / 5 s; also in the
+  timeline's right-click menus): black clips show hatched on the timeline and edit like any clip.
+- **Magnetic timeline toggle** (🧲 in the timeline toolbar, *Edit → Magnetic timeline*, **M**): with the magnet off a
+  clip can be dragged anywhere to make space (black stays where it was, dropping past the end fills the space
+  with black), and deleting a clip leaves a black gap. The choice is remembered.
+
 ## [0.7.3] - 2026-10-24
 
 ### Added

@@ -1,177 +1,868 @@
 <!doctype html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KangEdit · Video editor that edits for you</title>
-<meta name="description" content="KangEdit is a free desktop video editor for Windows, macOS and Linux. It analyses your footage, picks the best moments and builds the edit, with offline captions, colour, stabilisation and sound. Everything runs on your computer.">
-<meta property="og:title" content="KangEdit: a video editor that edits for you">
-<meta property="og:description" content="Auto Edit, offline captions (Whisper, Qwen3-ASR), colour, stabilisation, multicam and more. Windows, macOS, Linux.">
+<title>KangEdit · Editor video yang mengedit untukmu</title>
+<meta name="description" content="KangEdit adalah editor video desktop gratis untuk Windows, macOS dan Linux. Ia menganalisis rekamanmu, memilih momen terbaik dan menyusun editnya, lengkap dengan caption offline, warna, stabilisasi dan suara. Semuanya berjalan di komputermu.">
+<meta property="og:title" content="KangEdit: editor video yang mengedit untukmu">
+<meta property="og:description" content="Auto Edit, caption offline (Whisper, Qwen3-ASR), warna, stabilisasi, multicam dan banyak lagi. Windows, macOS, Linux.">
 <meta property="og:image" content="assets/screenshot.jpg">
+<meta property="og:locale" content="id_ID">
+<meta property="og:locale:alternate" content="en_US">
+<meta name="theme-color" content="#1f2229">
 <link rel="icon" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
+  /* Dark neumorphism: every surface is the page colour, lifted by a dark shadow below-right and a light one
+     above-left; pressed things use the same shadows inset. Colour comes only from the accent gradient. */
   :root {
-    --bg: #f7f7f9; --surface: #ffffff; --text: #17181c; --muted: #5b5f6a; --line: #e3e4e9;
-    --accent: #2f6fe4; --accent-text: #ffffff; --accent-soft: #e8efff; --gold: #b7791f;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #121317; --surface: #1b1d22; --text: #eceef3; --muted: #a1a6b2; --line: #2b2e36;
-      --accent: #5b8ff5; --accent-text: #0d1220; --accent-soft: #1e2a44; --gold: #f2c14e;
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #121317; --surface: #1b1d22; --text: #eceef3; --muted: #a1a6b2; --line: #2b2e36;
-    --accent: #5b8ff5; --accent-text: #0d1220; --accent-soft: #1e2a44; --gold: #f2c14e;
+    color-scheme: dark;
+    --bg: #1f2229; --bg-deep: #1a1c22; --text: #eef0f6; --muted: #9aa1b2; --faint: #6c7385;
+    --sh-dark: #15171c; --sh-light: #292d36;
+    --c1: #19f0a8; --c2: #2f8cff; --c3: #a95cff; --c4: #ff7ac6;
+    --grad: linear-gradient(135deg, var(--c1) 0%, var(--c2) 50%, var(--c3) 100%);
+    --raise: 9px 9px 20px var(--sh-dark), -9px -9px 20px var(--sh-light);
+    --raise-sm: 5px 5px 12px var(--sh-dark), -5px -5px 12px var(--sh-light);
+    --press: inset 5px 5px 12px var(--sh-dark), inset -5px -5px 12px var(--sh-light);
+    --press-sm: inset 3px 3px 7px var(--sh-dark), inset -3px -3px 7px var(--sh-light);
+    --r: 22px;
   }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.55;
-         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-  a { color: var(--accent); }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
-  header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 0; }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--text);
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 84px; }
+  html, body { overflow-x: clip; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.6 "Poppins", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  a { color: var(--c2); }
+  img { max-width: 100%; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 16px; position: relative; }
+  .grad-text { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* Background glows and 3D blobs */
+  .glow { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .35; pointer-events: none; z-index: 0; }
+  .orb { position: absolute; border-radius: 50%; pointer-events: none; z-index: 0;
+         box-shadow: inset -18px -22px 40px rgba(0,0,0,.35), inset 14px 16px 30px rgba(255,255,255,.25),
+                     20px 30px 60px rgba(0,0,0,.45); }
+  .orb.green { background: radial-gradient(circle at 35% 30%, #7dffd2, var(--c1) 45%, #06a477 100%); }
+  .orb.blue { background: radial-gradient(circle at 35% 30%, #8fc3ff, var(--c2) 45%, #1a4fd0 100%); }
+  .orb.violet { background: radial-gradient(circle at 35% 30%, #dcb6ff, var(--c3) 45%, #5b22c4 100%); }
+  @media (prefers-reduced-motion: no-preference) {
+    .float { animation: float 9s ease-in-out infinite; }
+    .float.slow { animation-duration: 13s; }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-16px); } }
+  }
+
+  /* Header */
+  header.top { position: sticky; top: 0; z-index: 50; padding: 12px 0; background: rgba(31,34,41,.82);
+               backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px; color: var(--text);
            text-decoration: none; }
-  .brand img { width: 32px; height: 32px; }
-  nav a { color: var(--muted); text-decoration: none; margin-left: 18px; font-size: 15px; }
-  nav a:hover { color: var(--text); }
-  .hero { text-align: center; padding: 40px 0 24px; }
-  .hero h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.15; margin: 0 0 14px; letter-spacing: -0.02em; }
-  .hero p.lead { font-size: clamp(17px, 2.2vw, 20px); color: var(--muted); max-width: 720px; margin: 0 auto 26px; }
-  .downloads { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
-  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 10px;
-         border: 1px solid var(--line); background: var(--surface); color: var(--text); text-decoration: none;
-         font-weight: 600; font-size: 15px; }
-  .btn:hover { border-color: var(--accent); }
-  .btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  .btn small { font-weight: 400; opacity: 0.8; }
-  .version { margin-top: 12px; color: var(--muted); font-size: 14px; }
-  .shot { margin: 34px auto 10px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line);
-          box-shadow: 0 18px 50px rgba(0,0,0,0.18); }
-  .shot img { display: block; width: 100%; height: auto; }
-  .caption-note { text-align: center; color: var(--muted); font-size: 13px; margin: 0 0 30px; }
-  section { padding: 34px 0; }
-  section h2 { font-size: clamp(24px, 3.2vw, 30px); margin: 0 0 8px; letter-spacing: -0.01em; }
-  section p.sub { color: var(--muted); margin: 0 0 22px; max-width: 760px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-  .card h3 { margin: 0 0 6px; font-size: 17px; }
-  .card p { margin: 0; color: var(--muted); font-size: 15px; }
-  .card .em { font-size: 22px; display: block; margin-bottom: 6px; }
-  .steps { counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
-  .step { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-  .step::before { counter-increment: step; content: counter(step); display: inline-grid; place-items: center;
-                  width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
-                  font-weight: 700; margin-bottom: 8px; }
-  .step h3 { margin: 0 0 4px; font-size: 16px; }
-  .step p { margin: 0; color: var(--muted); font-size: 15px; }
-  .privacy { background: var(--accent-soft); border-radius: 14px; padding: 22px; }
-  .privacy h2 { margin-top: 0; }
-  table.req { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line);
-              border-radius: 12px; overflow: hidden; font-size: 15px; }
-  table.req th, table.req td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line);
-                               vertical-align: top; }
-  table.req tr:last-child th, table.req tr:last-child td { border-bottom: 0; }
-  table.req th { width: 30%; font-weight: 600; }
+  .brand .logo { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+                 box-shadow: var(--raise-sm); }
+  .brand img { width: 26px; height: 26px; }
+  nav.links { display: flex; gap: 4px; }
+  nav.links a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; padding: 8px 12px;
+                border-radius: 12px; transition: color .2s, box-shadow .2s; }
+  nav.links a:hover { color: var(--text); box-shadow: var(--press-sm); }
+  .tools { display: flex; align-items: center; gap: 10px; }
+  .lang { display: flex; padding: 4px; border-radius: 14px; box-shadow: var(--press-sm); }
+  .lang button { font: inherit; font-size: 13px; font-weight: 600; color: var(--muted); background: none; border: 0;
+                 padding: 6px 10px; border-radius: 10px; cursor: pointer; }
+  .lang button[aria-pressed="true"] { color: #0e1116; background: var(--grad); box-shadow: 0 4px 14px rgba(47,140,255,.35); }
+  .lang button:focus-visible, .btn:focus-visible, summary:focus-visible, nav.links a:focus-visible {
+    outline: 2px solid var(--c2); outline-offset: 2px; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 13px 20px; border-radius: 16px; border: 0;
+         background: var(--bg); color: var(--text); text-decoration: none; font-weight: 600; font-size: 15px;
+         box-shadow: var(--raise-sm); transition: box-shadow .2s, transform .2s; cursor: pointer; }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { box-shadow: var(--press-sm); transform: none; }
+  .btn small { font-weight: 400; color: var(--muted); }
+  .btn.primary { background: var(--grad); color: #0b0e14; box-shadow: var(--raise-sm), 0 10px 30px rgba(47,140,255,.35); }
+  .btn.primary small { color: rgba(11,14,20,.7); }
+  .btn.sm { padding: 9px 14px; font-size: 14px; border-radius: 13px; }
+  .btn svg { width: 18px; height: 18px; flex: none; }
+
+  /* Hero */
+  .hero { position: relative; padding: 56px 0 40px; }
+  .hero-grid { display: grid; grid-template-columns: 1.02fr 1fr; gap: 48px; align-items: center; position: relative; z-index: 1; }
+  .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--muted);
+           padding: 7px 14px; border-radius: 999px; box-shadow: var(--press-sm); margin-bottom: 22px; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c1); box-shadow: 0 0 10px var(--c1); }
+  .hero h1 { font-size: clamp(36px, 5.6vw, 62px); line-height: 1.07; margin: 0 0 18px; letter-spacing: -0.03em; font-weight: 800; }
+  .hero p.lead { font-size: clamp(16px, 2vw, 18px); color: var(--muted); max-width: 560px; margin: 0 0 30px; }
+  .downloads { display: flex; flex-wrap: wrap; gap: 14px; }
+  .version { margin-top: 16px; color: var(--faint); font-size: 14px; }
+  .trust { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+  .chip { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); padding: 8px 14px;
+          border-radius: 12px; box-shadow: var(--raise-sm); }
+  .chip svg { width: 15px; height: 15px; color: var(--c1); }
+  .stage { position: relative; }
+  .shot { position: relative; z-index: 2; padding: 12px; border-radius: 26px; box-shadow: var(--raise); background: var(--bg); }
+  .shot .bar { display: flex; gap: 6px; padding: 2px 6px 10px; }
+  .shot .bar i { width: 10px; height: 10px; border-radius: 50%; box-shadow: var(--press-sm); }
+  .shot img { display: block; width: 100%; height: auto; border-radius: 16px; }
+  .floatcard { position: absolute; z-index: 3; display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+               border-radius: 18px; background: rgba(31,34,41,.92); box-shadow: var(--raise-sm); font-size: 13px;
+               backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .floatcard b { display: block; font-size: 14px; }
+  .floatcard span { color: var(--muted); }
+  .floatcard .ic { width: 38px; height: 38px; }
+  .fc1 { left: -34px; bottom: 38px; }
+  .fc2 { right: -24px; top: -22px; }
+
+  /* Icon tile: a gradient square with a white glyph, sitting in a pressed well */
+  .ic { width: 52px; height: 52px; border-radius: 16px; display: grid; place-items: center; flex: none;
+        background: var(--grad); box-shadow: 0 8px 20px rgba(47,140,255,.25), inset 2px 2px 6px rgba(255,255,255,.35),
+        inset -3px -3px 8px rgba(0,0,0,.25); color: #fff; }
+  .ic svg { width: 54%; height: 54%; }
+  .ic.g2 { background: linear-gradient(135deg, var(--c2), var(--c3)); }
+  .ic.g3 { background: linear-gradient(135deg, var(--c3), var(--c4)); }
+  .ic.g4 { background: linear-gradient(135deg, var(--c1), var(--c2)); }
+  .well { padding: 8px; border-radius: 22px; box-shadow: var(--press-sm); display: inline-block; margin-bottom: 16px; }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 18px; padding: 20px; border-radius: 28px; box-shadow: var(--press); }
+  .stat { text-align: center; padding: 12px 6px; }
+  .stat b { display: block; font-size: clamp(24px, 3vw, 32px); font-weight: 800; line-height: 1.1; }
+  .stat span { font-size: 13px; color: var(--muted); }
+
+  /* Sections */
+  section { padding: 64px 0; position: relative; }
+  .head { text-align: center; max-width: 720px; margin: 0 auto 40px; position: relative; z-index: 1; }
+  .kicker { display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+            padding: 6px 14px; border-radius: 999px; box-shadow: var(--raise-sm); margin-bottom: 16px; }
+  .head h2, h2.left { font-size: clamp(28px, 4vw, 42px); line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.02em; font-weight: 700; }
+  .head p { color: var(--muted); margin: 0; font-size: 17px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 26px; position: relative; z-index: 1; }
+  .card { background: var(--bg); border-radius: var(--r); padding: 24px; box-shadow: var(--raise); transition: transform .25s; }
+  .card:hover { transform: translateY(-4px); }
+  .card h3 { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  /* Two-column feature blocks */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; position: relative; z-index: 1; }
+  .split.rev > :first-child { order: 2; }
+  .split p.body { color: var(--muted); font-size: 16px; margin: 0 0 20px; }
+  .ticks { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 12px; }
+  .ticks li { display: flex; gap: 12px; align-items: flex-start; color: var(--muted); font-size: 15px; }
+  .ticks li b { color: var(--text); font-weight: 600; }
+  .ticks li::before { content: ""; flex: none; width: 22px; height: 22px; margin-top: 2px; border-radius: 8px; box-shadow: var(--raise-sm);
+                      background: radial-gradient(circle, var(--c1) 0 3.5px, transparent 4.5px); }
+  .panel { border-radius: 28px; padding: 26px; box-shadow: var(--raise); background: var(--bg); position: relative; }
+
+  /* Format comparison */
+  .formats { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .fmt { border-radius: 20px; padding: 20px; box-shadow: var(--press); }
+  .fmt .frame { margin: 0 auto 16px; border-radius: 12px; background: var(--grad); opacity: .9;
+                box-shadow: 0 10px 30px rgba(47,140,255,.25); display: grid; place-items: center; color: #0b0e14; font-weight: 700; }
+  .fmt.v .frame { width: 70px; height: 124px; }
+  .fmt.h .frame { width: 150px; height: 84px; margin-top: 20px; margin-bottom: 36px; background: linear-gradient(135deg, var(--c2), var(--c3)); color: #fff; }
+  .fmt h3 { margin: 0 0 8px; font-size: 16px; text-align: center; }
+  .fmt dl { margin: 0; font-size: 13.5px; display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; }
+  .fmt dt { color: var(--faint); }
+  .fmt dd { margin: 0; color: var(--text); text-align: right; }
+
+  /* Pills */
+  .pills { display: flex; flex-wrap: wrap; gap: 10px; }
+  .pill { font-size: 13px; padding: 8px 14px; border-radius: 12px; box-shadow: var(--raise-sm); color: var(--text); }
+  .pill.in { box-shadow: var(--press-sm); color: var(--muted); }
+
+  /* Caption mock */
+  .capmock { border-radius: 20px; overflow: hidden; position: relative; aspect-ratio: 16 / 10; box-shadow: var(--press);
+             background: radial-gradient(120% 90% at 30% 20%, #2b3a55 0%, #1a1f2b 55%, #14161b 100%); }
+  .capmock .sun { position: absolute; width: 38%; aspect-ratio: 1; right: 10%; top: 12%; }
+  .capmock .hill { position: absolute; left: -10%; right: -10%; bottom: -30%; height: 70%; border-radius: 50%;
+                   background: linear-gradient(180deg, #23314a, #161a22); }
+  .capmock .line { position: absolute; left: 0; right: 0; bottom: 14%; text-align: center; font-weight: 800;
+                   font-size: clamp(16px, 2.6vw, 26px); text-shadow: 0 3px 0 rgba(0,0,0,.6); letter-spacing: .01em; }
+  .capmock .line .hl { background: var(--c1); color: #0b0e14; padding: 0 8px; border-radius: 8px; text-shadow: none; }
+  .capmock .spk { position: absolute; left: 16px; top: 14px; display: flex; gap: 8px; }
+  .capmock .spk span { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(0,0,0,.4); }
+  .capmock .wave { position: absolute; left: 16px; right: 16px; bottom: 4%; height: 18px; display: flex; gap: 3px; align-items: center; }
+  .capmock .wave i { flex: 1; border-radius: 2px; background: rgba(255,255,255,.18); }
+
+  /* Steps */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 26px; counter-reset: step; position: relative; z-index: 1; }
+  .step { border-radius: var(--r); padding: 26px 22px; box-shadow: var(--raise); background: var(--bg); }
+  .step .num { counter-increment: step; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
+               box-shadow: var(--press); margin-bottom: 18px; font-weight: 800; font-size: 20px; }
+  .step .num::before { content: counter(step, decimal-leading-zero); background: var(--grad); -webkit-background-clip: text;
+                       background-clip: text; color: transparent; }
+  .step h3 { margin: 0 0 6px; font-size: 17px; }
+  .step p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  /* Tables */
+  .tbl { border-radius: var(--r); box-shadow: var(--raise); overflow: hidden; background: var(--bg); }
   .scroll-x { overflow-x: auto; }
-  code { background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
-  footer { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 14px; }
-  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th, td { text-align: left; padding: 14px 18px; vertical-align: top; border-bottom: 1px solid rgba(255,255,255,.04); }
+  tr:last-child th, tr:last-child td { border-bottom: 0; }
+  tbody th { font-weight: 600; width: 28%; color: var(--text); }
+  td { color: var(--muted); }
+  thead th { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--faint); font-weight: 600;
+             background: var(--bg-deep); }
+  table.presets td:first-child { color: var(--text); font-weight: 600; }
+
+  /* Privacy */
+  .privacy { border-radius: 32px; padding: 44px; box-shadow: var(--press); display: grid; grid-template-columns: auto 1fr;
+             gap: 34px; align-items: center; position: relative; overflow: hidden; }
+  .privacy .shield { width: 120px; height: 120px; border-radius: 36px; box-shadow: var(--raise); display: grid; place-items: center; }
+  .privacy .shield .ic { width: 70px; height: 70px; border-radius: 22px; }
+  .privacy h2 { margin: 0 0 10px; font-size: clamp(24px, 3.2vw, 32px); }
+  .privacy p { margin: 0 0 16px; color: var(--muted); }
+
+  /* Install */
+  .install { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; }
+  pre { margin: 12px 0 0; padding: 14px 16px; border-radius: 14px; box-shadow: var(--press-sm); overflow-x: auto;
+        font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #cfd6e6; }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 2px 7px; border-radius: 7px;
+         box-shadow: var(--press-sm); color: #cfd6e6; }
+  pre code { box-shadow: none; padding: 0; }
+
+  /* FAQ */
+  .faq { display: grid; gap: 16px; max-width: 860px; margin: 0 auto; }
+  details { border-radius: 18px; box-shadow: var(--raise-sm); background: var(--bg); transition: box-shadow .2s; }
+  details[open] { box-shadow: var(--press-sm); }
+  summary { list-style: none; cursor: pointer; padding: 18px 22px; font-weight: 600; display: flex; justify-content: space-between;
+            gap: 16px; align-items: center; border-radius: 18px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center;
+                   box-shadow: var(--raise-sm); color: var(--c1); font-size: 18px; transition: transform .2s; }
+  details[open] summary::after { transform: rotate(45deg); }
+  details .ans { padding: 0 22px 20px; color: var(--muted); font-size: 15px; }
+  details .ans p { margin: 0; }
+
+  /* CTA */
+  .cta { text-align: center; border-radius: 36px; padding: 60px 24px; box-shadow: var(--raise); position: relative; overflow: hidden; background: var(--bg); }
+  .cta h2 { font-size: clamp(28px, 4.4vw, 46px); margin: 0 0 12px; letter-spacing: -0.02em; line-height: 1.12; position: relative; z-index: 1; }
+  .cta p { color: var(--muted); margin: 0 auto 28px; max-width: 560px; position: relative; z-index: 1; }
+  .cta .downloads { justify-content: center; position: relative; z-index: 1; }
+
+  footer { padding: 40px 0 48px; color: var(--faint); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: center; }
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--text); }
+  footer .flinks { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+  @media (max-width: 980px) {
+    nav.links { display: none; }
+    .hero-grid, .split { grid-template-columns: 1fr; gap: 40px; }
+    .split.rev > :first-child { order: 0; }
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .steps { grid-template-columns: repeat(2, 1fr); }
+    .install { grid-template-columns: 1fr; }
+    .fc1 { left: -6px; } .fc2 { right: -6px; }
+  }
   @media (max-width: 640px) {
-    nav a:not(.gh) { display: none; }
-    .hero { padding-top: 20px; }
-    table.req th { width: 40%; }
+    .hero { padding-top: 28px; }
+    .brand span.name { display: none; }
+    .tools .gh span { display: none; }
+    .stats { grid-template-columns: repeat(2, 1fr); padding: 12px; gap: 8px; }
+    .steps, .formats { grid-template-columns: 1fr; }
+    .privacy { grid-template-columns: 1fr; padding: 28px 22px; text-align: center; }
+    .privacy .shield { margin: 0 auto; width: 96px; height: 96px; }
+    .privacy .downloads { justify-content: center; }
+    section { padding: 48px 0; }
+    .card, .step, .panel { padding: 20px; }
+    .floatcard, .stage .orb { display: none; }
+    tbody th { width: 38%; }
+    th, td { padding: 12px 14px; }
+    .downloads .btn { flex: 1 1 100%; justify-content: center; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <a class="brand" href="#"><img src="assets/icon.png" alt="" width="32" height="32">KangEdit</a>
-    <nav>
-      <a href="#features">Features</a>
-      <a href="#how">How it works</a>
-      <a href="#requirements">Requirements</a>
-      <a class="gh" href="https://github.com/kloworizer/kangedit">GitHub</a>
-    </nav>
-  </header>
 
-  <div class="hero">
-    <h1>A video editor that edits for you</h1>
-    <p class="lead">KangEdit analyses your footage, picks the best moments and builds a short-form or long-form
-      edit. Then you fine-tune the cut, colour, captions and sound, and export. Free and open source, for Windows,
-      macOS and Linux.</p>
-    <div class="downloads" id="downloads">
-      <a class="btn" data-os="windows" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ Windows <small>64-bit</small></a>
-      <a class="btn" data-os="macos" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ macOS <small>Apple silicon</small></a>
-      <a class="btn" data-os="linux" href="https://github.com/kloworizer/kangedit/releases/latest">⬇ Linux <small>x64</small></a>
+<!-- Icons -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-spark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></symbol>
+    <symbol id="i-hook" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11a4 4 0 1 1-8 0v-2"/><path d="M4 12l2 2"/><circle cx="12" cy="3" r="1"/></symbol>
+    <symbol id="i-cc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 10.5a2 2 0 1 0 0 3M17 10.5a2 2 0 1 0 0 3"/></symbol>
+    <symbol id="i-game" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8h12a4 4 0 0 1 4 4v1a3 3 0 0 1-5.4 1.8L15 13H9l-1.6 1.8A3 3 0 0 1 2 13v-1a4 4 0 0 1 4-4z"/><path d="M7 10.5v3M5.5 12h3"/><circle cx="16" cy="11" r=".6" fill="currentColor"/><circle cx="18" cy="12.5" r=".6" fill="currentColor"/></symbol>
+    <symbol id="i-color" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A4.6 4.6 0 0 0 21 9.8C21 6 17 3 12 3z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7" r="1"/></symbol>
+    <symbol id="i-move" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 7v10M21 12h0"/></symbol>
+    <symbol id="i-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14M5 10h14M5 14h9M5 18h6"/><path d="M17 15l2 2 3-4"/></symbol>
+    <symbol id="i-cam" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="13" height="10" rx="2"/><path d="M15 10l6-3v10l-6-3"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 6 1V5a2 2 0 0 0-3-1z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-6 1"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-gh" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.3-3.4-1.3-.4-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.6.3-1.1.6-1.3-2.2-.3-4.6-1.1-4.6-5 0-1.1.4-2 1-2.7-.1-.2-.4-1.3.1-2.7 0 0 .8-.3 2.7 1a9.4 9.4 0 0 1 5 0c1.9-1.3 2.7-1 2.7-1 .5 1.4.2 2.5.1 2.7.6.7 1 1.6 1 2.7 0 3.9-2.4 4.7-4.6 5 .4.3.7.9.7 1.9V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z"/></symbol>
+    <symbol id="i-win" viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5l7.5-1v7H3zM11.5 4.3L21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.3z"/></symbol>
+    <symbol id="i-apple" viewBox="0 0 24 24" fill="currentColor"><path d="M16.4 12.6c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9s-2-.9-3.3-.9C6.1 7 4.5 8 3.7 9.6c-1.8 3.1-.5 7.6 1.3 10.1.8 1.2 1.8 2.6 3.1 2.5 1.3 0 1.7-.8 3.3-.8s2 .8 3.3.8c1.4 0 2.2-1.2 3-2.4 1-1.4 1.4-2.7 1.4-2.8 0 0-2.7-1-2.7-4.4zM14 5.3c.7-.9 1.2-2 1-3.2-1 0-2.3.7-3 1.6-.7.8-1.2 2-1.1 3.1 1.2.1 2.3-.6 3.1-1.5z"/></symbol>
+    <symbol id="i-linux" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c-2.2 0-3 1.8-3 4 0 1.5-.4 2.5-1.5 4S5 14.5 5 16.5c0 1 .5 1.8 1.5 2.2M12 3c2.2 0 3 1.8 3 4 0 1.5.4 2.5 1.5 4s2.5 3.5 2.5 5.5c0 1-.5 1.8-1.5 2.2"/><path d="M6.5 18.7c.8 1.6 3 2.3 5.5 2.3s4.7-.7 5.5-2.3"/><circle cx="10.5" cy="7.5" r=".6" fill="currentColor"/><circle cx="13.5" cy="7.5" r=".6" fill="currentColor"/><path d="M10.5 10l1.5 1 1.5-1"/></symbol>
+  </defs>
+</svg>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="KangEdit"><span class="logo"><img src="assets/icon.png" alt="" width="26" height="26"></span><span class="name">KangEdit</span></a>
+    <nav class="links" aria-label="Utama">
+      <a href="#features" data-i18n="nav.features">Fitur</a>
+      <a href="#autoedit" data-i18n="nav.autoedit">Auto Edit</a>
+      <a href="#how" data-i18n="nav.how">Cara kerja</a>
+      <a href="#export" data-i18n="nav.export">Ekspor</a>
+      <a href="#requirements" data-i18n="nav.req">Spesifikasi</a>
+      <a href="#faq" data-i18n="nav.faq">FAQ</a>
+    </nav>
+    <div class="tools">
+      <div class="lang" role="group" aria-label="Bahasa / Language">
+        <button type="button" data-lang="id" aria-pressed="true">ID</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="btn sm gh" href="https://github.com/kloworizer/kangedit"><svg><use href="#i-gh"/></svg><span>GitHub</span></a>
     </div>
-    <div class="version" id="version">Latest release on <a href="https://github.com/kloworizer/kangedit/releases/latest">GitHub Releases</a></div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- Hero -->
+  <div class="hero">
+    <div class="glow" style="width:520px;height:520px;background:var(--c2);left:-200px;top:-120px"></div>
+    <div class="glow" style="width:460px;height:460px;background:var(--c3);right:-160px;top:60px"></div>
+    <div class="wrap">
+      <div class="hero-grid">
+        <div>
+          <div class="badge"><span class="dot"></span><span data-i18n="hero.badge">Gratis · berjalan offline · Windows, macOS, Linux</span></div>
+          <h1><span data-i18n="hero.h1a">Editor video yang</span> <span class="grad-text" data-i18n="hero.h1b">mengedit untukmu</span></h1>
+          <p class="lead" data-i18n="hero.lead">KangEdit menganalisis rekamanmu, memilih momen terbaik dan menyusun edit short-form atau long-form dalam hitungan detik. Setelah itu kamu tinggal merapikan potongan, warna, caption dan suaranya, lalu ekspor.</p>
+          <div class="downloads" id="downloads">
+            <a class="btn" data-os="windows" href="https://github.com/kloworizer/kangedit/releases/latest"><svg><use href="#i-win"/></svg>Windows <small>64-bit</small></a>
+            <a class="btn" data-os="macos" href="https://github.com/kloworizer/kangedit/releases/latest"><svg><use href="#i-apple"/></svg>macOS <small>Apple silicon</small></a>
+            <a class="btn" data-os="linux" href="https://github.com/kloworizer/kangedit/releases/latest"><svg><use href="#i-linux"/></svg>Linux <small>x64</small></a>
+          </div>
+          <div class="version" id="version"><span data-i18n="hero.release">Rilis terbaru di</span> <a href="https://github.com/kloworizer/kangedit/releases/latest">GitHub Releases</a></div>
+          <div class="trust">
+            <span class="chip"><svg><use href="#i-shield"/></svg><span data-i18n="hero.t1">Rekaman tetap di komputermu</span></span>
+            <span class="chip"><svg><use href="#i-cc"/></svg><span data-i18n="hero.t2">Caption Bahasa Indonesia</span></span>
+            <span class="chip"><svg><use href="#i-gh"/></svg><span data-i18n="hero.t3">Kode sumber di GitHub</span></span>
+          </div>
+        </div>
+        <div class="stage">
+          <div class="orb green float" style="width:120px;height:120px;left:-40px;top:-50px"></div>
+          <div class="orb violet float slow" style="width:84px;height:84px;right:30px;bottom:-40px"></div>
+          <div class="shot">
+            <div class="bar"><i></i><i></i><i></i></div>
+            <img src="assets/screenshot.jpg" alt="KangEdit: daftar media, viewer dengan caption, timeline dan panel Refine" data-i18n-alt="hero.shotAlt" width="1600" height="960">
+          </div>
+          <div class="floatcard fc1 float slow"><span class="ic"><svg><use href="#i-spark"/></svg></span><div><b data-i18n="hero.fc1a">Momen terbaik ditemukan</b><span data-i18n="hero.fc1b">wajah, tawa, gerakan</span></div></div>
+          <div class="floatcard fc2 float"><span class="ic g3"><svg><use href="#i-cc"/></svg></span><div><b data-i18n="hero.fc2a">Caption offline</b><span>Whisper · Qwen3-ASR</span></div></div>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div class="shot"><img src="assets/screenshot.jpg" alt="KangEdit: the media list, the viewer with a caption, the timeline and the Refine panel" width="1600" height="960"></div>
-  <p class="caption-note">The viewer, the timeline and the Refine panel, with captions from the footage's speech.</p>
+  <!-- Stats -->
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><b class="grad-text">100%</b><span data-i18n="stats.offline">offline di komputermu</span></div>
+      <div class="stat"><b class="grad-text">4 fps</b><span data-i18n="stats.fps">analisis setiap klip</span></div>
+      <div class="stat"><b class="grad-text">2</b><span data-i18n="stats.ai">model AI kecil, di CPU</span></div>
+      <div class="stat"><b class="grad-text">15</b><span data-i18n="stats.log">profil log kamera</span></div>
+      <div class="stat"><b class="grad-text">7</b><span data-i18n="stats.cap">template caption</span></div>
+      <div class="stat"><b class="grad-text">−14</b><span data-i18n="stats.lufs">LUFS siap posting</span></div>
+    </div>
+  </div>
 
+  <!-- Features -->
   <section id="features">
-    <h2>What it does</h2>
-    <p class="sub">The editing a vlog, a trip or a talking video needs, done for you, and every part of it yours to change.</p>
-    <div class="grid">
-      <div class="card"><span class="em">✨</span><h3>Auto Edit</h3><p>Picks the sharpest, liveliest moments of all your footage (faces, movement, people laughing or cheering) and lays them out for Reels / Shorts / TikTok or a long YouTube video, with transitions and J / L cuts.</p></div>
-      <div class="card"><span class="em">🎣</span><h3>Hooks that grab</h3><p>Opens on the strongest moments of the whole video. Pick them from thumbnails, in the order you tick them, or let it choose.</p></div>
-      <div class="card"><span class="em">💬</span><h3>Offline captions</h3><p>Speech recognition on your computer with Whisper or Qwen3-ASR, cleaned of road and wind noise. Styled captions from one-click templates that follow every trim, synced to the speech, coloured per speaker, and voice-overs captioned too.</p></div>
-      <div class="card"><span class="em">🎮</span><h3>Gaming moments</h3><p>Finds the plays in a game recording (a kill, a multi-kill or a teamfight, a gacha reveal) in any game, labels them, and lays out your facecam on top of the game.</p></div>
-      <div class="card"><span class="em">🎨</span><h3>Colour</h3><p>Auto colour per clip, camera log profiles and official LUTs, grading, and a look that matches across clips.</p></div>
-      <div class="card"><span class="em">🔍</span><h3>Movement</h3><p>Dynamic zoom and pan (on a face too), and stabilisation for shaky handheld shots, in the preview as in the export.</p></div>
-      <div class="card"><span class="em">🎙</span><h3>Sound</h3><p>Voice clean-up, music that ducks under speech, sound effects, even loudness, and fades.</p></div>
-      <div class="card"><span class="em">🗒</span><h3>Edit by what is said</h3><p>The transcript of the whole edit: find a clip by its words, drag it to reorder, slip a clip to a sentence, edit from a script.</p></div>
-      <div class="card"><span class="em">🎥</span><h3>Multicam and layers</h3><p>Several cameras synced by their sound, picture in picture, titles and video layers.</p></div>
-      <div class="card"><span class="em">📺</span><h3>Ready to post</h3><p>Presets for YouTube, Shorts, Reels and TikTok with the right loudness, several aspect ratios in one go, a thumbnail maker, YouTube chapters and a check before export.</p></div>
+    <div class="glow" style="width:420px;height:420px;background:var(--c1);left:-220px;top:30%;opacity:.18"></div>
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="feat.kicker">Fitur</span>
+        <h2 data-i18n="feat.h2">Semua yang dibutuhkan sebuah edit</h2>
+        <p data-i18n="feat.sub">Untuk vlog, perjalanan, podcast, gaming atau video bicara: dikerjakan untukmu, dan setiap bagiannya tetap bisa kamu ubah.</p>
+      </div>
+      <div class="grid">
+        <div class="card"><div class="well"><span class="ic"><svg><use href="#i-spark"/></svg></span></div><h3 data-i18n="f1.t">Auto Edit</h3><p data-i18n="f1.d">Memilih momen paling tajam dan hidup dari semua rekamanmu (wajah, gerakan, orang tertawa atau bersorak) dan menyusunnya untuk Reels / Shorts / TikTok atau video YouTube panjang, lengkap dengan transisi dan J / L cut.</p></div>
+        <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-hook"/></svg></span></div><h3 data-i18n="f2.t">Hook yang menahan penonton</h3><p data-i18n="f2.d">Video dibuka dengan momen terkuat dari keseluruhan video. Pilih sendiri dari thumbnail, sesuai urutan centang, atau biarkan KangEdit yang memilih.</p></div>
+        <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-cc"/></svg></span></div><h3 data-i18n="f3.t">Caption offline</h3><p data-i18n="f3.d">Pengenalan suara di komputermu dengan Whisper atau Qwen3-ASR, dibersihkan dari bising jalan dan angin. Template sekali klik yang mengikuti setiap trim, sinkron dengan ucapan, berwarna per pembicara.</p></div>
+        <div class="card"><div class="well"><span class="ic g4"><svg><use href="#i-game"/></svg></span></div><h3 data-i18n="f4.t">Momen gaming</h3><p data-i18n="f4.d">Menemukan aksi terbaik di rekaman game (kill, multi-kill, teamfight, reveal gacha) di game apa pun, memberinya label, dan menata facecam di atas game.</p></div>
+        <div class="card"><div class="well"><span class="ic"><svg><use href="#i-color"/></svg></span></div><h3 data-i18n="f5.t">Warna</h3><p data-i18n="f5.d">Warna otomatis per klip, profil log kamera dan LUT resmi, grading, serta tampilan yang seragam antar klip.</p></div>
+        <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-move"/></svg></span></div><h3 data-i18n="f6.t">Gerakan</h3><p data-i18n="f6.d">Dynamic zoom dan pan (juga ke wajah), serta stabilisasi untuk rekaman genggam yang goyang, sama di preview maupun ekspor.</p></div>
+        <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-sound"/></svg></span></div><h3 data-i18n="f7.t">Suara</h3><p data-i18n="f7.d">Pembersih suara dari bising dan angin, musik yang otomatis mengecil saat ada ucapan, efek suara, kenyaringan merata, dan fade.</p></div>
+        <div class="card"><div class="well"><span class="ic g4"><svg><use href="#i-text"/></svg></span></div><h3 data-i18n="f8.t">Edit lewat ucapan</h3><p data-i18n="f8.d">Transkrip seluruh edit: cari klip dari kata-katanya, seret untuk mengubah urutan, geser klip ke sebuah kalimat, atau edit langsung dari naskah.</p></div>
+        <div class="card"><div class="well"><span class="ic"><svg><use href="#i-cam"/></svg></span></div><h3 data-i18n="f9.t">Multicam dan layer</h3><p data-i18n="f9.d">Beberapa kamera disinkronkan lewat suaranya, picture in picture, chroma key, judul, dan layer video.</p></div>
+        <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-image"/></svg></span></div><h3 data-i18n="f10.t">Thumbnail dan chapter</h3><p data-i18n="f10.d">Pembuat thumbnail dari still terbaik edit (hidup, tajam, ada wajah) dengan teks besar, plus baris chapter YouTube yang siap disalin.</p></div>
+        <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-clock"/></svg></span></div><h3 data-i18n="f11.t">Highlight reel &amp; kecepatan</h3><p data-i18n="f11.d">Ubah edit panjang menjadi reel vertikal 30, 45 atau 60 detik. Slow motion, fast motion, dan template speed ramp seperti Hero moment dan Bullet time.</p></div>
+        <div class="card"><div class="well"><span class="ic g4"><svg><use href="#i-send"/></svg></span></div><h3 data-i18n="f12.t">Siap diunggah</h3><p data-i18n="f12.d">Preset untuk YouTube, Shorts, Reels dan TikTok dengan kenyaringan yang tepat, beberapa rasio sekaligus, dan pemeriksaan sebelum ekspor.</p></div>
+      </div>
     </div>
   </section>
 
-  <section id="how">
-    <h2>How it works</h2>
-    <p class="sub">Four steps, top to bottom of the window.</p>
-    <div class="steps">
-      <div class="step"><h3>Import</h3><p>Drop in your videos and photos. KangEdit analyses them in the background and can transcribe their speech.</p></div>
-      <div class="step"><h3>Auto Edit</h3><p>Choose short-form or long-form and what to prioritise. The edit is built in seconds; ask for shorter, longer or other moments.</p></div>
-      <div class="step"><h3>Refine</h3><p>Trim, slip and reorder on the timeline; colour, captions, text and sound in the Refine panel. Everything can be undone.</p></div>
-      <div class="step"><h3>Export</h3><p>9:16, 16:9, 1:1 and more, H.264, H.265 or ProRes, on the graphics card when it can.</p></div>
+  <!-- Auto Edit spotlight -->
+  <section id="autoedit">
+    <div class="wrap">
+      <div class="split">
+        <div>
+          <span class="kicker grad-text" data-i18n="ae.kicker">Auto Edit</span>
+          <h2 class="left" data-i18n="ae.h2">Dari setumpuk rekaman ke edit jadi, dalam hitungan detik</h2>
+          <p class="body" data-i18n="ae.body">Setiap klip dianalisis empat kali per detik untuk ketajaman, gerakan dan guncangan, eksposur, warna, wajah, kenyaringan audio dan pergantian adegan. Kandidat terbaik dinilai lalu disusun menjadi cerita.</p>
+          <ul class="ticks">
+            <li data-i18n="ae.l1"><span><b>Urutan cerita.</b> Klip diurutkan menurut waktu rekam, lalu nama file (C0002 sebelum C0013).</span></li>
+            <li data-i18n="ae.l2"><span><b>Adegan.</b> Jeda lebih dari 30 menit atau lebih dari 1 km memulai adegan baru, dibuka dengan shot pemandangan.</span></li>
+            <li data-i18n="ae.l3"><span><b>Pembuka &amp; penutup.</b> Mencari salam pembuka dan penutup dalam bahasa Indonesia dan Inggris: "assalamualaikum…", "halo…", "sampai jumpa"…</span></li>
+            <li data-i18n="ae.l4"><span><b>Sentuhan akhir.</b> Kalimat utuh, potong di antara kata, potong di ketukan musik, hapus "eh / anu", dan variasi ukuran shot.</span></li>
+            <li data-i18n="ae.l5"><span><b>Lebih pendek / panjang.</b> Bangun ulang edit 25% lebih pendek atau lebih panjang dengan satu klik.</span></li>
+          </ul>
+        </div>
+        <div class="panel">
+          <div class="orb blue float slow" style="width:70px;height:70px;right:-24px;top:-28px"></div>
+          <div class="formats">
+            <div class="fmt v">
+              <div class="frame">9:16</div>
+              <h3 data-i18n="ae.shortT">Short-form</h3>
+              <dl>
+                <dt data-i18n="ae.len">Durasi</dt><dd data-i18n="ae.shortLen">± 30 detik</dd>
+                <dt data-i18n="ae.cuts">Potongan</dt><dd data-i18n="ae.shortCuts">1,2–3 detik</dd>
+                <dt data-i18n="ae.order">Urutan</dt><dd data-i18n="ae.shortOrder">Hook dulu</dd>
+              </dl>
+            </div>
+            <div class="fmt h">
+              <div class="frame">16:9</div>
+              <h3 data-i18n="ae.longT">Long-form</h3>
+              <dl>
+                <dt data-i18n="ae.len">Durasi</dt><dd data-i18n="ae.longLen">1–20 menit</dd>
+                <dt data-i18n="ae.cuts">Potongan</dt><dd data-i18n="ae.longCuts">4–10 detik</dd>
+                <dt data-i18n="ae.order">Urutan</dt><dd data-i18n="ae.longOrder">Urutan cerita</dd>
+              </dl>
+            </div>
+          </div>
+          <p style="margin:18px 0 0;color:var(--muted);font-size:14px;text-align:center" data-i18n="ae.custom">Atau pilih <b>Custom</b> dan atur semuanya sendiri. Ada juga mode 📜 <b>Naskah</b>: tempel naskahmu dan setiap baris dicari di transkrip rekaman.</p>
+        </div>
+      </div>
     </div>
   </section>
 
+  <!-- Smarter analysis -->
   <section>
-    <div class="privacy">
-      <h2>Your footage stays on your computer</h2>
-      <p>Analysis, speech recognition and rendering all run offline. The internet is used only to download FFmpeg and a speech model the first time, and for the optional sound-effect search and music download.</p>
+    <div class="glow" style="width:460px;height:460px;background:var(--c3);right:-220px;top:10%;opacity:.2"></div>
+    <div class="wrap">
+      <div class="split rev">
+        <div>
+          <span class="kicker grad-text" data-i18n="ai.kicker">Analisis lebih cerdas</span>
+          <h2 class="left" data-i18n="ai.h2">AI kecil yang melihat dan mendengar, tanpa internet</h2>
+          <p class="body" data-i18n="ai.body">Dua jaringan saraf kecil berjalan offline di CPU (aktif secara default). Matikan di komputer yang lambat untuk analisis yang lebih ringan.</p>
+          <ul class="ticks">
+            <li data-i18n="ai.l1"><span><b>MobileNetV2</b> mengenali apa yang terlihat di setiap detik, sehingga pemandangan yang sama dari sudut lain, di-zoom atau lebih gelap tetap dikenali, bahkan antar kamera.</span></li>
+            <li data-i18n="ai.l2"><span><b>YAMNet</b> mendengar ucapan, tawa, sorakan dan tepuk tangan, keramaian, musik, angin, alam dan kendaraan. Momen yang dinikmati orang mendapat nilai lebih tinggi, angin di mikrofon lebih rendah.</span></li>
+            <li data-i18n="ai.l3"><span><b>Tampilan cepat.</b> Rekaman baru dilihat dulu dari keyframe-nya saja, jauh lebih cepat: thumbnail, scrubbing, bin bahkan Auto Edit langsung bisa dipakai.</span></li>
+          </ul>
+        </div>
+        <div class="grid" style="grid-template-columns:1fr 1fr;gap:20px">
+          <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-brain"/></svg></span></div><h3>MobileNetV2</h3><p data-i18n="ai.c1">Melihat isi gambar</p></div>
+          <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-sound"/></svg></span></div><h3>YAMNet</h3><p data-i18n="ai.c2">Mendengar suasana</p></div>
+          <div class="card"><div class="well"><span class="ic g4"><svg><use href="#i-spark"/></svg></span></div><h3 data-i18n="ai.c3t">Multi-lane</h3><p data-i18n="ai.c3">Beberapa jalur CPU plus dekoder video GPU</p></div>
+          <div class="card"><div class="well"><span class="ic"><svg><use href="#i-check"/></svg></span></div><h3 data-i18n="ai.c4t">Aturan pakai ulang</h3><p data-i18n="ai.c4">Segmen tak pernah tumpang tindih, shot kembar ditolak</p></div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <section id="requirements">
-    <h2>Requirements</h2>
-    <div class="scroll-x">
-      <table class="req">
-        <tr><th>Windows</th><td>Windows 10 (1809) or 11, 64-bit</td></tr>
-        <tr><th>macOS</th><td>macOS 14 Sonoma or newer, Apple silicon (M1 or newer)</td></tr>
-        <tr><th>Linux</th><td>x86-64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or newer)</td></tr>
-        <tr><th>CPU and memory</th><td>4 cores and 8 GB; 8 cores and 16 GB or more for 4K or long edits</td></tr>
-        <tr><th>Graphics</th><td>Any: preview and export work on the CPU. A GPU with a video encoder (NVIDIA, AMD, Intel, Apple) makes exports faster; an NVIDIA card with CUDA makes captions faster</td></tr>
-        <tr><th>Disk</th><td>About 1.5 GB for the app, FFmpeg and the speech model, plus room for the cache and exports</td></tr>
-      </table>
+  <!-- How it works -->
+  <section id="how">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="how.kicker">Cara kerja</span>
+        <h2 data-i18n="how.h2">Empat langkah, dari atas ke bawah jendela</h2>
+        <p data-i18n="how.sub">Tanpa harus belajar timeline yang rumit dulu.</p>
+      </div>
+      <div class="steps">
+        <div class="step"><div class="num"></div><h3 data-i18n="s1.t">Impor</h3><p data-i18n="s1.d">Masukkan video dan foto. KangEdit menganalisisnya di latar belakang dan bisa mentranskripsikan ucapannya.</p></div>
+        <div class="step"><div class="num"></div><h3 data-i18n="s2.t">Auto Edit</h3><p data-i18n="s2.d">Pilih short-form atau long-form dan apa yang diutamakan. Edit tersusun dalam hitungan detik; minta lebih pendek, lebih panjang atau momen lain.</p></div>
+        <div class="step"><div class="num"></div><h3 data-i18n="s3.t">Rapikan</h3><p data-i18n="s3.d">Trim, slip dan atur ulang di timeline; warna, caption, teks dan suara di panel Refine. Semua bisa di-undo.</p></div>
+        <div class="step"><div class="num"></div><h3 data-i18n="s4.t">Ekspor</h3><p data-i18n="s4.d">9:16, 16:9, 1:1 dan lainnya, H.264, H.265 atau ProRes, memakai kartu grafis bila bisa.</p></div>
+      </div>
     </div>
-    <p class="sub" style="margin-top:16px">Download the archive for your system from <a href="https://github.com/kloworizer/kangedit/releases/latest">Releases</a>, extract it and start <code>KangEdit</code>. To run from source, see the <a href="https://github.com/kloworizer/kangedit#install-and-run">README</a>.</p>
   </section>
-</div>
+
+  <!-- Captions -->
+  <section id="captions">
+    <div class="wrap">
+      <div class="split">
+        <div>
+          <span class="kicker grad-text" data-i18n="cap.kicker">Caption</span>
+          <h2 class="left" data-i18n="cap.h2">Caption otomatis yang paham bahasa Indonesia</h2>
+          <p class="body" data-i18n="cap.body">Pengenalan suara offline dengan faster-whisper atau Qwen3-ASR 1.7B, yang lebih akurat dari Whisper large-v3 di banyak bahasa, termasuk Indonesia dan Inggris. Model <b>Auto</b> memilih yang paling cocok untuk komputermu.</p>
+          <ul class="ticks">
+            <li data-i18n="cap.l1"><span><b>Suara bising?</b> Bising jalan, mesin, angin atau keramaian dibersihkan dulu sebelum ditranskripsikan.</span></li>
+            <li data-i18n="cap.l2"><span><b>Warna per pembicara</b> untuk podcast dan wawancara, dideteksi offline dari nada dan warna suara.</span></li>
+            <li data-i18n="cap.l3"><span><b>Auto-sync</b> mencocokkan waktu kata dengan suara, hingga 2 detik ke dua arah.</span></li>
+            <li data-i18n="cap.l4"><span><b>Keluaran</b>: dibakar ke video, disimpan sebagai <code>.srt</code>, atau keduanya.</span></li>
+          </ul>
+          <div class="pills" style="margin-top:22px">
+            <span class="pill">Clean subtitles</span><span class="pill">Bold pop</span><span class="pill">Karaoke</span><span class="pill">Highlight box</span><span class="pill">Boxed</span><span class="pill">Minimal lower</span><span class="pill" data-i18n="cap.oneword">Satu kata sekali tampil</span>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="capmock" aria-hidden="true">
+            <div class="orb green sun"></div>
+            <div class="hill"></div>
+            <div class="spk"><span style="color:var(--c1)">● A</span><span style="color:var(--c4)">● B</span></div>
+            <div class="line"><span data-i18n="cap.mockA">HALO SEMUANYA,</span> <span class="hl" data-i18n="cap.mockB">SELAMAT</span> <span data-i18n="cap.mockC">DATANG!</span></div>
+            <div class="wave" id="wave"></div>
+          </div>
+          <p style="margin:16px 0 0;color:var(--muted);font-size:14px;text-align:center" data-i18n="cap.mockNote">Animasi kata (karaoke, highlight, pop, reveal) tampil sama di viewer dan di hasil ekspor.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Color -->
+  <section id="color">
+    <div class="glow" style="width:460px;height:460px;background:var(--c2);left:-240px;top:20%;opacity:.2"></div>
+    <div class="wrap">
+      <div class="split rev">
+        <div>
+          <span class="kicker grad-text" data-i18n="col.kicker">Warna</span>
+          <h2 class="left" data-i18n="col.h2">Footage log jadi Rec.709, dengan kurva resmi kamera</h2>
+          <p class="body" data-i18n="col.body">Kamera dikenali dari metadata file, dan profil log-nya dipilih dari metadata atau gambarnya. Pakai kurva bawaan, LUT konversi resmi pembuat kamera, atau LUT <code>.cube</code> milikmu sebagai look kreatif.</p>
+          <ul class="ticks">
+            <li data-i18n="col.l1"><span><b>Auto</b> mengatur eksposur, white balance dan kontras; <i>Auto color semua klip</i> berjalan di latar belakang.</span></li>
+            <li data-i18n="col.l2"><span><b>Urutan proses standar industri</b>: kurva log → eksposur &amp; WB di cahaya linear → kontras, shadow, highlight.</span></li>
+            <li data-i18n="col.l3"><span><b>Preview dan ekspor</b> memakai matematika warna yang sama.</span></li>
+          </ul>
+        </div>
+        <div class="panel">
+          <div class="orb violet float" style="width:64px;height:64px;left:-22px;bottom:-22px"></div>
+          <div class="pills">
+            <span class="pill">Sony S-Log3</span><span class="pill">S-Log2</span><span class="pill">Panasonic V-Log</span><span class="pill">Canon C-Log2</span><span class="pill">C-Log3</span><span class="pill">ARRI LogC3</span><span class="pill">LogC4</span><span class="pill">Fujifilm F-Log</span><span class="pill">F-Log2</span><span class="pill">Nikon N-Log</span><span class="pill">DJI D-Log</span><span class="pill">Apple Log</span><span class="pill">Blackmagic Film Gen5</span><span class="pill">HLG</span>
+            <span class="pill in" data-i18n="col.lut">+ LUT resmi (DJI D-Log M, Sony, Panasonic…)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Use cases -->
+  <section id="usecases">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="uc.kicker">Untuk siapa</span>
+        <h2 data-i18n="uc.h2">Dibuat untuk kreator yang ingin cepat unggah</h2>
+      </div>
+      <div class="grid">
+        <div class="card"><div class="well"><span class="ic"><svg><use href="#i-image"/></svg></span></div><h3 data-i18n="uc1.t">Vlog &amp; perjalanan</h3><p data-i18n="uc1.d">Rekaman berhari-hari dari HP, kamera, drone dan action cam disusun per hari dan tempat, dengan shot pemandangan pembuka setiap adegan.</p></div>
+        <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-cam"/></svg></span></div><h3 data-i18n="uc2.t">Podcast &amp; wawancara</h3><p data-i18n="uc2.d">Multicam yang sinkron lewat suara, caption berwarna per pembicara, dan pembersih suara.</p></div>
+        <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-game"/></svg></span></div><h3 data-i18n="uc3.t">Gaming</h3><p data-i18n="uc3.d">Mobile Legends, Valorant, Counter-Strike, gacha: aksi terbaik dipilih, label DOUBLE KILL ditambahkan, facecam ditata.</p></div>
+        <div class="card"><div class="well"><span class="ic g4"><svg><use href="#i-text"/></svg></span></div><h3 data-i18n="uc4.t">Video edukasi &amp; bicara</h3><p data-i18n="uc4.d">Edit dari naskah, hapus "eh / anu" dan jeda panjang, potong di kalimat utuh, dan chapter YouTube otomatis.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Export -->
+  <section id="export">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="ex.kicker">Ekspor</span>
+        <h2 data-i18n="ex.h2">Satu edit, siap untuk setiap platform</h2>
+        <p data-i18n="ex.sub">Preset mengatur bingkai, format dan target kenyaringan −14 LUFS, dengan puncak di bawah −1,5 dBTP. Ekspor juga versi 16:9, 9:16, 1:1 atau 4:5 sekaligus.</p>
+      </div>
+      <div class="tbl scroll-x">
+        <table class="presets">
+          <thead><tr><th data-i18n="ex.th1">Preset</th><th data-i18n="ex.th2">Bingkai</th><th data-i18n="ex.th3">Kenyaringan</th></tr></thead>
+          <tbody>
+            <tr><td>YouTube</td><td>16:9 · 1080p / 4K</td><td>−14 LUFS</td></tr>
+            <tr><td>YouTube Shorts</td><td>9:16</td><td>−14 LUFS</td></tr>
+            <tr><td>Instagram Reels</td><td>9:16</td><td>−14 LUFS</td></tr>
+            <tr><td>TikTok</td><td>9:16</td><td>−14 LUFS</td></tr>
+            <tr><td>Instagram feed</td><td>4:5 / 1:1</td><td>−14 LUFS</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="grid" style="margin-top:30px">
+        <div class="card"><h3 data-i18n="ex.c1t">Codec</h3><p data-i18n="ex.c1">H.264, H.265 atau ProRes 422 HQ, pada 720p, 1080p, 1440p atau 4K.</p></div>
+        <div class="card"><h3 data-i18n="ex.c2t">Encoding GPU</h3><p data-i18n="ex.c2">NVIDIA NVENC, AMD AMF, Intel Quick Sync, Apple VideoToolbox, dengan cadangan CPU otomatis.</p></div>
+        <div class="card"><h3 data-i18n="ex.c3t">Cek sebelum ekspor</h3><p data-i18n="ex.c3">Daftar hal yang bisa merusak ekspor, masing-masing dengan perbaikannya: file hilang, musik hilang, caption tanpa transkrip…</p></div>
+        <div class="card"><h3 data-i18n="ex.c4t">Riwayat versi</h3><p data-i18n="ex.c4">Versi lama proyek disimpan setiap kali menyimpan dan sebelum Auto Edit mengganti timeline. Pulihkan kapan saja.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Privacy -->
+  <section>
+    <div class="wrap">
+      <div class="privacy">
+        <div class="orb blue float slow" style="width:140px;height:140px;right:-50px;top:-50px;opacity:.6"></div>
+        <div class="shield"><span class="ic"><svg><use href="#i-shield"/></svg></span></div>
+        <div style="position:relative;z-index:1">
+          <h2 data-i18n="pv.h2">Rekamanmu tetap di komputermu</h2>
+          <p data-i18n="pv.p">Analisis, pengenalan suara dan rendering semuanya berjalan offline. Internet hanya dipakai untuk mengunduh FFmpeg dan model suara di awal, serta untuk pembaruan, pencarian efek suara, musik NCS dan LUT resmi yang opsional.</p>
+          <div class="pills"><span class="pill in" data-i18n="pv.a">Tanpa akun</span><span class="pill in" data-i18n="pv.b">Tanpa unggah ke cloud</span><span class="pill in" data-i18n="pv.c">Tanpa watermark</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Requirements -->
+  <section id="requirements">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="rq.kicker">Spesifikasi</span>
+        <h2 data-i18n="rq.h2">Berjalan di komputer biasa</h2>
+        <p data-i18n="rq.sub">Kartu grafis tidak wajib: preview dan ekspor berjalan di CPU.</p>
+      </div>
+      <div class="tbl scroll-x">
+        <table>
+          <tbody>
+            <tr><th>Windows</th><td data-i18n="rq.win">Windows 10 (1809) atau 11, 64-bit</td></tr>
+            <tr><th>macOS</th><td data-i18n="rq.mac">macOS 14 Sonoma atau lebih baru, Apple silicon (M1 atau lebih baru)</td></tr>
+            <tr><th>Linux</th><td data-i18n="rq.linux">x86-64 dengan glibc 2.35 atau lebih baru (Ubuntu 22.04, Debian 12, Fedora 36 atau lebih baru)</td></tr>
+            <tr><th data-i18n="rq.cpuT">CPU dan memori</th><td data-i18n="rq.cpu">4 core dan 8 GB; 8 core dan 16 GB atau lebih untuk 4K atau edit panjang</td></tr>
+            <tr><th data-i18n="rq.gpuT">Grafis</th><td data-i18n="rq.gpu">Apa saja. GPU dengan encoder video (NVIDIA, AMD, Intel, Apple) mempercepat ekspor; kartu NVIDIA dengan CUDA mempercepat caption</td></tr>
+            <tr><th data-i18n="rq.diskT">Disk</th><td data-i18n="rq.disk">Sekitar 1,5 GB untuk aplikasi, FFmpeg dan model suara, ditambah ruang untuk cache dan hasil ekspor</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section id="install">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text" data-i18n="in.kicker">Instalasi</span>
+        <h2 data-i18n="in.h2">Mulai dalam beberapa menit</h2>
+      </div>
+      <div class="install">
+        <div class="card"><div class="well"><span class="ic"><svg><use href="#i-down"/></svg></span></div><h3 data-i18n="in.1t">1. Unduh</h3><p data-i18n="in.1d">Ambil arsip untuk sistemmu dari <a href="https://github.com/kloworizer/kangedit/releases/latest">Releases</a>. Tidak perlu Python. <code>SHA256SUMS.txt</code> berisi checksum-nya.</p></div>
+        <div class="card"><div class="well"><span class="ic g2"><svg><use href="#i-check"/></svg></span></div><h3 data-i18n="in.2t">2. Ekstrak &amp; jalankan</h3><p data-i18n="in.2d">Buka <code>KangEdit.exe</code>, <code>KangEdit.app</code> atau <code>KangEdit/KangEdit</code>. Build belum ditandatangani: di Windows pilih <i>More info → Run anyway</i>; di macOS klik kanan → <i>Open</i> pertama kali.</p></div>
+        <div class="card"><div class="well"><span class="ic g3"><svg><use href="#i-gh"/></svg></span></div><h3 data-i18n="in.3t">Atau dari kode sumber</h3><p data-i18n="in.3d">Butuh Python 3.10 atau lebih baru. Peluncur menyiapkan sisanya, termasuk FFmpeg.</p>
+<pre><code>git clone https://github.com/kloworizer/kangedit
+cd kangedit
+./run.sh      # Windows: run.bat</code></pre></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker grad-text">FAQ</span>
+        <h2 data-i18n="faq.h2">Pertanyaan yang sering diajukan</h2>
+      </div>
+      <div class="faq">
+        <details><summary data-i18n="q1.q">Apakah KangEdit gratis?</summary><div class="ans"><p data-i18n="q1.a">Ya, gratis untuk diunduh dan dipakai, tanpa watermark, dan kode sumbernya ada di GitHub. Lihat <a href="https://github.com/kloworizer/kangedit/blob/stable/LICENSE">lisensinya</a> untuk detail penggunaan ulang kode.</p></div></details>
+        <details><summary data-i18n="q2.q">Apakah butuh koneksi internet?</summary><div class="ans"><p data-i18n="q2.a">Hanya sekali di awal untuk mengunduh FFmpeg dan model suara. Setelah itu analisis, caption dan ekspor berjalan sepenuhnya offline.</p></div></details>
+        <details><summary data-i18n="q3.q">Apakah caption bahasa Indonesia didukung?</summary><div class="ans"><p data-i18n="q3.a">Ya. Whisper dan Qwen3-ASR sama-sama mengenali bahasa Indonesia, dan Auto Edit mengenali salam pembuka dan penutup seperti "assalamualaikum" atau "sampai jumpa". Kata pengisi seperti "eh" dan "anu" juga bisa dihapus otomatis.</p></div></details>
+        <details><summary data-i18n="q4.q">Apakah wajib punya kartu grafis?</summary><div class="ans"><p data-i18n="q4.a">Tidak. Preview dan ekspor berjalan di CPU. GPU dengan encoder video membuat ekspor dan proxy lebih cepat, dan kartu NVIDIA dengan CUDA mempercepat caption.</p></div></details>
+        <details><summary data-i18n="q5.q">Apakah bisa di Mac Intel?</summary><div class="ans"><p data-i18n="q5.a">Build siap pakai hanya untuk Apple silicon dengan macOS 14 atau lebih baru. Di Mac Intel kamu bisa menjalankannya dari kode sumber dengan Python 3.10 atau lebih baru.</p></div></details>
+        <details><summary data-i18n="q6.q">Bisakah saya mengubah hasil Auto Edit?</summary><div class="ans"><p data-i18n="q6.a">Tentu. Auto Edit hanya titik awal: trim, slip, atur ulang, ganti hook, warna, caption dan suara semuanya bisa diubah dan di-undo. Riwayat versi menyimpan edit sebelumnya.</p></div></details>
+        <details><summary data-i18n="q7.q">Footage 4K atau H.265 10-bit berat diputar?</summary><div class="ans"><p data-i18n="q7.a">Preview memakai dekoder GPU untuk footage besar, dan kamu bisa membuat proxy H.264 untuk edit yang lebih ringan. Ekspor tetap memakai file asli.</p></div></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section>
+    <div class="wrap">
+      <div class="cta">
+        <div class="orb green float" style="width:110px;height:110px;left:6%;top:-30px;opacity:.85"></div>
+        <div class="orb blue float slow" style="width:150px;height:150px;right:-40px;bottom:-60px;opacity:.85"></div>
+        <div class="orb violet float" style="width:60px;height:60px;left:14%;bottom:24px;opacity:.85"></div>
+        <h2><span data-i18n="cta.a">Edit video pertamamu</span> <span class="grad-text" data-i18n="cta.b">hari ini</span></h2>
+        <p data-i18n="cta.p">Unduh KangEdit, masukkan rekamanmu, dan biarkan Auto Edit menyusun draf pertamanya.</p>
+        <div class="downloads">
+          <a class="btn primary" href="https://github.com/kloworizer/kangedit/releases/latest"><svg><use href="#i-down"/></svg><span data-i18n="cta.dl">Unduh gratis</span></a>
+          <a class="btn" href="https://github.com/kloworizer/kangedit"><svg><use href="#i-gh"/></svg><span data-i18n="cta.src">Lihat kode sumber</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
 
 <footer>
   <div class="wrap">
-    <span>KangEdit · free and open source</span>
-    <span><a href="https://github.com/kloworizer/kangedit">Source</a> · <a href="https://github.com/kloworizer/kangedit/blob/stable/CHANGELOG.md">Changelog</a> · <a href="https://github.com/kloworizer/kangedit/blob/stable/LICENSE">License</a> · <a href="https://github.com/kloworizer/kangedit/issues">Report a problem</a></span>
+    <span data-i18n="ft.tag">KangEdit · gratis, kode sumber terbuka di GitHub</span>
+    <span class="flinks">
+      <a href="https://github.com/kloworizer/kangedit" data-i18n="ft.src">Kode sumber</a>
+      <a href="https://github.com/kloworizer/kangedit/blob/stable/CHANGELOG.md" data-i18n="ft.log">Catatan rilis</a>
+      <a href="https://github.com/kloworizer/kangedit/blob/stable/LICENSE" data-i18n="ft.lic">Lisensi</a>
+      <a href="https://github.com/kloworizer/kangedit/issues" data-i18n="ft.bug">Laporkan masalah</a>
+    </span>
   </div>
 </footer>
 
 <script>
+  // English strings; the Indonesian ones are the page's own text (the default), kept aside on the first switch.
+  var EN = {
+    "nav.features": "Features", "nav.autoedit": "Auto Edit", "nav.how": "How it works", "nav.export": "Export",
+    "nav.req": "Requirements", "nav.faq": "FAQ",
+    "hero.badge": "Free · runs offline · Windows, macOS, Linux",
+    "hero.h1a": "A video editor that", "hero.h1b": "edits for you",
+    "hero.lead": "KangEdit analyses your footage, picks the best moments and builds a short-form or long-form edit in seconds. Then you fine-tune the cut, colour, captions and sound, and export.",
+    "hero.release": "Latest release on",
+    "hero.t1": "Your footage stays on your computer", "hero.t2": "Captions in many languages", "hero.t3": "Source on GitHub",
+    "hero.shotAlt": "KangEdit: the media list, the viewer with a caption, the timeline and the Refine panel",
+    "hero.fc1a": "Best moments found", "hero.fc1b": "faces, laughter, movement", "hero.fc2a": "Offline captions",
+    "stats.offline": "offline on your computer", "stats.fps": "analysis of every clip", "stats.ai": "small AI models, on the CPU",
+    "stats.log": "camera log profiles", "stats.cap": "caption templates", "stats.lufs": "LUFS, ready to post",
+    "feat.kicker": "Features", "feat.h2": "Everything an edit needs",
+    "feat.sub": "For a vlog, a trip, a podcast, a game or a talking video: done for you, and every part of it yours to change.",
+    "f1.t": "Auto Edit", "f1.d": "Picks the sharpest, liveliest moments of all your footage (faces, movement, people laughing or cheering) and lays them out for Reels / Shorts / TikTok or a long YouTube video, with transitions and J / L cuts.",
+    "f2.t": "Hooks that grab", "f2.d": "Opens on the strongest moments of the whole video. Pick them from thumbnails, in the order you tick them, or let it choose.",
+    "f3.t": "Offline captions", "f3.d": "Speech recognition on your computer with Whisper or Qwen3-ASR, cleaned of road and wind noise. One-click templates that follow every trim, synced to the speech, coloured per speaker.",
+    "f4.t": "Gaming moments", "f4.d": "Finds the plays in a game recording (a kill, a multi-kill or a teamfight, a gacha reveal) in any game, labels them, and lays out your facecam on top of the game.",
+    "f5.t": "Colour", "f5.d": "Auto colour per clip, camera log profiles and official LUTs, grading, and a look that matches across clips.",
+    "f6.t": "Movement", "f6.d": "Dynamic zoom and pan (on a face too), and stabilisation for shaky handheld shots, in the preview as in the export.",
+    "f7.t": "Sound", "f7.d": "Voice clean-up of noise and wind, music that ducks under speech, sound effects, even loudness, and fades.",
+    "f8.t": "Edit by what is said", "f8.d": "The transcript of the whole edit: find a clip by its words, drag it to reorder, slip a clip to a sentence, or edit from a script.",
+    "f9.t": "Multicam and layers", "f9.d": "Several cameras synced by their sound, picture in picture, chroma key, titles and video layers.",
+    "f10.t": "Thumbnails and chapters", "f10.d": "A thumbnail maker from the edit's best stills (lively, sharp, with a face) with big text, plus YouTube chapter lines ready to copy.",
+    "f11.t": "Highlight reel &amp; speed", "f11.d": "Turn a long edit into a 30, 45 or 60 s vertical reel. Slow motion, fast motion and speed ramp templates such as Hero moment and Bullet time.",
+    "f12.t": "Ready to post", "f12.d": "Presets for YouTube, Shorts, Reels and TikTok with the right loudness, several aspect ratios in one go, and a check before export.",
+    "ae.kicker": "Auto Edit", "ae.h2": "From a pile of footage to a finished edit, in seconds",
+    "ae.body": "Every clip is analysed four times a second for sharpness, motion and shake, exposure, colour, faces, audio loudness and scene cuts. The best candidates are scored and laid out as a story.",
+    "ae.l1": "<span><b>Story order.</b> Clips are ordered by recording time, then by file name (C0002 before C0013).</span>",
+    "ae.l2": "<span><b>Scenes.</b> A gap of more than 30 minutes or more than 1 km starts a new scene, opened with a scenic shot.</span>",
+    "ae.l3": "<span><b>Opening &amp; closing.</b> Finds the greeting and the sign-off in English and Indonesian: \"hello…\", \"welcome…\", \"thanks for watching\"…</span>",
+    "ae.l4": "<span><b>Finishing.</b> Whole sentences, cuts between words, cuts on the beat, fillers (\"um\") removed, and varied shot sizes.</span>",
+    "ae.l5": "<span><b>Shorter / longer.</b> Rebuild the edit 25% shorter or longer in one click.</span>",
+    "ae.shortT": "Short-form", "ae.longT": "Long-form", "ae.len": "Length", "ae.cuts": "Cuts", "ae.order": "Order",
+    "ae.shortLen": "about 30 s", "ae.shortCuts": "1.2–3 s", "ae.shortOrder": "Hook first",
+    "ae.longLen": "1–20 min", "ae.longCuts": "4–10 s", "ae.longOrder": "Story order",
+    "ae.custom": "Or choose <b>Custom</b> and set everything yourself. There's also 📜 <b>Script</b> mode: paste your script and each line is found in the footage's transcripts.",
+    "ai.kicker": "Smarter analysis", "ai.h2": "Small AI that sees and hears, without the internet",
+    "ai.body": "Two small neural networks run offline on the CPU (on by default). Turn them off on a slow computer for the lighter analysis.",
+    "ai.l1": "<span><b>MobileNetV2</b> describes what each second shows, so the same view filmed from the side, zoomed or darker is recognised, even across cameras.</span>",
+    "ai.l2": "<span><b>YAMNet</b> hears speech, laughter, cheering and applause, crowds, music, wind, nature and vehicles. Moments people enjoyed score higher, wind on the microphone lower.</span>",
+    "ai.l3": "<span><b>Quick first look.</b> New footage is first looked at from its keyframes only, many times faster: thumbnails, scrubbing, bins and even Auto Edit work at once.</span>",
+    "ai.c1": "Sees the picture", "ai.c2": "Hears the scene", "ai.c3t": "Multi-lane", "ai.c3": "Several CPU lanes plus the GPU video decoder",
+    "ai.c4t": "Reuse rules", "ai.c4": "Segments never overlap, near-identical shots rejected",
+    "how.kicker": "How it works", "how.h2": "Four steps, top to bottom of the window", "how.sub": "No need to learn a complicated timeline first.",
+    "s1.t": "Import", "s1.d": "Drop in your videos and photos. KangEdit analyses them in the background and can transcribe their speech.",
+    "s2.t": "Auto Edit", "s2.d": "Choose short-form or long-form and what to prioritise. The edit is built in seconds; ask for shorter, longer or other moments.",
+    "s3.t": "Refine", "s3.d": "Trim, slip and reorder on the timeline; colour, captions, text and sound in the Refine panel. Everything can be undone.",
+    "s4.t": "Export", "s4.d": "9:16, 16:9, 1:1 and more, H.264, H.265 or ProRes, on the graphics card when it can.",
+    "cap.kicker": "Captions", "cap.h2": "Automatic captions, offline",
+    "cap.body": "Offline speech recognition with faster-whisper or Qwen3-ASR 1.7B, more accurate than Whisper large-v3 in many languages, Indonesian and English among them. The <b>Auto</b> model picks the best fit for your computer.",
+    "cap.l1": "<span><b>Noisy sound?</b> Road, engine, wind or crowd noise is cleaned before transcribing.</span>",
+    "cap.l2": "<span><b>Speaker colours</b> for podcasts and interviews, told apart offline by pitch and voice colour.</span>",
+    "cap.l3": "<span><b>Auto-sync</b> matches the word timings to the voice, up to 2 s either way.</span>",
+    "cap.l4": "<span><b>Output</b>: burned in, saved as <code>.srt</code>, or both.</span>",
+    "cap.oneword": "One word at a time", "cap.mockA": "HELLO EVERYONE,", "cap.mockB": "AND", "cap.mockC": "WELCOME!",
+    "cap.mockNote": "Word animations (karaoke, highlight, pop, reveal) look the same in the viewer and in the export.",
+    "col.kicker": "Colour", "col.h2": "Log footage to Rec.709, with the cameras' own curves",
+    "col.body": "The camera is identified from the file's metadata, and its log profile from the metadata or the picture. Use the built-in curves, the makers' official conversion LUTs, or your own <code>.cube</code> LUTs as a creative look.",
+    "col.l1": "<span><b>Auto</b> sets exposure, white balance and contrast; <i>Auto colour all clips</i> runs in the background.</span>",
+    "col.l2": "<span><b>The industry's processing order</b>: log curve → exposure &amp; WB in linear light → contrast, shadows, highlights.</span>",
+    "col.l3": "<span><b>Preview and export</b> share the same colour math.</span>",
+    "col.lut": "+ official LUTs (DJI D-Log M, Sony, Panasonic…)",
+    "uc.kicker": "Who it's for", "uc.h2": "Made for creators who want to post fast",
+    "uc1.t": "Vlogs &amp; travel", "uc1.d": "Days of footage from phones, cameras, drones and action cams laid out by day and place, each scene opened with a scenic shot.",
+    "uc2.t": "Podcasts &amp; interviews", "uc2.d": "Multicam synced by sound, captions coloured per speaker, and voice clean-up.",
+    "uc3.t": "Gaming", "uc3.d": "Mobile Legends, Valorant, Counter-Strike, gacha: the best plays picked, DOUBLE KILL labels added, the facecam laid out.",
+    "uc4.t": "Talking &amp; tutorial videos", "uc4.d": "Edit from a script, remove \"um\" and long pauses, cut on whole sentences, and automatic YouTube chapters.",
+    "ex.kicker": "Export", "ex.h2": "One edit, ready for every platform",
+    "ex.sub": "Presets set the frame, the format and a −14 LUFS loudness target, with peaks under −1.5 dBTP. Export extra 16:9, 9:16, 1:1 or 4:5 versions in one go.",
+    "ex.th1": "Preset", "ex.th2": "Frame", "ex.th3": "Loudness",
+    "ex.c1t": "Codecs", "ex.c1": "H.264, H.265 or ProRes 422 HQ, at 720p, 1080p, 1440p or 4K.",
+    "ex.c2t": "GPU encoding", "ex.c2": "NVIDIA NVENC, AMD AMF, Intel Quick Sync, Apple VideoToolbox, falling back to the CPU automatically.",
+    "ex.c3t": "Check before export", "ex.c3": "A list of what could spoil the export, each with a fix: a missing file, missing music, captions without transcripts…",
+    "ex.c4t": "Version history", "ex.c4": "Earlier versions of a project are kept on each save and before Auto Edit replaces the timeline. Restore one any time.",
+    "pv.h2": "Your footage stays on your computer",
+    "pv.p": "Analysis, speech recognition and rendering all run offline. The internet is used only to download FFmpeg and a speech model the first time, and for updates and the optional sound-effect search, NCS music and official LUTs.",
+    "pv.a": "No account", "pv.b": "No cloud upload", "pv.c": "No watermark",
+    "rq.kicker": "Requirements", "rq.h2": "Runs on an ordinary computer", "rq.sub": "No graphics card needed: preview and export work on the CPU.",
+    "rq.win": "Windows 10 (1809) or 11, 64-bit", "rq.mac": "macOS 14 Sonoma or newer, Apple silicon (M1 or newer)",
+    "rq.linux": "x86-64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 or newer)",
+    "rq.cpuT": "CPU and memory", "rq.cpu": "4 cores and 8 GB; 8 cores and 16 GB or more for 4K or long edits",
+    "rq.gpuT": "Graphics", "rq.gpu": "Any. A GPU with a video encoder (NVIDIA, AMD, Intel, Apple) makes exports faster; an NVIDIA card with CUDA makes captions faster",
+    "rq.diskT": "Disk", "rq.disk": "About 1.5 GB for the app, FFmpeg and the speech model, plus room for the cache and exports",
+    "in.kicker": "Install", "in.h2": "Up and running in minutes",
+    "in.1t": "1. Download", "in.1d": "Get the archive for your system from <a href=\"https://github.com/kloworizer/kangedit/releases/latest\">Releases</a>. No Python needed. <code>SHA256SUMS.txt</code> lists the checksums.",
+    "in.2t": "2. Extract &amp; run", "in.2d": "Start <code>KangEdit.exe</code>, <code>KangEdit.app</code> or <code>KangEdit/KangEdit</code>. The builds aren't code-signed: on Windows choose <i>More info → Run anyway</i>; on macOS right-click → <i>Open</i> the first time.",
+    "in.3t": "Or from source", "in.3d": "Needs Python 3.10 or newer. The launcher sets up the rest, FFmpeg included.",
+    "faq.h2": "Frequently asked questions",
+    "q1.q": "Is KangEdit free?", "q1.a": "Yes, free to download and use, with no watermark, and its source is on GitHub. See the <a href=\"https://github.com/kloworizer/kangedit/blob/stable/LICENSE\">license</a> for reusing the code.",
+    "q2.q": "Does it need an internet connection?", "q2.a": "Only once, to download FFmpeg and the speech model. After that analysis, captions and export run fully offline.",
+    "q3.q": "Which languages do captions support?", "q3.a": "Whisper and Qwen3-ASR recognise many languages, Indonesian and English among them, and Auto Edit recognises greetings and sign-offs in both. Fillers such as \"um\" can be removed automatically.",
+    "q4.q": "Do I need a graphics card?", "q4.a": "No. Preview and export work on the CPU. A GPU with a video encoder makes exports and proxies faster, and an NVIDIA card with CUDA makes captions faster.",
+    "q5.q": "Does it run on Intel Macs?", "q5.a": "The ready-made build is for Apple silicon with macOS 14 or newer. On an Intel Mac you can run it from source with Python 3.10 or newer.",
+    "q6.q": "Can I change what Auto Edit made?", "q6.a": "Of course. Auto Edit is a starting point: trims, slips, order, hook, colour, captions and sound can all be changed and undone. Version history keeps earlier edits.",
+    "q7.q": "Is 4K or 10-bit H.265 footage heavy to play?", "q7.a": "The preview decodes big footage on the graphics card, and you can make H.264 proxies for lighter editing. Exports still use the originals.",
+    "cta.a": "Edit your first video", "cta.b": "today", "cta.p": "Download KangEdit, drop in your footage, and let Auto Edit build the first draft.",
+    "cta.dl": "Download free", "cta.src": "View the source",
+    "ft.tag": "KangEdit · free, source on GitHub", "ft.src": "Source", "ft.log": "Changelog", "ft.lic": "License", "ft.bug": "Report a problem",
+    "doc.title": "KangEdit · A video editor that edits for you",
+    "ver.v": "Version ", "ver.new": "what's new"
+  };
+  var ID = { "doc.title": document.title, "ver.v": "Versi ", "ver.new": "apa yang baru" };
+  var lang = "id";
+  var release = null;
+
+  function t(key) { return (lang === "en" ? EN : ID)[key]; }
+
+  function setLang(next) {
+    if (next !== "en") next = "id";
+    document.querySelectorAll("[data-i18n]").forEach(function (el) {
+      var k = el.getAttribute("data-i18n");
+      if (!(k in ID)) ID[k] = el.innerHTML;
+      var s = next === "en" ? EN[k] : ID[k];
+      if (s != null) el.innerHTML = s;
+    });
+    document.querySelectorAll("[data-i18n-alt]").forEach(function (el) {
+      var k = el.getAttribute("data-i18n-alt");
+      if (!(k in ID)) ID[k] = el.alt;
+      el.alt = next === "en" ? EN[k] : ID[k];
+    });
+    lang = next;
+    document.documentElement.lang = next;
+    document.title = t("doc.title");
+    document.querySelectorAll(".lang button").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.lang === next));
+    });
+    showVersion();
+    try { localStorage.setItem("kangedit-lang", next); } catch (e) {}
+  }
+
+  function showVersion() {
+    if (!release) return;
+    var v = document.getElementById("version");
+    v.textContent = "";
+    v.appendChild(document.createTextNode(t("ver.v") + release.tag_name.replace(/^v/, "") + " · "));
+    var link = document.createElement("a");
+    link.href = release.html_url;
+    link.textContent = t("ver.new");
+    v.appendChild(link);
+  }
+
+  document.querySelectorAll(".lang button").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.dataset.lang); });
+  });
+
+  // Indonesian unless the URL (?lang=en) or an earlier choice says otherwise.
+  (function () {
+    var q = (location.search.match(/[?&]lang=(id|en)\b/) || [])[1];
+    var saved = null;
+    try { saved = localStorage.getItem("kangedit-lang"); } catch (e) {}
+    var pick = q || saved;
+    if (pick === "en") setLang("en");
+  })();
+
+  // A little waveform under the caption mock-up.
+  (function () {
+    var w = document.getElementById("wave");
+    for (var i = 0; i < 48; i++) {
+      var bar = document.createElement("i");
+      bar.style.height = (20 + Math.round(80 * Math.abs(Math.sin(i * 0.7) * Math.cos(i * 0.23)))) + "%";
+      w.appendChild(bar);
+    }
+  })();
+
   // The download buttons point straight at the latest release's files (else the Releases page), the one for
   // this computer first.
   (function () {
@@ -182,6 +873,7 @@
     btns.forEach(function (a) {
       if (a.dataset.os === mine) { a.classList.add("primary"); box.insertBefore(a, box.firstChild); }
     });
+    if (!mine) btns[0].classList.add("primary");
     fetch("https://api.github.com/repos/kloworizer/kangedit/releases/latest")
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (rel) {
@@ -193,13 +885,8 @@
             a.title = asset.name + " (" + Math.round(asset.size / 1e6) + " MB)";
           }
         });
-        var v = document.getElementById("version");
-        v.textContent = "";
-        v.appendChild(document.createTextNode("Version " + rel.tag_name.replace(/^v/, "") + " · "));
-        var link = document.createElement("a");
-        link.href = rel.html_url;
-        link.textContent = "what's new";
-        v.appendChild(link);
+        release = rel;
+        showVersion();
       })
       .catch(function () {});
   })();
